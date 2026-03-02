@@ -1,0 +1,310 @@
+const Invitation = require('../models/invitation');
+const ApplyCampaing = require('../models/applyCampaign');
+const Campaign      = require('../models/campaign');
+const Influencer    = require('../models/influencer');
+const Brand = require('../models/brand');
+
+/**
+ * Create a new Invitation
+ * POST /api/invitations
+ * Body: { brandId, influencerId, campaignId, isAccepted }
+ */
+exports.createInvitation = async (req, res) => {
+  try {
+    const { brandId, influencerId, campaignId, isAccepted = 0,isInvited=1 , isContracted=0} = req.body;
+
+    // 1️⃣ Prevent duplicates
+    const existing = await Invitation.findOne({ influencerId, campaignId });
+    if (existing) {
+      return res
+        .status(400)
+        .json({ message: 'An invitation for this influencer and campaign already exists' });
+    }
+    // 2️⃣ Load Brand & Campaign
+    const brand    = await Brand.findOne({ brandId });
+    const campaign = await Campaign.findOne({ campaignsId: campaignId });
+    if (!brand)    return res.status(404).json({ message: 'Brand not found' });
+    if (!campaign) return res.status(404).json({ message: 'Campaign not found' });
+
+    // 3️⃣ Create with isInvited = 1
+    const invitation = new Invitation({
+      brandId,
+      influencerId,
+      campaignId,
+
+      // new field:
+      isInvited,
+      isAccepted,
+      isContracted,
+      campaign: {
+        campaignsId:          campaign.campaignsId,
+        brandName:            campaign.brandName,
+        productOrServiceName: campaign.productOrServiceName,
+        description:          campaign.description,
+        budget:               campaign.budget,
+        timeline:             campaign.timeline
+      }
+    });
+
+    await invitation.save();
+    res.status(201).json(invitation);
+  } catch (err) {
+    if (err.code === 11000) {
+      return res
+        .status(400)
+        .json({ message: 'Duplicate invitation not allowed' });
+    }
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * Get all Invitations
+ * GET /api/invitations
+ * Query: search, sortBy, page, limit
+ */
+exports.getInvitations = async (req, res) => {
+  try {
+    let {
+      influencerId,
+      search     = '',
+      sortBy     = 'createdAt:desc',
+      page       = 1,
+      limit      = 10
+    } = req.body;
+
+    // influencerId is required
+    if (!influencerId) {
+      return res
+        .status(400)
+        .json({ message: 'influencerId is required' });
+    }
+
+    page  = parseInt(page,  10);
+    limit = parseInt(limit, 10);
+
+    // Build filter: only this influencer, plus optional text search
+    const searchRegex = new RegExp(search, 'i');
+    const filter = {
+      influencerId,
+      $or: [
+        { 'brand.name': searchRegex },
+        { 'campaign.productOrServiceName': searchRegex }
+      ]
+    };
+
+    // Build sort
+    const [field, order] = sortBy.split(':');
+    const sort = { [field]: order === 'desc' ? -1 : 1 };
+
+    // Query
+    const total = await Invitation.countDocuments(filter);
+    const invitations = await Invitation.find(filter)
+      .sort(sort)
+      .skip((page - 1) * limit)
+      .limit(limit);
+
+    res.json({
+      data: invitations,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+;
+
+/**
+ * Accept Invitation
+ * PATCH /api/invitations/accept
+ * Body: { influencerId, campaignId }
+ */
+exports.acceptInvitation = async (req, res) => {
+  const { invitationId } = req.body;
+  if (!invitationId) {
+    return res.status(400).json({ message: 'invitationId is required' });
+  }
+
+  try {
+    // 1️⃣ Find the invitation
+    const invitation = await Invitation.findOne({ invitationId });
+    if (!invitation) {
+      return res.status(404).json({ message: 'Invitation not found' });
+    }
+
+    // 2️⃣ Prevent re-accept
+    if (invitation.isAccepted === 1) {
+      return res.status(400).json({ message: 'Invitation already accepted' });
+    }
+
+    // 3️⃣ Mark accepted
+    invitation.isAccepted = 1;
+    await invitation.save();
+
+    // ── Mirror applyToCampaign logic ─────────────────────────────
+    const { campaignId, influencerId } = invitation;
+
+    // 0) Load influencer & quota feature
+    const inf = await Influencer.findOne({ influencerId });
+    if (!inf) {
+      // Log but continue: accept still successful
+      console.warn(`Influencer ${influencerId} not found when applying.`);
+    } else {
+      const applyFeature = inf.subscription.features.find(f => f.key === 'apply_to_campaigns_quota');
+      if (applyFeature && (applyFeature.limit === 0 || applyFeature.used < applyFeature.limit)) {
+        // bump usage
+        applyFeature.used += 1;
+        await inf.save();
+
+        // record the application
+        let record = await ApplyCampaing.findOne({ campaignId });
+        const name = inf.name;
+        if (!record) {
+          record = new ApplyCampaing({
+            campaignId,
+            applicants: [{ influencerId, name }]
+          });
+        } else if (!record.applicants.some(a => a.influencerId === influencerId)) {
+          record.applicants.push({ influencerId, name });
+        }
+        await record.save();
+
+        // sync applicantCount back to Campaign
+        const applicantCount = record.applicants.length;
+        await Campaign.findOneAndUpdate(
+          { campaignsId: campaignId },
+          { applicantCount }
+        );
+      }
+    }
+
+    // 4️⃣ Respond with updated invitation
+    return res.status(200).json({
+      message: 'Invitation accepted and application recorded',
+      invitation
+    });
+
+  } catch (err) {
+    console.error('Error in acceptInvitation:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+
+exports.getActiveCampaigns = async (req, res) => {
+  try {
+    const {
+      influencerId,
+      brandId,         // optional → if present, restrict to that brand
+      search = '',
+      page   = 1,
+      limit  = 10
+    } = req.body;
+
+    if (!influencerId) {
+      return res.status(400).json({ message: 'influencerId is required' });
+    }
+
+    const pageNum = Math.max(1, parseInt(page, 10));
+    const limNum  = Math.max(1, parseInt(limit, 10));
+    const skip    = (pageNum - 1) * limNum;
+
+    /* ---------------------------
+       1) Build campaign filter
+    ---------------------------- */
+    const campFilter = { isActive: 1 };
+    if (brandId) campFilter.brandId = brandId;
+
+    if (search.trim()) {
+      const term = search.trim();
+      const regex = new RegExp(term, 'i');
+      const num = Number(term);
+      const or = [
+        { brandName: regex },
+        { productOrServiceName: regex },
+        { description: regex }
+      ];
+      if (!isNaN(num)) or.push({ budget: { $lte: num } });
+      campFilter.$or = or;
+    }
+
+    /* ---------------------------
+       2) Count + fetch campaigns
+    ---------------------------- */
+    const [total, campaigns] = await Promise.all([
+      Campaign.countDocuments(campFilter),
+      Campaign.find(campFilter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limNum)
+        .populate('interestId', 'name')
+        .lean()
+    ]);
+
+    if (!campaigns.length) {
+      return res.json({
+        meta: { total: 0, page: pageNum, limit: limNum, totalPages: 0 },
+        campaigns: []
+      });
+    }
+
+    const campaignIds = campaigns.map(c => c.campaignsId);
+
+    /* ---------------------------
+       3) Invitations & applications
+    ---------------------------- */
+    const [invitations, applyRows] = await Promise.all([
+      Invitation.find({
+        influencerId,
+        campaignId: { $in: campaignIds }
+      }).lean(),
+      ApplyCampaing.find({
+        campaignId: { $in: campaignIds },
+        'applicants.influencerId': influencerId
+      }, 'campaignId').lean()
+    ]);
+
+    const invitedMap = new Map();
+    invitations.forEach(inv => {
+      // any invitation row (whether isInvited 0/1) will be merged, but flag only if 1
+      invitedMap.set(inv.campaignId, inv);
+    });
+
+    const appliedIds = new Set(applyRows.map(a => a.campaignId));
+
+    /* ---------------------------
+       4) Merge + mark isInvited
+    ---------------------------- */
+    const out = campaigns.map(camp => {
+      const cid = camp.campaignsId;
+      const inv = invitedMap.get(cid) || null;
+      const alreadyApplied = appliedIds.has(cid);
+
+      return {
+        ...camp,
+        invitation: inv,
+        // final flag
+        isInvited: (inv?.isInvited === 1 || alreadyApplied) ? 1 : 0
+      };
+    });
+
+    return res.json({
+      meta: {
+        total,
+        page: pageNum,
+        limit: limNum,
+        totalPages: Math.ceil(total / limNum)
+      },
+      campaigns: out
+    });
+
+  } catch (err) {
+    console.error('getActiveCampaigns error:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
