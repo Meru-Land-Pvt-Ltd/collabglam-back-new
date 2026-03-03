@@ -1,1505 +1,982 @@
-// controllers/brandController.js
-require('dotenv').config();
-const mongoose = require('mongoose');
-const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
-const multer = require('multer');
-const { uploadToGridFS, buildFileUrl, getFileMetaById } = require('../utils/gridfs');
+// controllers/brandAuth.controller.js
+const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 
-const Brand = require('../models/brand');
-const Influencer = require('../models/influencer'); // needed by requestOtp
-const { EmailThread } = require('../models/email');
-const Country = require('../models/country');
-const Milestone = require('../models/milestone');
-const { getFreePlan, computeExpiry } = require('../utils/subscriptionHelper');
-const VerifyEmail = require('../models/verifyEmail');
-const Category = require('../models/categories');        // DB-backed categories
-const BusinessType = require('../models/businessType');  // DB-backed business types
-const { escapeRegExp } = require('../utils/searchTokens'); // for exact match, case-insensitive
-const {
-  consumeWithCredits,
-  requireBrandFeature,
-  readAdvancedFiltersLevel,
-} = require('../utils/brandFeatures');
+// ---- tolerant imports (works if module.exports = Model OR exports.BrandModel = ...) ----
+const BrandModelImport = require("../models/brand");
+const BrandModel = BrandModelImport.BrandModel || BrandModelImport;
 
-// ---- helpers ----
-const emailRegex = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
-const exactEmailRegex = (email) => new RegExp(`^${escapeRegExp(String(email).trim())}$`, 'i');
-const toNormEmail = (e) => String(e || '').trim().toLowerCase();
+const VerifyOtpModelImport = require("../models/verifyOtp");
+const VerifyOtpModel = VerifyOtpModelImport.VerifyOtpModel || VerifyOtpModelImport;
 
-const COMPANY_SIZE_ENUM = ['1-10', '11-50', '51-200', '200+'];
+const InfluencerModelImport = require("../models/influencer");
+const InfluencerModel = InfluencerModelImport.InfluencerModel || InfluencerModelImport;
 
-// ---- simple normalizers ----
-const normalizeUrl = (u) => {
-  const s = String(u || '').trim();
-  if (!s) return undefined;
-  return /^https?:\/\//i.test(s) ? s : `https://${s}`;
+const OtpTemplateImport = require("../template/otpTemplate");
+const buildOtpEmailTemplate = OtpTemplateImport.buildOtpEmailTemplate || OtpTemplateImport;
+
+const ResetOtpTemplateImport = require("../template/resetOtp");
+const resetOtpEmailTemplate = ResetOtpTemplateImport.resetOtpEmailTemplate || ResetOtpTemplateImport;
+
+const EmailServiceImport = require("../services/emailService");
+const sendEmail = EmailServiceImport.sendEmail || EmailServiceImport;
+
+const ApiResponseImport = require("../core/http/ApiResponse");
+const ApiResponse = ApiResponseImport.ApiResponse || ApiResponseImport;
+
+const HttpStatusImport = require("../core/http/HttpStatus");
+const HttpStatus = HttpStatusImport.HttpStatus || HttpStatusImport;
+
+const ApiErrorImport = require("../core/http/ApiError");
+const ApiError = ApiErrorImport.ApiError || ApiErrorImport;
+const ValidationError = ApiErrorImport.ValidationError;
+const ConflictError = ApiErrorImport.ConflictError;
+const InternalError = ApiErrorImport.InternalError;
+const NotFoundError = ApiErrorImport.NotFoundError;
+
+// ✅ Local fallback (if your ErrorCodes module differs)
+const ErrorCodes = {
+  AUTH_INVALID_TOKEN: "AUTH_INVALID_TOKEN",
+  OTP_RATE_LIMIT: "OTP_RATE_LIMIT",
+  OTP_DAILY_LIMIT: "OTP_DAILY_LIMIT",
+  SIGNIN_RATE_LIMIT: "SIGNIN_RATE_LIMIT",
+  SIGNIN_DAILY_LIMIT: "SIGNIN_DAILY_LIMIT",
 };
-const normalizeInsta = (h) => {
-  const s = String(h || '').trim().replace(/^@/, '').toLowerCase();
-  return s || undefined;
-};
 
-const BASE_API_URL = process.env.INTERNAL_API_URL || 'http://localhost:4000';
-const WELCOME_EMAIL_API_URL = `${BASE_API_URL}/emails/send-welcome`;
-
-// ---- env / mailer ----
-const SMTP_HOST = process.env.SMTP_HOST;
-const SMTP_PORT = parseInt(process.env.SMTP_PORT || '587', 10);
-const SMTP_USER = process.env.SMTP_USER;
-const SMTP_PASS = process.env.SMTP_PASS;
-const JWT_SECRET = process.env.JWT_SECRET;
-
-const MAIL_FROM_NAME = process.env.MAIL_FROM_NAME || 'CollabGlam';
-const PRODUCT_NAME = process.env.PRODUCT_NAME || 'CollabGlam';
-
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: SMTP_PORT,
-  secure: SMTP_PORT === 465,
-  auth: { user: SMTP_USER, pass: SMTP_PASS },
-});
-
-// ---------- Pretty HTML OTP templates (orange/yellow accents) ----------
-
-const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const PREHEADER = (t) => `<div style="display:none;opacity:0;visibility:hidden;overflow:hidden;height:0;width:0;mso-hide:all;">${esc(t)}</div>`;
-
-// Email-safe design tokens (inline CSS)
-const WRAP = 'max-width:640px;margin:0 auto;padding:0;background:#f7fafc;color:#0f172a;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
-const SHELL = 'padding:24px;';
-const CARD = 'border-radius:16px;background:#ffffff;border:1px solid #e5e7eb;overflow:hidden;box-shadow:0 8px 20px rgba(17,24,39,0.06);';
-const BRAND_BAR = 'padding:18px 20px;background:#ffffff;color:#111827;border-bottom:1px solid #FFE8B7;';
-const BRAND_NAME = 'font-weight:900;font-size:15px;letter-spacing:.2px;';
-const ACCENT_BAR = 'height:4px;background:linear-gradient(90deg,#FF6A00 0%, #FF8A00 30%, #FF9A00 60%, #FFBF00 100%);';
-const HDR = 'padding:20px 24px 6px 24px;font-weight:800;font-size:20px;color:#111827;';
-const SUBHDR = 'padding:0 24px 10px 24px;color:#374151;font-size:13px;';
-const BODY = 'padding:0 24px 24px 24px;';
-const FOOT = 'padding:14px 24px;color:#6b7280;font-size:12px;border-top:1px solid #f1f5f9;background:#fcfcfd;';
-const BTN = 'display:inline-block;background:#111827;color:#ffffff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800;';
-const SMALL = 'color:#6b7280;font-size:12px;';
-
-const CODE_WRAPPER = 'margin-top:12px;margin-bottom:6px;';
-const CODE = [
-  'display:inline-block',
-  'font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace',
-  'font-weight:900',
-  'font-size:26px',
-  'letter-spacing:6px',
-  'color:#111827',
-  'background:#FFF7E6',
-  'border:1px solid #FFE2B3',
-  'border-radius:14px',
-  'padding:14px 18px',
-].join(';');
-
-function otpHtmlTemplate({
-  title = 'Your verification code',
-  subtitle = 'Use the one-time code below to continue.',
-  code,
-  minutes = 10,
-  ctaHref,
-  ctaLabel,
-  footerNote = 'If you didn’t request this, you can safely ignore this email.',
-  preheader = 'Your one-time verification code',
-}) {
-  const hasCta = Boolean(ctaHref && ctaLabel);
-  return `
- ${PREHEADER(preheader)}
-  <div style="${WRAP}">
-    <div style="${SHELL}">
-      <div style="${CARD}">
-        <div style="${BRAND_BAR}">
-          <div style="${BRAND_NAME}">${esc(PRODUCT_NAME)}</div>
-        </div>
-        <div style="${ACCENT_BAR}"></div>
-
-        <div style="${HDR}">${esc(title)}</div>
-        <div style="${SUBHDR}">${esc(subtitle)}</div>
-
-        <div style="${BODY}">
-          <div style="${CODE_WRAPPER}">
-            <span style="${CODE}">${esc(code)}</span>
-          </div>
-          <div style="${SMALL}">This code expires in ${minutes} minutes.</div>
-
-          ${hasCta ? `
-            <div style="margin-top:16px;">
-              <a href="${esc(ctaHref)}" style="${BTN}">${esc(ctaLabel)}</a>
-              <div style="${SMALL};margin-top:8px;">If the button doesn’t work, copy &amp; paste this link:<br><span style="word-break:break-all;color:#111827;">${esc(ctaHref)}</span></div>
-            </div>` : ''}
-
-        </div>
-
-        <div style="${FOOT}">
-          ${esc(footerNote)}
-        </div>
-      </div>
-    </div>
-  </div>`;
-}
-
-function otpTextFallback({ code, minutes = 10, title = 'Your verification code' }) {
-  return `${title}\n\nCode: ${code}\nThis code expires in ${minutes} minutes.\n\nIf you didn’t request this, you can ignore this email.`;
-}
-
-async function sendMail({ to, subject, html, text }) {
-  if (!to || !SMTP_HOST || !SMTP_USER) {
-    console.warn('[mailer] Missing recipient or SMTP config; skipping email');
-    return;
-  }
+// ------------------------------------------------------------------------------------
+// MODE DETECTION
+// "new" brand model = has brandName + industry fields (your new TS model)
+// "old" brand model = legacy required fields like phone/country/category, etc.
+// ------------------------------------------------------------------------------------
+const hasSchemaPath = (model, path) => {
   try {
-    await transporter.sendMail({
-      from: `"${MAIL_FROM_NAME}" <${SMTP_USER}>`,
-      to,
-      subject,
-      html,
-      text,
+    return Boolean(model?.schema?.path?.(path));
+  } catch {
+    return false;
+  }
+};
+
+const IS_NEW_BRAND_MODEL =
+  hasSchemaPath(BrandModel, "brandName") && hasSchemaPath(BrandModel, "industry");
+
+const IS_OLD_BRAND_MODEL = !IS_NEW_BRAND_MODEL;
+
+// ------------------------------------------------------------------------------------
+// CONFIG
+// New model flow: controller hashes password and stores hashed in brand.password
+// Old model flow: model likely hashes in pre-save hook => do NOT pre-hash when saving brand.password
+// ------------------------------------------------------------------------------------
+const SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS || 10);
+const OTP_TTL_MIN = Number(process.env.OTP_TTL_MINUTES || 3);
+const RESET_TTL_MIN = Number(process.env.RESET_PASSWORD_TTL_MINUTES || 15);
+
+const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+const genOtp = () => String(Math.floor(100000 + Math.random() * 900000)); // 6-digit
+const hashOtp = (email, otp) => {
+  const secret = process.env.OTP_SECRET || "dev-secret";
+  return crypto.createHash("sha256").update(`${email}:${otp}:${secret}`).digest("hex");
+};
+
+const isPasswordLenOk = (p) => {
+  const len = String(p ?? "").trim().length;
+  return len >= 8 && len <= 16;
+};
+
+async function hashPassword(password) {
+  return bcrypt.hash(password, SALT_ROUNDS);
+}
+
+function signJwt(payload) {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new InternalError("JWT_SECRET is missing in env");
+  return jwt.sign(payload, secret, { expiresIn: process.env.JWT_EXPIRES_IN ?? "7d" });
+}
+
+// ✅ Reset token with short expiry
+function signResetJwt(payload) {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new InternalError("JWT_SECRET is missing in env");
+  return jwt.sign(payload, secret, { expiresIn: `${RESET_TTL_MIN}m` });
+}
+
+function getBearerToken(req) {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith("Bearer ")) {
+    throw new ApiError({
+      status: HttpStatus.UNAUTHORIZED,
+      code: ErrorCodes.AUTH_INVALID_TOKEN,
+      message: "Missing or invalid Authorization header",
     });
-  } catch (e) {
-    console.error('[mailer] sendMail failed:', e?.message || e);
   }
+  return auth.slice("Bearer ".length).trim();
 }
 
-// ---- resolvers for DB-backed options ----
-const isObjectId = (v) => mongoose.Types.ObjectId.isValid(String(v));
+const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const exactEmailRegex = (email) => new RegExp(`^${escapeRegExp(String(email).trim())}$`, "i");
 
-async function resolveCategory(input) {
-  if (!input && input !== 0) return null;
-  const raw = String(input).trim();
+async function findBrandByEmail(email) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
 
-  // ObjectId
-  if (isObjectId(raw)) return Category.findById(raw);
-
-  // numeric 'id' field
-  if (/^\d+$/.test(raw)) {
-    return Category.findOne({ id: Number(raw) });
+  // New model usually stores lowercase -> direct match works
+  if (IS_NEW_BRAND_MODEL) {
+    return BrandModel.findOne({ email: normalizedEmail }).exec();
   }
 
-  // name (case-insensitive, exact)
-  return Category.findOne({ name: new RegExp(`^${escapeRegExp(raw)}$`, 'i') });
+  // Old model may have mixed case -> use exact case-insensitive regex
+  return BrandModel.findOne({ email: exactEmailRegex(normalizedEmail) }).exec();
 }
 
-// ---------------- File Upload (Brand Logo via GridFS) ----------------
-const logoUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
-  fileFilter: (req, file, cb) => {
-    const ok = /^(image\/png|image\/jpeg|image\/jpg|image\/webp|image\/svg\+xml)$/i.test(file.mimetype);
-    if (ok) return cb(null, true);
-    cb(new Error('Unsupported logo type'));
-  }
-});
+// ✅ expected page format: [{ question: string, answers: string[] }]
+function isQAArray(v) {
+  if (!Array.isArray(v)) return false;
 
-exports.uploadLogoMiddleware = logoUpload.single('file');
+  return v.every((item) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return false;
 
-exports.uploadLogo = async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ message: 'file is required' });
-    }
+    const q = item.question;
+    const a = item.answers;
 
-    const [saved] = await uploadToGridFS(req.file, {
-      prefix: 'brand_logo',
-      metadata: {
-        kind: 'brand_logo',
-        email: req.body?.email || undefined,
+    if (typeof q !== "string" || q.trim().length === 0) return false;
+    if (!Array.isArray(a) || a.length === 0) return false;
+    if (!a.every((x) => typeof x === "string" && x.trim().length > 0)) return false;
+
+    return true;
+  });
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+// ✅✅✅ OTP LIMITER (Signup + Forgot) stored in VerifyOtp collection
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+
+const OTP_TOTAL = 6;
+const OTP_BATCH_LIMIT = 3;
+const OTP_COOLDOWN_MIN = 15;
+const OTP_RESET_HOURS = 24;
+
+async function enforceOtpLimitByKey(email, key) {
+  const nowMs = Date.now();
+
+  const limitDoc = await VerifyOtpModel.findOneAndUpdate(
+    { email, role: "brand", key },
+    {
+      $setOnInsert: {
+        email,
+        role: "brand",
+        otp: key === "signup_limit" ? "__SIGNUP_LIMIT__" : "__FORGOT_LIMIT__",
+        status: 0,
+        userId: null,
+        docType: "limit",
+        key,
+        signupOtpSend: OTP_TOTAL,
+        signupOtpBatchCount: 0,
+        signupOtpCooldownUntil: null,
+        signupOtpResetAt: null,
       },
-      req
-    });
+    },
+    { new: true, upsert: true }
+  ).exec();
 
-    return res.status(201).json({
-      message: 'Logo uploaded',
-      fileId: saved.id,        // <-- GridFS _id as string
-      filename: saved.filename, // <-- GridFS filename
-      url: saved.url,          // optional, for immediate preview in frontend
-    });
-  } catch (err) {
-    console.error('uploadLogo error:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+  // reset after 24 hours
+  if (limitDoc.signupOtpResetAt && nowMs >= new Date(limitDoc.signupOtpResetAt).getTime()) {
+    limitDoc.signupOtpSend = OTP_TOTAL;
+    limitDoc.signupOtpBatchCount = 0;
+    limitDoc.signupOtpCooldownUntil = null;
+    limitDoc.signupOtpResetAt = null;
+    await limitDoc.save();
   }
-};
 
-async function resolveBusinessType(input) {
-  if (!input && input !== 0) return null;
-  const raw = String(input).trim();
+  // daily limit
+  if ((limitDoc.signupOtpSend ?? OTP_TOTAL) <= 0) {
+    if (!limitDoc.signupOtpResetAt) {
+      limitDoc.signupOtpResetAt = new Date(nowMs + OTP_RESET_HOURS * 60 * 60 * 1000);
+      await limitDoc.save();
+    }
+    throw new ApiError({
+      status: HttpStatus.TOO_MANY_REQUESTS || 429,
+      code: ErrorCodes.OTP_DAILY_LIMIT,
+      message: "try after 24 hour",
+    });
+  }
 
-  // ObjectId
-  if (isObjectId(raw)) return BusinessType.findById(raw);
+  // cooldown
+  if (limitDoc.signupOtpCooldownUntil && nowMs < new Date(limitDoc.signupOtpCooldownUntil).getTime()) {
+    throw new ApiError({
+      status: HttpStatus.TOO_MANY_REQUESTS || 429,
+      code: ErrorCodes.OTP_RATE_LIMIT,
+      message: "Try after some time",
+    });
+  }
 
-  // name (case-insensitive, exact)
-  return BusinessType.findOne({ name: new RegExp(`^${escapeRegExp(raw)}$`, 'i') });
+  // consume 1 OTP
+  limitDoc.signupOtpSend = (limitDoc.signupOtpSend ?? OTP_TOTAL) - 1;
+  limitDoc.signupOtpBatchCount = (limitDoc.signupOtpBatchCount ?? 0) + 1;
+
+  // after 3 => lock 15 min
+  if (limitDoc.signupOtpBatchCount >= OTP_BATCH_LIMIT) {
+    limitDoc.signupOtpCooldownUntil = new Date(nowMs + OTP_COOLDOWN_MIN * 60 * 1000);
+    limitDoc.signupOtpBatchCount = 0;
+  }
+
+  // when total becomes 0 => lock 24h
+  if (limitDoc.signupOtpSend <= 0) {
+    limitDoc.signupOtpSend = 0;
+    limitDoc.signupOtpResetAt = new Date(nowMs + OTP_RESET_HOURS * 60 * 60 * 1000);
+  }
+
+  await limitDoc.save();
 }
 
-// ---------- 1) Request OTP (signup) ----------
-exports.requestOtp = async (req, res) => {
-  try {
-    const { email, role = "Brand" } = req.body;
-    if (!email || !role) {
-      return res.status(400).json({ message: 'Both email and role are required' });
-    }
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+// ✅✅✅ SIGNIN LIMITER (only for incorrect password) stored in VerifyOtp collection (NEW FLOW)
+// OLD FLOW will use brand.failedLoginAttempts + lockUntil if those fields exist
+//////////////////////////////////////////////////////////////////////////////////////////////////////
 
-    const normalizedEmail = toNormEmail(email);
-    const normalizedRole = String(role).trim();
+const SIGNIN_TOTAL = 9;
+const SIGNIN_BATCH = 3;
+const SIGNIN_LOCK_1_MIN = 1;
+const SIGNIN_LOCK_15_MIN = 15;
+const SIGNIN_LOCK_24_HOURS = 24;
 
-    if (!emailRegex.test(normalizedEmail)) {
-      return res.status(400).json({ message: 'Invalid email' });
-    }
-    if (!['Brand', 'Influencer'].includes(normalizedRole)) {
-      return res.status(400).json({ message: 'role must be "Brand" or "Influencer"' });
-    }
-
-    // If already registered for that role, block OTP
-    const alreadyRegistered =
-      normalizedRole === 'Brand'
-        ? await Brand.findOne({ email: exactEmailRegex(normalizedEmail) }, '_id')
-        : await Influencer.findOne({ email: exactEmailRegex(normalizedEmail) }, '_id');
-
-    if (alreadyRegistered) {
-      return res.status(409).json({ message: 'User already present' });
-    }
-
-    // Generate code & expiry
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-    // Upsert verification record for (email, role)
-    await VerifyEmail.findOneAndUpdate(
-      { email: normalizedEmail, role: normalizedRole },
-      {
-        $set: {
-          otpCode: code,
-          otpExpiresAt: expiresAt,
-          verified: false,
-          verifiedAt: null,
-        },
-        $inc: { attempts: 1 },
-        $setOnInsert: { email: normalizedEmail, role: normalizedRole },
+async function getSigninLimitDoc(email, key) {
+  return VerifyOtpModel.findOneAndUpdate(
+    { email, role: "brand", docType: "limit", key },
+    {
+      $setOnInsert: {
+        email,
+        role: "brand",
+        docType: "limit",
+        key,
+        otp: "__SIGNIN_LIMIT__",
+        status: 0,
+        userId: null,
+        signinFailedCount: 0,
+        signinCooldownUntil: null,
+        signinResetAt: null,
       },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
-    );
+    },
+    { new: true, upsert: true }
+  ).exec();
+}
 
-    // ✉️ Send OTP email (HTML)
-    const subject = 'Verify your email';
-    const html = otpHtmlTemplate({
-      title: 'Verify your email',
-      subtitle: `Use this verification code to continue signing up as a ${normalizedRole}.`,
-      code,
-      minutes: 10,
-      preheader: 'Your CollabGlam verification code',
-    });
-    const text = otpTextFallback({ code, minutes: 10, title: 'Verify your email' });
+function msToWaitString(ms) {
+  const sec = Math.ceil(ms / 1000);
+  if (sec <= 60) return `${sec} seconds`;
+  const min = Math.ceil(sec / 60);
+  if (min <= 60) return `${min} minutes`;
+  const hr = Math.ceil(min / 60);
+  return `${hr} hours`;
+}
 
-    await sendMail({ to: normalizedEmail, subject, html, text });
+async function enforceSigninLimit(email, key) {
+  const nowMs = Date.now();
+  const doc = await getSigninLimitDoc(email, key);
 
-    return res.json({ message: 'OTP sent to email' });
-  } catch (err) {
-    console.error('Error in requestOtp:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-};
-
-// ---------- 2) Verify OTP (signup) ----------
-exports.verifyOtp = async (req, res) => {
-  try {
-    const { email, otp, role = "Brand" } = req.body;
-    if (!email || otp == null || !role) {
-      return res.status(400).json({ message: 'email, otp and role are required' });
-    }
-
-    const normalizedEmail = toNormEmail(email);
-    const normalizedRole = String(role).trim();
-
-    if (!['Brand', 'Influencer'].includes(normalizedRole)) {
-      return res.status(400).json({ message: 'role must be "Brand" or "Influencer"' });
-    }
-
-    const doc = await VerifyEmail.findOne({
-      email: normalizedEmail,
-      role: normalizedRole,
-      otpCode: String(otp).trim(),
-      otpExpiresAt: { $gt: new Date() },
-    });
-
-    if (!doc) {
-      return res.status(400).json({ message: 'Invalid or expired OTP' });
-    }
-
-    // Mark verified and clear OTP values
-    doc.verified = true;
-    doc.verifiedAt = new Date();
-    doc.otpCode = undefined;
-    doc.otpExpiresAt = undefined;
+  if (doc.signinResetAt && nowMs >= new Date(doc.signinResetAt).getTime()) {
+    doc.signinFailedCount = 0;
+    doc.signinCooldownUntil = null;
+    doc.signinResetAt = null;
     await doc.save();
-
-    return res.json({ message: 'OTP verified' });
-  } catch (err) {
-    console.error('Error in verifyOtp:', err);
-    return res.status(500).json({ message: 'Internal server error' });
   }
-};
 
-// ---------- 3) Register ----------
-exports.register = async (req, res) => {
-  try {
-    const {
-      name,
-      email,
-      password,
-      phone,
-      countryId,
-      callingId,
-
-      // NEW inputs
-      category,        // can be ObjectId | numeric id | name
-      categoryId,      // optional explicit ObjectId or numeric id
-      businessType,    // optional: ObjectId | name
-      businessTypeId,  // optional explicit ObjectId
-
-      // optionals
-      website,
-      instagramHandle,
-      companySize,
-      referralCode,
-      isVerifiedRepresentative, // required: must be true
-      pocName,
-    } = req.body;
-
-    // 💾 logo file from multipart/form-data (via uploadLogoMiddleware)
-    const logoFile = req.file;
-
-    // required checks
-    if (!name || !email || !password || !phone || !countryId || !callingId || !pocName) {
-      return res.status(400).json({ message: 'All fields are required' });
-    }
-
-    // required: category via DB
-    const catInput = categoryId ?? category;
-    const categoryDoc = await resolveCategory(catInput);
-    if (!categoryDoc) {
-      return res.status(400).json({ message: 'Invalid or missing brand category' });
-    }
-    if (isVerifiedRepresentative !== "true") {
-      return res.status(400).json({ message: 'You must confirm you are an official representative of this brand' });
-    }
-
-    const normalizedEmail = toNormEmail(email);
-    const exactCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, 'i');
-
-    // Must be verified via VerifyEmail for BRAND role
-    const emailDoc = await VerifyEmail.findOne({
-      email: normalizedEmail,
-      role: 'Brand',
-      verified: true,
+  if (doc.signinCooldownUntil && nowMs < new Date(doc.signinCooldownUntil).getTime()) {
+    const waitMs = new Date(doc.signinCooldownUntil).getTime() - nowMs;
+    throw new ApiError({
+      status: HttpStatus.TOO_MANY_REQUESTS || 429,
+      code: ErrorCodes.SIGNIN_RATE_LIMIT,
+      message: `Too many failed login attempts. Try again in ${msToWaitString(waitMs)}.`,
     });
-    if (!emailDoc) {
-      return res.status(400).json({ message: 'Email not verified' });
+  }
+
+  if ((doc.signinFailedCount ?? 0) >= SIGNIN_TOTAL) {
+    if (!doc.signinResetAt) {
+      doc.signinResetAt = new Date(nowMs + SIGNIN_LOCK_24_HOURS * 60 * 60 * 1000);
+      await doc.save();
     }
+    throw new ApiError({
+      status: HttpStatus.TOO_MANY_REQUESTS || 429,
+      code: ErrorCodes.SIGNIN_DAILY_LIMIT,
+      message: "Too many failed login attempts. Try again after 24 hours.",
+    });
+  }
+}
 
-    // Prevent duplicate registration by email
-    const existing = await Brand.findOne({ email: exactCI }, '_id');
-    if (existing) {
-      return res.status(400).json({ message: 'Already registered' });
+async function recordFailedSignin(email, key) {
+  const nowMs = Date.now();
+  const doc = await getSigninLimitDoc(email, key);
+
+  if (doc.signinResetAt && nowMs >= new Date(doc.signinResetAt).getTime()) {
+    doc.signinFailedCount = 0;
+    doc.signinCooldownUntil = null;
+    doc.signinResetAt = null;
+  }
+
+  doc.signinFailedCount = (doc.signinFailedCount ?? 0) + 1;
+
+  if (doc.signinFailedCount % SIGNIN_BATCH === 0) {
+    const batchNo = doc.signinFailedCount / SIGNIN_BATCH;
+
+    if (batchNo === 1) {
+      doc.signinCooldownUntil = new Date(nowMs + SIGNIN_LOCK_1_MIN * 60 * 1000);
+    } else if (batchNo === 2) {
+      doc.signinCooldownUntil = new Date(nowMs + SIGNIN_LOCK_15_MIN * 60 * 1000);
+    } else {
+      doc.signinCooldownUntil = new Date(nowMs + SIGNIN_LOCK_24_HOURS * 60 * 60 * 1000);
+      doc.signinResetAt = doc.signinCooldownUntil;
+      doc.signinFailedCount = SIGNIN_TOTAL;
     }
+  }
 
-    // 🚫 Brand name cannot be same
-    const existingByName = await Brand.findOne(
-      { name: String(name).trim() },
-      '_id'
-    );
-    if (existingByName) {
-      return res.status(400).json({ message: 'Brand name already taken' });
-    }
+  await doc.save();
 
-    // ✅ Generate brand alias email from brand name: brandname@collabglam.com
-    // ✅ Generate brand alias email from brand name: brandname@collabglam.com
-    const brandAliasEmail = EmailThread.generateAliasEmail(name);
+  if (doc.signinCooldownUntil && nowMs < new Date(doc.signinCooldownUntil).getTime()) {
+    const waitMs = new Date(doc.signinCooldownUntil).getTime() - nowMs;
 
-    // HARD GUARD: never proceed with a falsy alias
-    if (
-      !brandAliasEmail ||
-      typeof brandAliasEmail !== 'string' ||
-      !brandAliasEmail.includes('@')
-    ) {
-      console.error('Failed to generate brandAliasEmail for name:', name, '=>', brandAliasEmail);
-      return res.status(400).json({
-        message: 'Unable to generate brand alias email. Please choose a different brand name.',
+    if ((doc.signinFailedCount ?? 0) >= SIGNIN_TOTAL) {
+      throw new ApiError({
+        status: HttpStatus.TOO_MANY_REQUESTS || 429,
+        code: ErrorCodes.SIGNIN_DAILY_LIMIT,
+        message: "Too many failed login attempts. Try again after 24 hours.",
       });
     }
 
-    // Ensure alias is unique as well
-    const aliasExists = await Brand.findOne({ brandAliasEmail }, '_id');
-    if (aliasExists) {
-      // This also protects against slug collisions like "New Brand" vs "NewBrand"
-      return res.status(400).json({
-        message: 'Brand name not available, please choose a different name',
-      });
-    }
-
-    // Validate country / calling code
-    const [countryDoc, callingDoc] = await Promise.all([
-      Country.findById(countryId),
-      Country.findById(callingId),
-    ]);
-    if (!countryDoc || !callingDoc) {
-      return res.status(400).json({ message: 'Invalid country or calling code' });
-    }
-
-    // Normalize optionals
-    const websiteNorm = normalizeUrl(website);
-    const instaNorm = normalizeInsta(instagramHandle);
-
-    // Validate enums if provided
-    if (companySize && !COMPANY_SIZE_ENUM.includes(String(companySize))) {
-      return res.status(400).json({ message: 'Invalid company size' });
-    }
-
-    // Resolve businessType if provided (optional) → store NAME
-    let businessTypeName = undefined;
-    const btInput = businessTypeId ?? businessType;
-    if (btInput != null && String(btInput).trim()) {
-      const btDoc = await resolveBusinessType(btInput);
-      if (!btDoc) {
-        return res.status(400).json({ message: 'Invalid business type' });
-      }
-      businessTypeName = btDoc.name;
-    }
-
-    // 🔁 Upload logo to GridFS (if provided)
-    let logoFileId;
-    let logoFilename;
-
-    if (logoFile) {
-      try {
-        const [saved] = await uploadToGridFS(logoFile, {
-          prefix: 'brand_logo',
-          metadata: {
-            kind: 'brand_logo',
-            email: normalizedEmail,
-          },
-          req,
-        });
-
-        logoFileId = saved.id;
-        logoFilename = saved.filename;
-      } catch (e) {
-        console.error('Brand register: logo upload failed:', e?.message || e);
-        return res.status(500).json({ message: 'Failed to store logo' });
-      }
-    }
-
-    // Create brand
-    const brand = new Brand({
-      name,
-      email: normalizedEmail,
-      brandAliasEmail,
-      password, // hashed by pre-save hook
-      phone,
-      country: countryDoc.countryName,
-      callingcode: callingDoc.callingCode,
-      countryId,
-      callingId,
-      pocName: String(pocName).trim(),
-      // DB-backed references + snapshots
-      category: categoryDoc._id,
-      categoryName: categoryDoc.name,
-      businessType: businessTypeName, // name string (optional)
-
-      // optionals
-      website: websiteNorm,
-      instagramHandle: instaNorm,
-      logoFileId,
-      logoFilename,
-      companySize: companySize ? String(companySize) : undefined,
-      referralCode: referralCode ? String(referralCode).trim() : undefined,
-      isVerifiedRepresentative: true,
+    throw new ApiError({
+      status: HttpStatus.TOO_MANY_REQUESTS || 429,
+      code: ErrorCodes.SIGNIN_RATE_LIMIT,
+      message: `Too many failed login attempts. Try again in ${msToWaitString(waitMs)}.`,
     });
-
-    // Free plan
-    const freePlan = await getFreePlan('Brand');
-    if (freePlan) {
-      const start = new Date();
-      const expire = computeExpiry(freePlan, start);
-
-      brand.subscription = {
-        planId: freePlan.planId,
-        planName: freePlan.name,
-        role: 'Brand',
-        startedAt: start,
-        expiresAt: expire,
-        features: (freePlan.features || []).map((f) => ({
-          key: f.key,
-          value: f.value,
-          limit: typeof f.value === 'number' ? Number(f.value) : 0,
-          used: 0,
-          note: f.note,
-          resetsEvery: f.resetsEvery,
-          resetsAt: null,
-        })),
-        internalCredits: {
-          used: 0,
-          resetsAt: null,
-        },
-      };
-
-      brand.subscriptionExpired = false;
-    }
-
-    await brand.save();
-
-    // Clean up verification record
-    await VerifyEmail.deleteOne({ email: normalizedEmail, role: 'Brand' });
-
-    // --- Welcome Email API (non-blocking) ---
-    const emailPayload = {
-      email: normalizedEmail,
-      name: name,
-      userType: 'brand',
-    };
-
-    fetch(WELCOME_EMAIL_API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(emailPayload),
-    })
-      .then(response => {
-        if (!response.ok) {
-          console.warn(`Welcome email API responded with non-2xx status: ${response.status} for ${normalizedEmail}`);
-        }
-      })
-      .catch(error => {
-        console.error(`Failed to trigger welcome email API for ${normalizedEmail}:`, error.message);
-      });
-
-    return res.status(201).json({
-      message: 'Brand registered successfully',
-      brandId: brand.brandId,
-      subscription: brand.subscription,
-      brandAliasEmail: brand.brandAliasEmail,
-    });
-  } catch (error) {
-    console.error('Error in register:', error);
-
-    if (error?.name === 'ValidationError') {
-      const first = Object.values(error.errors)[0];
-      return res.status(400).json({ message: first?.message || 'Validation error' });
-    }
-
-    // 🔐 Handle Mongo unique index violations cleanly
-    if (error?.code === 11000 && error?.keyPattern) {
-      if (error.keyPattern.name) {
-        return res.status(400).json({ message: 'Brand name already taken' });
-      }
-      if (error.keyPattern.email) {
-        return res.status(400).json({ message: 'Email already registered' });
-      }
-      if (error.keyPattern.brandAliasEmail) {
-        return res.status(400).json({
-          message: 'Brand alias already in use, please choose a different brand name',
-        });
-      }
-    }
-
-    return res.status(500).json({ message: 'Internal server error during registration' });
   }
-};
+}
 
-// ---------- 4) Login ----------
-exports.login = async (req, res) => {
-  const { email, password } = req.body;
+async function resetSigninLimit(email, key) {
+  await VerifyOtpModel.updateOne(
+    { email, role: "brand", docType: "limit", key },
+    { $set: { signinFailedCount: 0, signinCooldownUntil: null, signinResetAt: null } }
+  ).exec();
+}
 
-  try {
-    // 1) Find brand by email (exact, case-insensitive)
-    const brand = await Brand.findOne({
-      email: exactEmailRegex(email),
-    });
-    if (!brand) return res.status(404).json({ message: 'Brand not found' });
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+// ✅✅✅ CONTROLLERS
+//////////////////////////////////////////////////////////////////////////////////////////////////////
 
-    // 2) If account is locked, block login
-    const now = new Date();
-    if (brand.lockUntil && brand.lockUntil > now) {
-      const msLeft = brand.lockUntil.getTime() - now.getTime();
-      const minutesLeft = Math.ceil(msLeft / (60 * 1000));
-      return res.status(403).json({
-        message: 'Account locked due to multiple failed login attempts. Try again after the lock period.',
-        lockUntil: brand.lockUntil,
-        minutesLeft,
-      });
-    }
+async function sendSignupOtp(req, res, next) {
+  const requestId = req.requestId;
 
-    // 3) Compare provided password with hashed password
-    const isMatch = await brand.comparePassword(password);
-
-    if (!isMatch) {
-      // Wrong password → increment attempts
-      brand.failedLoginAttempts = (brand.failedLoginAttempts || 0) + 1;
-
-      if (brand.failedLoginAttempts >= 3) {
-        // Lock for 24 hours from *this* incorrect attempt
-        const LOCK_WINDOW_MS = 24 * 60 * 60 * 1000;
-        brand.lockUntil = new Date(Date.now() + LOCK_WINDOW_MS);
-      }
-
-      await brand.save();
-
-      if (brand.lockUntil && brand.lockUntil > now) {
-        return res.status(403).json({
-          message: 'Too many failed attempts. Account locked for 24 hours.',
-          lockUntil: brand.lockUntil,
-        });
-      }
-
-      const attemptsLeft = Math.max(0, 3 - brand.failedLoginAttempts);
-      return res.status(400).json({
-        message: 'Invalid credentials',
-        attemptsLeft,
-      });
-    }
-
-    // 4) Correct password & not locked → reset counters
-    if (brand.failedLoginAttempts || brand.lockUntil) {
-      brand.failedLoginAttempts = 0;
-      brand.lockUntil = null;
-      await brand.save();
-    }
-
-    // 5) Generate JWT (expires in 100 days)
-    const token = jwt.sign(
-      { brandId: brand.brandId, email: brand.email },
-      JWT_SECRET,
-      { expiresIn: '100d' }
-    );
-
-    // 6) Return subscription info (PLAN NAME)
-    const subscription = brand.subscription || {};
-    const subscriptionPlanName = subscription.planName || 'free';
-
-    return res.status(200).json({
-      message: 'Login successful',
-      brandId: brand.brandId,
-      brandAliasEmail: brand.brandAliasEmail,
-      token,
-      subscriptionPlanName,          // <- 👈 simple string
-      // Or, if you want more:
-      subscription: {
-        planId: subscription.planId,
-        planName: subscription.planName,
-        role: subscription.role,
-        status: subscription.status,
-        expiresAt: subscription.expiresAt,
-      },
-    });
-  } catch (error) {
-    console.error('Error in brand.login:', error);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-};
-
-// ---------- 5) Verify JWT middleware ----------
-exports.verifyToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  if (!authHeader) return res.status(403).json({ message: 'Token required' });
-
-  const token = authHeader.split(' ')[1];
-  if (!token) return res.status(403).json({ message: 'Token required' });
-
-  jwt.verify(token, JWT_SECRET, (err, decoded) => {
-    if (err) return res.status(403).json({ message: 'Invalid or expired token' });
-    req.brand = decoded;
-    next();
-  });
-};
-
-exports.getBrandById = async (req, res) => {
-  try {
-    const brandId = req.query.id;
-    if (!brandId) return res.status(400).json({ message: 'Query parameter id is required.' });
-
-    const brandDoc = await Brand.findOne({ brandId })
-      .select('-password -_id -__v')
-      .populate('category', 'name id')
-      .lean();
-
-    if (!brandDoc) return res.status(404).json({ message: 'Brand not found.' });
-
-    const milestoneDoc = await Milestone.findOne({ brandId }).lean();
-    const walletBalance = milestoneDoc ? milestoneDoc.walletBalance : 0;
-
-    // ✅ Build logo URL via GridFS (preferred)
-    let logoUrl = '';
-
-    if (brandDoc.logoFilename) {
-      logoUrl = buildFileUrl(req, brandDoc.logoFilename);
-    } else if (brandDoc.logoFileId) {
-      // fallback: if filename missing but fileId exists, fetch meta to get filename
-      const meta = await getFileMetaById(brandDoc.logoFileId, { req }).catch(() => null);
-      if (meta?.filename) logoUrl = buildFileUrl(req, meta.filename);
-    }
-
-    // fallback for very old records that only have a public URL saved
-    if (!logoUrl && brandDoc.logoUrl) {
-      logoUrl = brandDoc.logoUrl;
-    }
-
-    // ✅ Backward compatible keys (your old frontend might be reading these)
-    return res.status(200).json({
-      ...brandDoc,
-      walletBalance,
-      logoUrl,                 // recommended new field
-      logoProfileUrl: logoUrl, // common camelCase legacy
-      logoProfileurl: logoUrl, // exact legacy casing you mentioned
-    });
-  } catch (error) {
-    console.error('Error in getBrandById:', error);
-    return res.status(500).json({ message: 'Internal server error while fetching brand.' });
-  }
-};
-
-// ---------- 7) Get All Brands ----------
-exports.getAllBrands = async (req, res) => {
-  try {
-    const brands = await Brand.find()
-      .select('-password -__v')
-      .populate('category', 'name id')
-      .lean();
-    return res.status(200).json({ brands });
-  } catch (error) {
-    console.error('Error in getAllBrands:', error);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-};
-
-// ---------- 8) Password reset: request OTP ----------
-exports.requestPasswordResetOtp = async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ message: 'Email is required' });
-
-  const brand = await Brand.findOne({
-    email: exactEmailRegex(email),
-    name: { $exists: true, $ne: null },
-    password: { $exists: true, $ne: null },
-  });
-
-  // ✅ Explicit response (shows user doesn't exist)
-  if (!brand) {
-    return res.status(404).json({ message: 'Brand does not exist with this email' });
-  }
-
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-  brand.passwordResetCode = code;
-  brand.passwordResetExpiresAt = expiresAt;
-  brand.passwordResetVerified = false;
-  await brand.save();
-
-  const subject = 'Password reset code';
-  const html = otpHtmlTemplate({
-    title: 'Password reset code',
-    subtitle: 'Use this one-time code to reset your password.',
-    code,
-    minutes: 10,
-    preheader: 'Your password reset code',
-  });
-  const text = otpTextFallback({ code, minutes: 10, title: 'Password reset code' });
-
-  await sendMail({ to: brand.email, subject, html, text });
-
-  return res.status(200).json({ message: 'OTP sent to your email' });
-};
-
-// ---------- 9) Password reset: verify OTP ----------
-exports.verifyPasswordResetOtp = async (req, res) => {
-  const { email, otp } = req.body;
-  if (!email || otp == null) {
-    return res.status(400).json({ message: 'Email and otp required' });
-  }
-
-  const brand = await Brand.findOne({
-    email: exactEmailRegex(email),
-    passwordResetCode: String(otp).trim(),
-    passwordResetExpiresAt: { $gt: new Date() },
-  });
-
-  if (!brand) {
-    return res.status(400).json({ message: 'Invalid or expired OTP' });
-  }
-
-  brand.passwordResetVerified = true;
-  // optional: clear code now to prevent reuse
-  brand.passwordResetCode = undefined;
-  brand.passwordResetExpiresAt = undefined;
-  await brand.save();
-
-  // Issue short-lived JWT authorizing password reset
-  const resetToken = jwt.sign(
-    { brandId: brand.brandId, email: brand.email, prt: true }, // prt=password reset token
-    JWT_SECRET,
-    { expiresIn: '100d' } // consider reducing in production (e.g., 15m)
-  );
-
-  return res.status(200).json({ message: 'OTP verified', resetToken });
-};
-
-// ---------- 10) Password reset: complete ----------
-exports.resetPassword = async (req, res) => {
-  const { resetToken, newPassword, confirmPassword } = req.body;
-  if (!resetToken || !newPassword) {
-    return res.status(400).json({ message: 'resetToken and newPassword required' });
-  }
-  if (confirmPassword != null && confirmPassword !== newPassword) {
-    return res.status(400).json({ message: 'Passwords do not match' });
-  }
-
-  try {
-    const decoded = jwt.verify(resetToken, JWT_SECRET);
-    if (!decoded.prt) {
-      return res.status(403).json({ message: 'Invalid reset token' });
-    }
-
-    const brand = await Brand.findOne({ brandId: decoded.brandId });
-    if (!brand) {
-      return res.status(404).json({ message: 'Brand not found' });
-    }
-
-    if (!brand.passwordResetVerified) {
-      return res.status(400).json({ message: 'Password reset not verified' });
-    }
-
-    // set new password (pre-save hook will hash)
-    brand.password = newPassword;
-
-    // CLEAR lock & attempts so user can log in immediately
-    brand.failedLoginAttempts = 0;
-    brand.lockUntil = null;
-
-    // clear the flag so reset flow can't be reused
-    brand.passwordResetVerified = false;
-
-    await brand.save();
-
-    return res.status(200).json({ message: 'Password reset successful. You can log in now.' });
-  } catch (err) {
-    console.error('Error in resetPassword:', err);
-    return res.status(403).json({ message: 'Invalid or expired reset token' });
-  }
-};
-
-// ---------- 11) Search brands (for influencer) ----------
-const delay = (ms) => new Promise((res) => setTimeout(res, ms));
-
-exports.searchBrands = async (req, res) => {
-  try {
-    const requester = req.influencer;
-    const { search, influencerId } = req.body || {};
-
-    // 1) Validate inputs
-    if (!influencerId) {
-      return res.status(400).json({ message: 'influencerId is required' });
-    }
-    // ensure the token’s influencerId matches the body
-    if (!requester || requester.influencerId !== influencerId) {
-      return res.status(403).json({ message: 'Forbidden' });
-    }
-    if (!search || !String(search).trim()) {
-      return res.status(400).json({ message: 'search is required' });
-    }
-
-    await delay(300);
-
-    const regex = new RegExp(String(search).trim(), 'i');
-    const docs = await Brand.find({ name: regex }, 'name brandId').limit(10).lean();
-
-    if (!docs || docs.length === 0) {
-      return res.status(404).json({ message: 'No brands found' });
-    }
-
-    const results = docs.map((d) => ({
-      name: d.name,
-      brandId: d.brandId,
-    }));
-
-    return res.json({ results });
-  } catch (err) {
-    console.error('Error in searchBrands:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-};
-
-exports.updateProfile = async (req, res) => {
   try {
     const body = req.body || {};
+    const email = body.email;
+
+    if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    // block if brand exists
+    const brandExists = await BrandModel.exists(
+      IS_NEW_BRAND_MODEL ? { email: normalizedEmail } : { email: exactEmailRegex(normalizedEmail) }
+    );
+    if (brandExists) throw new ConflictError("Email already registered. Please Login.");
+
+    // limiter
+    await enforceOtpLimitByKey(normalizedEmail, "signup_limit");
+
+    const otpPlain = genOtp();
+    const otpHashed = hashOtp(normalizedEmail, otpPlain);
+
+    // NEW model stores payload for later brand creation
+    if (IS_NEW_BRAND_MODEL) {
+      const { brandName, name, companySize, industry, password } = body;
+
+      if (!brandName || !String(brandName).trim()) throw new ValidationError("Brand Name is required");
+      if (!industry || !String(industry).trim()) throw new ValidationError("Industry is required");
+      if (!password || !String(password).trim()) throw new ValidationError("Password is required");
+
+      if (!isPasswordLenOk(password)) throw new ValidationError("Password must be 8–16 characters.");
+
+      const cleanCompanySize =
+        typeof companySize === "string" && companySize.trim().length > 0 ? companySize.trim() : "";
+
+      await VerifyOtpModel.create({
+        email: normalizedEmail,
+        role: "brand",
+        otp: otpHashed,
+        status: 0,
+        userId: null,
+        docType: "otp",
+        purpose: "signup",
+        signupPayload: {
+          brandName: String(brandName).trim(),
+          name: String(name || "").trim(),
+          companySize: cleanCompanySize,
+          industry: String(industry).trim(),
+          // controller-hash for NEW model
+          password: await hashPassword(String(password)),
+        },
+      });
+    } else {
+      // OLD model: no payload here (registration is separate in old system)
+      await VerifyOtpModel.create({
+        email: normalizedEmail,
+        role: "brand",
+        otp: otpHashed,
+        status: 0,
+        userId: null,
+        docType: "otp",
+        purpose: "signup",
+      });
+    }
+
+    const { subject, text, html } = buildOtpEmailTemplate({
+      otp: otpPlain,
+      role: "Brand",
+      expiryMinutes: OTP_TTL_MIN,
+      purpose: "signup",
+    });
+
+    await sendEmail({ to: normalizedEmail, subject, text, html });
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.OK,
+      { message: "OTP sent successfully", email: normalizedEmail, mode: IS_NEW_BRAND_MODEL ? "new" : "old" },
+      requestId
+    );
+  } catch (err) {
+    if (err instanceof ApiError) return next(err);
+    return next(new InternalError("Internal server error", undefined, err));
+  }
+}
+
+/**
+ * VERIFY OTP + (NEW) CREATE BRAND
+ * - NEW model: creates brand from saved signupPayload and returns token
+ * - OLD model: only verifies OTP and returns success (registration happens elsewhere)
+ */
+async function verifyOtpSignUp(req, res, next) {
+  const requestId = req.requestId;
+
+  try {
+    const { email, otp } = req.body || {};
+
+    if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
+    if (!otp || !/^\d{6}$/.test(String(otp))) throw new ValidationError("Valid 6-digit OTP is required");
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    // if brand already exists
+    const existing = await BrandModel.exists(
+      IS_NEW_BRAND_MODEL ? { email: normalizedEmail } : { email: exactEmailRegex(normalizedEmail) }
+    );
+    if (existing) throw new ConflictError("Email already registered. Please Login.");
+
+    const otpDoc = await VerifyOtpModel.findOne({
+      email: normalizedEmail,
+      role: "brand",
+      status: 0,
+      docType: "otp",
+      purpose: "signup",
+    })
+      .sort({ createdAt: -1 })
+      .exec();
+
+    if (!otpDoc) throw new ValidationError("OTP not requested");
+
+    const ageMs = Date.now() - new Date(otpDoc.createdAt).getTime();
+    if (ageMs > OTP_TTL_MIN * 60 * 1000) throw new ValidationError("OTP expired. Please resend otp.");
+
+    const incomingHash = hashOtp(normalizedEmail, String(otp));
+    if (incomingHash !== otpDoc.otp) throw new ValidationError("Invalid OTP");
+
+    // OLD: only verify
+    if (IS_OLD_BRAND_MODEL) {
+      otpDoc.status = 1;
+      await otpDoc.save();
+
+      return ApiResponse.sendOk(
+        res,
+        HttpStatus.OK,
+        { message: "OTP verified. Please complete registration.", email: normalizedEmail, mode: "old" },
+        requestId
+      );
+    }
+
+    // NEW: create brand using saved payload
+    const payload = otpDoc.signupPayload;
+    if (!payload?.brandName || !payload?.industry || !payload?.password) {
+      throw new ValidationError("Signup details missing. Please request OTP again.");
+    }
+
+    const brand = await BrandModel.create({
+      email: normalizedEmail,
+      brandName: payload.brandName,
+      industry: payload.industry,
+      // password already hashed (NEW flow)
+      password: payload.password,
+      ...(payload?.name ? { name: payload.name } : {}),
+      ...(payload?.companySize ? { companySize: payload.companySize } : {}),
+    });
+
+    otpDoc.status = 1;
+    otpDoc.userId = brand._id;
+    await otpDoc.save();
+
+    const token = signJwt({
+      brandId: brand._id.toString(),
+      role: "brand",
+      email: brand.email,
+    });
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.CREATED,
+      { message: "Brand signup successful", brandId: brand._id.toString(), token, mode: "new" },
+      requestId
+    );
+  } catch (err) {
+    if (err instanceof ApiError) return next(err);
+    return next(new InternalError("Internal server error", undefined, err));
+  }
+}
+
+/**
+ * SAVE ONBOARDING
+ * - NEW model: supports page1/page2/page3/proxyEmail/profilePic fields
+ * - OLD model: returns 400 (not supported in legacy schema)
+ */
+async function saveBrandOnboarding(req, res, next) {
+  const requestId = req.requestId;
+
+  try {
+    if (IS_OLD_BRAND_MODEL) {
+      throw new ValidationError("Onboarding pages are not supported on the old Brand model.");
+    }
+
+    const user = req.user;
+    if (!user?.brandId) throw new ValidationError("Invalid token payload");
+    if (user.role !== "brand") throw new ValidationError("Invalid role");
+
     const {
-      brandId,
+      page1,
+      page2,
+      page3,
+      ispage1Skip,
+      ispage2Skip,
+      ispage3Skip,
+      proxyEmail,
+      profilePic,
+      isProfilePicSkip,
+    } = req.body || {};
 
-      // identity/contact
-      name,
-      pocName,
-      phone,
-      countryId,
-      callingId,
+    const hasAny =
+      page1 !== undefined ||
+      page2 !== undefined ||
+      page3 !== undefined ||
+      ispage1Skip !== undefined ||
+      ispage2Skip !== undefined ||
+      ispage3Skip !== undefined ||
+      proxyEmail !== undefined ||
+      profilePic !== undefined ||
+      isProfilePicSkip !== undefined;
 
-      // business
-      website,
-      instagramHandle,
-      companySize,
-      referralCode,
+    if (!hasAny) throw new ValidationError("Nothing to update");
 
-      // meta
-      category,        // can be ObjectId | numeric id | name
-      categoryId,
-      businessType,    // can be ObjectId | name
-      businessTypeId,
+    const update = {};
 
-      // optional legacy removal support
-      removeLogo,      // "true" to remove logo
-      logoUrl,         // optional legacy fallback
-    } = body;
-
-    if (!brandId) return res.status(400).json({ message: "brandId is required" });
-
-    // ensure token brandId matches
-    if (req.brand?.brandId && req.brand.brandId !== brandId) {
-      return res.status(403).json({ message: "Forbidden: brandId mismatch" });
+    if (page1 !== undefined || ispage1Skip !== undefined) {
+      if (ispage1Skip !== undefined && typeof ispage1Skip !== "boolean")
+        throw new ValidationError("ispage1Skip must be boolean");
+      if (ispage1Skip === true) {
+        update.page1 = [];
+        update.ispage1Skip = true;
+      } else {
+        if (!page1) throw new ValidationError("page1 is required when ispage1Skip is false");
+        if (!isQAArray(page1)) throw new ValidationError("page1 must be array of { question, answers[] }");
+        update.page1 = page1;
+        update.ispage1Skip = false;
+      }
     }
 
-    const brand = await Brand.findOne({ brandId });
-    if (!brand) return res.status(404).json({ message: "Brand not found" });
+    if (page2 !== undefined || ispage2Skip !== undefined) {
+      if (ispage2Skip !== undefined && typeof ispage2Skip !== "boolean")
+        throw new ValidationError("ispage2Skip must be boolean");
+      if (ispage2Skip === true) {
+        update.page2 = [];
+        update.ispage2Skip = true;
+      } else {
+        if (!page2) throw new ValidationError("page2 is required when ispage2Skip is false");
+        if (!isQAArray(page2)) throw new ValidationError("page2 must be array of { question, answers[] }");
+        update.page2 = page2;
+        update.ispage2Skip = false;
+      }
+    }
 
-    // Track name change for alias + thread sync
-    let nameChanged = false;
+    if (page3 !== undefined || ispage3Skip !== undefined) {
+      if (ispage3Skip !== undefined && typeof ispage3Skip !== "boolean")
+        throw new ValidationError("ispage3Skip must be boolean");
+      if (ispage3Skip === true) {
+        update.page3 = [];
+        update.ispage3Skip = true;
+      } else {
+        if (!page3) throw new ValidationError("page3 is required when ispage3Skip is false");
+        if (!isQAArray(page3)) throw new ValidationError("page3 must be array of { question, answers[] }");
+        update.page3 = page3;
+        update.ispage3Skip = false;
+      }
+    }
 
-    // ---------------- name (+ alias regenerate) ----------------
-    if (typeof name !== "undefined") {
-      const trimmedName = String(name || "").trim();
-      if (!trimmedName) return res.status(400).json({ message: "Name cannot be empty" });
+    if (proxyEmail !== undefined) {
+      if (typeof proxyEmail !== "string" || proxyEmail.trim().length === 0)
+        throw new ValidationError("proxyEmail must be a string");
+      update.proxyEmail = proxyEmail.trim();
+    }
 
-      const existingByName = await Brand.findOne(
-        { name: trimmedName, brandId: { $ne: brandId } },
-        "_id"
-      );
-      if (existingByName) return res.status(400).json({ message: "Brand name already taken" });
+    if (profilePic !== undefined) {
+      if (typeof profilePic !== "string" || profilePic.trim().length === 0)
+        throw new ValidationError("profilePic must be a string");
+      update.profilePic = profilePic.trim();
+      update.isProfilePicSkip = false;
+    }
 
-      const newAlias = EmailThread.generateAliasEmail(trimmedName);
-      if (!newAlias || typeof newAlias !== "string" || !newAlias.includes("@")) {
-        return res.status(400).json({
-          message: "Unable to generate brand alias for that name. Please choose a different brand name.",
+    if (isProfilePicSkip !== undefined) {
+      if (typeof isProfilePicSkip !== "boolean") throw new ValidationError("isProfilePicSkip must be boolean");
+      if (isProfilePicSkip === true) {
+        update.profilePic = "";
+        update.isProfilePicSkip = true;
+      } else {
+        update.isProfilePicSkip = false;
+      }
+    }
+
+    const brand = await BrandModel.findByIdAndUpdate(user.brandId, update, { new: true }).exec();
+    if (!brand) throw new NotFoundError("Brand not found");
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.OK,
+      { message: "Brand onboarding saved successfully", brandId: brand._id.toString() },
+      requestId
+    );
+  } catch (err) {
+    if (err instanceof ApiError) return next(err);
+    return next(new InternalError("Internal server error", undefined, err));
+  }
+}
+
+/**
+ * SIGN IN (BRAND)
+ * - NEW model: uses VerifyOtp signin limiter
+ * - OLD model: uses legacy lockUntil/failedLoginAttempts if present
+ */
+async function signInBrand(req, res, next) {
+  const requestId = req.requestId;
+
+  try {
+    const { email, password } = req.body || {};
+
+    if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
+    if (!password) throw new ValidationError("Valid password is required");
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    const brand = await findBrandByEmail(normalizedEmail);
+    if (!brand) throw new NotFoundError("Email does not exist. Please Sign Up");
+
+    if (!brand.password) throw new ValidationError("Password not set. Please use Forgot Password");
+
+    // OLD model: keep legacy lock logic if fields exist
+    if (IS_OLD_BRAND_MODEL && (hasSchemaPath(BrandModel, "lockUntil") || hasSchemaPath(BrandModel, "failedLoginAttempts"))) {
+      const now = new Date();
+      if (brand.lockUntil && brand.lockUntil > now) {
+        throw new ApiError({
+          status: HttpStatus.FORBIDDEN,
+          code: ErrorCodes.SIGNIN_RATE_LIMIT,
+          message: "Account locked due to multiple failed login attempts. Try again later.",
+          details: { lockUntil: brand.lockUntil },
         });
       }
 
-      const aliasExists = await Brand.findOne(
-        { brandAliasEmail: newAlias, brandId: { $ne: brandId } },
-        "_id"
-      );
-      if (aliasExists) {
-        return res.status(400).json({
-          message: "Brand name not available, please choose a different name",
-        });
-      }
+      const isMatch =
+        typeof brand.comparePassword === "function"
+          ? await brand.comparePassword(password)
+          : await bcrypt.compare(password, String(brand.password));
 
-      brand.name = trimmedName;
-      brand.brandAliasEmail = newAlias;
-      nameChanged = true;
-    }
+      if (!isMatch) {
+        brand.failedLoginAttempts = (brand.failedLoginAttempts || 0) + 1;
 
-    // ---------------- pocName ----------------
-    if (typeof pocName !== "undefined") {
-      const trimmedPoc = String(pocName || "").trim();
-      if (!trimmedPoc) return res.status(400).json({ message: "POC name cannot be empty" });
-      brand.pocName = trimmedPoc;
-    }
-
-    // ---------------- phone ----------------
-    if (typeof phone !== "undefined") {
-      brand.phone = String(phone || "").trim();
-    }
-
-    // ---------------- country / calling ----------------
-    if (typeof countryId !== "undefined") {
-      const cid = String(countryId || "").trim();
-      if (cid) {
-        const countryDoc = await Country.findById(cid);
-        if (!countryDoc) return res.status(400).json({ message: "Invalid countryId" });
-        brand.countryId = cid;
-        brand.country = countryDoc.countryName;
-      } else {
-        brand.countryId = undefined;
-        brand.country = undefined;
-      }
-    }
-
-    if (typeof callingId !== "undefined") {
-      const ccid = String(callingId || "").trim();
-      if (ccid) {
-        const callingDoc = await Country.findById(ccid);
-        if (!callingDoc) return res.status(400).json({ message: "Invalid callingId" });
-        brand.callingId = ccid;
-        brand.callingcode = callingDoc.callingCode;
-      } else {
-        brand.callingId = undefined;
-        brand.callingcode = undefined;
-      }
-    }
-
-    // ---------------- website / instagram ----------------
-    if (typeof website !== "undefined") {
-      const w = String(website || "").trim();
-      brand.website = w ? normalizeUrl(w) : undefined;
-    }
-
-    if (typeof instagramHandle !== "undefined") {
-      const ig = String(instagramHandle || "").trim();
-      brand.instagramHandle = ig ? normalizeInsta(ig) : undefined;
-    }
-
-    // ---------------- company size ----------------
-    if (typeof companySize !== "undefined") {
-      const cs = String(companySize || "").trim();
-      if (cs && !COMPANY_SIZE_ENUM.includes(cs)) {
-        return res.status(400).json({ message: "Invalid company size" });
-      }
-      brand.companySize = cs || undefined;
-    }
-
-    // ---------------- referral code ----------------
-    if (typeof referralCode !== "undefined") {
-      const rc = String(referralCode || "").trim();
-      brand.referralCode = rc || undefined;
-    }
-
-    // ---------------- category (DB backed) ----------------
-    const catInput = typeof categoryId !== "undefined" ? categoryId : category;
-    if (typeof catInput !== "undefined") {
-      const raw = String(catInput || "").trim();
-      if (!raw) {
-        brand.category = undefined;
-        brand.categoryName = undefined;
-      } else {
-        const categoryDoc = await resolveCategory(raw);
-        if (!categoryDoc) return res.status(400).json({ message: "Invalid category" });
-        brand.category = categoryDoc._id;
-        brand.categoryName = categoryDoc.name;
-      }
-    }
-
-    // ---------------- business type (store NAME string) ----------------
-    const btInput = typeof businessTypeId !== "undefined" ? businessTypeId : businessType;
-    if (typeof btInput !== "undefined") {
-      const raw = String(btInput || "").trim();
-      if (!raw) {
-        brand.businessType = undefined;
-      } else {
-        const btDoc = await resolveBusinessType(raw);
-        if (!btDoc) return res.status(400).json({ message: "Invalid business type" });
-        brand.businessType = btDoc.name;
-      }
-    }
-
-    // ---------------- Logo: remove / upload / legacy url ----------------
-    if (String(removeLogo || "").toLowerCase() === "true") {
-      brand.logoFileId = undefined;
-      brand.logoFilename = undefined;
-      brand.logoUrl = undefined;
-    }
-
-    // ✅ If file exists -> upload to GridFS (like register)
-    if (req.file) {
-      const normalizedEmail = toNormEmail(brand.email);
-
-      const [saved] = await uploadToGridFS(req.file, {
-        prefix: "brand_logo",
-        metadata: {
-          kind: "brand_logo",
-          email: normalizedEmail,
-          brandId: brand.brandId,
-        },
-        req,
-      });
-
-      brand.logoFileId = saved.id;
-      brand.logoFilename = saved.filename;
-
-      // optional: clear legacy public url when GridFS is used
-      brand.logoUrl = undefined;
-    } else if (typeof logoUrl !== "undefined") {
-      // optional: only if you still want to support saving public URL
-      const lu = String(logoUrl || "").trim();
-      brand.logoUrl = lu ? normalizeUrl(lu) : undefined;
-    }
-
-    await brand.save();
-
-    // Sync EmailThread alias if name changed
-    if (nameChanged) {
-      const newAlias = brand.brandAliasEmail;
-      await EmailThread.updateMany(
-        { brand: brand._id },
-        {
-          $set: {
-            brandAliasEmail: newAlias,
-            brandDisplayAlias: newAlias,
-            "brandSnapshot.name": brand.name,
-          },
+        if (brand.failedLoginAttempts >= 3) {
+          brand.lockUntil = new Date(Date.now() + 24 * 60 * 60 * 1000);
         }
-      ).catch(() => {});
-    }
 
-    const safe = brand.toObject();
-    delete safe.password;
-    delete safe.__v;
+        await brand.save();
 
-    return res.status(200).json({ message: "Profile updated", brand: safe });
-  } catch (err) {
-    console.error("Error in updateProfile:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-};
-
-// ---------- 13) Request Email Update (Brand) ----------
-exports.requestEmailUpdate = async (req, res) => {
-  try {
-    const { brandId, newEmail, role = 'Brand' } = req.body || {};
-
-    if (!brandId) {
-      return res.status(400).json({ message: 'brandId is required' });
-    }
-    if (!role || String(role).trim() !== 'Brand') {
-      return res.status(400).json({ message: 'role must be "Brand"' });
-    }
-    if (req.brand && req.brand.brandId && req.brand.brandId !== brandId) {
-      return res.status(403).json({ message: 'Forbidden: brandId mismatch' });
-    }
-
-    if (!newEmail || !emailRegex.test(String(newEmail).trim())) {
-      return res.status(400).json({ message: 'Valid newEmail is required' });
-    }
-
-    const brand = await Brand.findOne({ brandId });
-    if (!brand) return res.status(404).json({ message: 'Brand not found' });
-
-    const oldEmail = toNormEmail(brand.email);
-    const nextEmail = toNormEmail(newEmail);
-
-    if (oldEmail === nextEmail) {
-      return res.status(400).json({ message: 'New email cannot be the same as current email' });
-    }
-
-    // Ensure newEmail not used by any other brand
-    const taken = await Brand.findOne({
-      email: exactEmailRegex(nextEmail),
-      brandId: { $ne: brandId },
-    });
-    if (taken) return res.status(409).json({ message: 'Email already in use' });
-
-    // 🔐 Generate ONE OTP and expiry (for NEW email only)
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-    // NEW email → upsert VerifyEmail for role 'Brand'
-    await VerifyEmail.findOneAndUpdate(
-      { email: nextEmail, role: 'Brand' },
-      {
-        $setOnInsert: { email: nextEmail, role: 'Brand' },
-        $set: { verified: false, verifiedAt: null, otpCode: otp, otpExpiresAt: expiresAt },
-        $inc: { attempts: 1 },
-      },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
-    );
-
-    // ✉️ Send OTP only to NEW email
-    const subject = 'Confirm email change';
-    const html = otpHtmlTemplate({
-      title: 'Verify your new email',
-      subtitle: 'Use this code to confirm your new email address.',
-      code: otp,
-      minutes: 10,
-      preheader: 'Confirm email change (new email)',
-    });
-    const text = otpTextFallback({ code: otp, minutes: 10, title: 'Verify your new email' });
-
-    await sendMail({ to: nextEmail, subject, html, text });
-
-    return res.status(200).json({ message: 'OTP sent to new email' });
-  } catch (err) {
-    console.error('Error in requestEmailUpdate:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-};
-
-
-// ---------- 14) Verify Email Update (Brand) ----------
-exports.verifyEmailUpdate = async (req, res) => {
-  try {
-    const { brandId, newEmail, otp, role = 'Brand' } = req.body || {};
-
-    if (!brandId) {
-      return res.status(400).json({ message: 'brandId is required' });
-    }
-    if (!role || String(role).trim() !== 'Brand') {
-      return res.status(400).json({ message: 'role must be "Brand"' });
-    }
-    if (req.brand && req.brand.brandId && req.brand.brandId !== brandId) {
-      return res.status(403).json({ message: 'Forbidden: brandId mismatch' });
-    }
-
-    if (!newEmail || !emailRegex.test(String(newEmail).trim())) {
-      return res.status(400).json({ message: 'Valid newEmail is required' });
-    }
-    if (!otp) {
-      return res.status(400).json({ message: 'otp is required' });
-    }
-
-    const brand = await Brand.findOne({ brandId });
-    if (!brand) return res.status(404).json({ message: 'Brand not found' });
-
-    const oldEmail = toNormEmail(brand.email);
-    const nextEmail = toNormEmail(newEmail);
-
-    // Check OTP for new email (role = Brand)
-    const doc = await VerifyEmail.findOne({
-      email: nextEmail,
-      role: 'Brand',
-      otpCode: String(otp).trim(),
-      otpExpiresAt: { $gt: new Date() },
-    });
-    if (!doc) {
-      return res.status(400).json({ message: 'Invalid or expired OTP for new email' });
-    }
-
-    // Make sure no other brand owns that new email
-    const taken = await Brand.findOne({
-      email: exactEmailRegex(nextEmail),
-      brandId: { $ne: brandId },
-    });
-    if (taken) return res.status(409).json({ message: 'Email already in use' });
-
-    // Update Brand email
-    brand.email = nextEmail;
-    await brand.save();
-
-    // Mark new email as verified & clear OTP
-    doc.verified = true;
-    doc.verifiedAt = new Date();
-    doc.otpCode = undefined;
-    doc.otpExpiresAt = undefined;
-    await doc.save();
-
-    // Optional: clean up old email VerifyEmail record
-    await VerifyEmail.deleteOne({ email: oldEmail, role: 'Brand' }).catch(() => { });
-
-    // Fresh JWT reflecting new email
-    const token = jwt.sign(
-      { brandId: brand.brandId, email: brand.email },
-      JWT_SECRET,
-      { expiresIn: '100d' }
-    );
-
-    return res
-      .status(200)
-      .json({ message: 'Email updated successfully', email: brand.email, token });
-  } catch (err) {
-    console.error('Error in verifyEmailUpdate:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-};
-
-// ---------- 15) Meta: categories + business types ----------
-exports.getMetaOptions = async (_req, res) => {
-  try {
-    const [categories, businessTypes] = await Promise.all([
-      Category.find().select('name id').sort({ id: 1, name: 1 }).lean(),
-      BusinessType.find().select('name').sort({ name: 1 }).lean(),
-    ]);
-
-    return res.status(200).json({ categories, businessTypes });
-  } catch (err) {
-    console.error('Error in getMetaOptions:', err);
-    return res.status(500).json({ message: 'Failed to fetch options' });
-  }
-};
-
-exports.searchInfluencersForBrand = async (req, res) => {
-  try {
-    const { brandId, query, filters = {} } = req.body || {};
-    if (!brandId || !query) {
-      return res.status(400).json({ message: 'brandId and query are required' });
-    }
-
-    // 1) Advanced filters gate (level-aware)
-    const level = await readAdvancedFiltersLevel(brandId); // 'none' | 'mvp' | 'full'
-    if (Object.keys(filters).length) {
-      if (level === 'none') {
-        return res.status(403).json({ message: 'Advanced filters not available on your plan.' });
+        throw new ValidationError("Invalid credentials");
       }
-      if (level === 'mvp') {
-        // Optionally sanitize filters to allowed MVP subset
-        // e.g., delete filters.demographics; delete filters.lookalikes; keep basics, etc.
+
+      // reset on success
+      if (brand.failedLoginAttempts || brand.lockUntil) {
+        brand.failedLoginAttempts = 0;
+        brand.lockUntil = null;
+        await brand.save();
       }
+
+      const token = signJwt({
+        brandId: brand.brandId ? String(brand.brandId) : brand._id.toString(),
+        role: "brand",
+        email: brand.email,
+      });
+
+      return ApiResponse.sendOk(
+        res,
+        HttpStatus.OK,
+        { message: "Brand sign in successful", brandId: brand.brandId ? String(brand.brandId) : brand._id.toString(), token, mode: "old" },
+        requestId
+      );
     }
 
-    // 2) Consume search quota & charge internal credits
-    const take = await consumeWithCredits(brandId, 'search_quota', 1);
-    if (!take.ok) {
-      return res.status(403).json({
-        message: `Search limit reached. Remaining: ${take.remaining}`,
-        code: take.code || 'LIMIT'
+    // NEW model: limiter
+    await enforceSigninLimit(normalizedEmail, "signin_limit");
+
+    const ok = await bcrypt.compare(password, String(brand.password));
+    if (!ok) {
+      await recordFailedSignin(normalizedEmail, "signin_limit");
+      throw new ValidationError("Incorrect Password");
+    }
+
+    // reset limiter on success (recommended)
+    await resetSigninLimit(normalizedEmail, "signin_limit");
+
+    const token = signJwt({
+      brandId: brand._id.toString(),
+      role: "brand",
+      email: brand.email,
+    });
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.OK,
+      { message: "Brand sign in successful", brandId: brand._id.toString(), token, mode: "new" },
+      requestId
+    );
+  } catch (err) {
+    if (err instanceof ApiError) return next(err);
+    return next(new InternalError("Internal server error", undefined, err));
+  }
+}
+
+/**
+ * FORGOT API 1: SEND OTP (Brand)
+ * - NEW model: VerifyOtp-based
+ * - OLD model: (fallback) still uses VerifyOtp for OTP delivery but password update will be legacy-safe
+ */
+async function sendOtpForgotBrand(req, res, next) {
+  const requestId = req.requestId;
+
+  try {
+    const { email } = req.body || {};
+    if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    const brand = await findBrandByEmail(normalizedEmail);
+    if (!brand) throw new NotFoundError("Brand account not found");
+
+    await enforceOtpLimitByKey(normalizedEmail, "forgot_limit");
+
+    const otpPlain = genOtp();
+    const otpHashed = hashOtp(normalizedEmail, otpPlain);
+
+    await VerifyOtpModel.create({
+      email: normalizedEmail,
+      role: "brand",
+      otp: otpHashed,
+      status: 0,
+      userId: brand._id,
+      docType: "otp",
+      purpose: "reset_password",
+    });
+
+    const { subject, text, html } = resetOtpEmailTemplate({
+      otp: otpPlain,
+      role: "Brand",
+      expiryMinutes: OTP_TTL_MIN,
+      purpose: "reset_password",
+    });
+
+    await sendEmail({ to: normalizedEmail, subject, text, html });
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.OK,
+      { message: "OTP sent for password reset", email: normalizedEmail, mode: IS_NEW_BRAND_MODEL ? "new" : "old" },
+      requestId
+    );
+  } catch (err) {
+    if (err instanceof ApiError) return next(err);
+    return next(new InternalError("Internal server error", undefined, err));
+  }
+}
+
+/**
+ * FORGOT API 2: VERIFY OTP (Brand) -> returns resetToken
+ * Works for both modes (token authorizes password reset).
+ */
+async function verifyOtpForgotBrand(req, res, next) {
+  const requestId = req.requestId;
+
+  try {
+    const { email, otp } = req.body || {};
+
+    if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
+    if (!otp || !/^\d{6}$/.test(String(otp))) throw new ValidationError("Valid 6-digit OTP is required");
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    const brand = await findBrandByEmail(normalizedEmail);
+    if (!brand) throw new NotFoundError("Brand account not found");
+
+    const otpDoc = await VerifyOtpModel.findOne({
+      email: normalizedEmail,
+      role: "brand",
+      status: 0,
+      docType: "otp",
+      purpose: "reset_password",
+    })
+      .sort({ createdAt: -1 })
+      .exec();
+
+    if (!otpDoc) throw new ValidationError("OTP not requested");
+
+    const ageMs = Date.now() - new Date(otpDoc.createdAt).getTime();
+    if (ageMs > OTP_TTL_MIN * 60 * 1000) throw new ValidationError("OTP expired. Please request again.");
+
+    const incomingHash = hashOtp(normalizedEmail, String(otp));
+    if (incomingHash !== otpDoc.otp) throw new ValidationError("Invalid OTP");
+
+    otpDoc.status = 1;
+    otpDoc.userId = brand._id;
+    await otpDoc.save();
+
+    // brandId claim:
+    // - NEW uses _id
+    // - OLD may prefer brandId uuid if exists (but _id works too if your reset uses _id)
+    const brandIdClaim = brand.brandId ? String(brand.brandId) : brand._id.toString();
+
+    const resetToken = signResetJwt({
+      tokenType: "pwd_reset",
+      role: "brand",
+      brandId: brandIdClaim,
+      email: brand.email,
+      resetId: otpDoc._id.toString(),
+    });
+
+    return ApiResponse.sendOk(res, HttpStatus.OK, { message: "OTP verified", resetToken }, requestId);
+  } catch (err) {
+    if (err instanceof ApiError) return next(err);
+    return next(new InternalError("Internal server error", undefined, err));
+  }
+}
+
+/**
+ * FORGOT API 3: UPDATE PASSWORD (Brand)
+ * - NEW model: expects controller-hash and stores hashed
+ * - OLD model: sets plain password (model pre-save hook hashes) if old schema requires it
+ */
+async function updatePasswordBrand(req, res, next) {
+  const requestId = req.requestId;
+
+  try {
+    // accept Bearer token
+    const token = getBearerToken(req);
+
+    const secret = process.env.JWT_SECRET;
+    if (!secret) throw new InternalError("JWT_SECRET is missing in env");
+
+    const decoded = jwt.verify(token, secret);
+
+    if (
+      decoded?.tokenType !== "pwd_reset" ||
+      decoded?.role !== "brand" ||
+      !decoded?.brandId ||
+      !decoded?.resetId ||
+      !decoded?.email
+    ) {
+      throw new ApiError({
+        status: HttpStatus.UNAUTHORIZED,
+        code: ErrorCodes.AUTH_INVALID_TOKEN,
+        message: "Invalid reset token",
       });
     }
 
-    // 3) ...perform your search here...
-    // const results = await Modash.search(query, filters); // pseudo
-    const results = []; // TODO: hook your provider
+    const { newPassword } = req.body || {};
+    if (!newPassword) throw new ValidationError("newPassword is required");
+    if (!isPasswordLenOk(newPassword)) throw new ValidationError("Password must be 8–16 characters.");
 
-    return res.status(200).json({
-      results,
-      quotas: { searchRemaining: take.remaining }
-    });
-  } catch (err) {
-    console.error('searchInfluencersForBrand error:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-};
+    const otpDoc = await VerifyOtpModel.findOne({
+      _id: decoded.resetId,
+      email: String(decoded.email).toLowerCase().trim(),
+      role: "brand",
+      status: 1,
+      docType: "otp",
+      purpose: "reset_password",
+    }).exec();
 
-// GET /brand/influencer/:id/view?brandId=...
-exports.viewInfluencerProfile = async (req, res) => {
-  try {
-    const { brandId } = req.query;
-    const influencerId = req.params.id;
-    if (!brandId || !influencerId) {
-      return res.status(400).json({ message: 'brandId and influencerId are required' });
-    }
+    if (!otpDoc) throw new ValidationError("Invalid or expired reset request");
 
-    const take = await consumeWithCredits(brandId, 'profile_view_quota', 1);
-    if (!take.ok) {
-      return res.status(403).json({ message: `Profile view limit reached. Remaining: ${take.remaining}` });
-    }
+    const verifiedAt = new Date(otpDoc.updatedAt ?? otpDoc.createdAt).getTime();
+    const ageMs = Date.now() - verifiedAt;
+    if (ageMs > RESET_TTL_MIN * 60 * 1000) throw new ValidationError("Reset session expired. Verify OTP again.");
 
-    // fetch and return influencer profile (+ any masking logic if needed)
-    // const profile = await Influencer.findOne({ influencerId }).lean();
-    const profile = { influencerId }; // placeholder
-
-    return res.status(200).json({ profile, quotas: { profileViewRemaining: take.remaining } });
-  } catch (err) {
-    console.error('viewInfluencerProfile error:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-};
-
-exports.sendInvite = async (req, res) => {
-  try {
-    const { brandId, influencerId, messageTemplateId, customMessage } = req.body || {};
-    if (!brandId || !influencerId) return res.status(400).json({ message: 'brandId and influencerId are required' });
-
-    // Message gates
-    if (customMessage && customMessage.trim()) {
-      const ok = await requireBrandFeature(brandId, 'custom_messaging', 'Custom messaging is not available on your plan.');
-      if (!ok.ok) return res.status(403).json({ message: ok.message });
-    }
-
-    if (messageTemplateId) {
-      // FREE plan allows only 1 basic template; higher plans unlimited (limit:0)
-      const takeTpl = await consumeBrandUnits(brandId, 'message_templates_limit', 0); // just check availability
-      if (!takeTpl.ok && takeTpl.code === 'NO_FEATURE') {
-        return res.status(403).json({ message: 'Message templates not available on your plan.' });
+    // Find brand (support uuid brandId OR _id)
+    let brandExisting = null;
+    if (decoded.brandId && typeof decoded.brandId === "string") {
+      // try _id
+      brandExisting = await BrandModel.findById(decoded.brandId).exec();
+      if (!brandExisting) {
+        // try uuid field
+        if (hasSchemaPath(BrandModel, "brandId")) {
+          brandExisting = await BrandModel.findOne({ brandId: decoded.brandId }).exec();
+        }
       }
-      // Note: We don’t decrement here; templates_limit is a cap on count, not usage.
-      // Enforce template count in template management endpoints.
+    }
+    if (!brandExisting) throw new NotFoundError("Brand not found");
+
+    // prevent reusing the last password (works for both)
+    if (brandExisting.password) {
+      const same =
+        typeof brandExisting.comparePassword === "function"
+          ? await brandExisting.comparePassword(newPassword)
+          : await bcrypt.compare(newPassword, String(brandExisting.password));
+      if (same) throw new ValidationError("New password cannot be the same as your last password");
     }
 
-    // Quota for sending invites
-    const take = await consumeBrandUnits(brandId, 'invites_quota', 1);
-    if (!take.ok) {
-      return res.status(403).json({ message: `Invite limit reached. Remaining: ${take.remaining}` });
+    if (IS_NEW_BRAND_MODEL) {
+      // NEW: store hashed
+      brandExisting.password = await hashPassword(newPassword);
+    } else {
+      // OLD: store plain; model hook hashes
+      brandExisting.password = String(newPassword);
+      // optional legacy lock reset
+      if (typeof brandExisting.failedLoginAttempts !== "undefined") brandExisting.failedLoginAttempts = 0;
+      if (typeof brandExisting.lockUntil !== "undefined") brandExisting.lockUntil = null;
     }
 
-    // TODO: create Invite record, notify influencer, etc.
-    return res.status(200).json({ message: 'Invite sent.', invitesRemaining: take.remaining });
+    await brandExisting.save();
+
+    await VerifyOtpModel.deleteOne({ _id: otpDoc._id }).exec();
+    await resetSigninLimit(String(decoded.email).toLowerCase().trim(), "signin_limit");
+
+    return ApiResponse.sendOk(res, HttpStatus.OK, { message: "Password updated successfully" }, requestId);
   } catch (err) {
-    console.error('sendInvite error:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    if (err instanceof ApiError) return next(err);
+    return next(new InternalError("Internal server error", undefined, err));
   }
-};
+}
 
-exports.openDispute = async (req, res) => {
-  const { brandId, contractId, reason } = req.body || {};
-  if (!brandId || !contractId || !reason) {
-    return res.status(400).json({ message: 'brandId, contractId, reason required' });
-  }
-  const ok = await requireBrandFeature(brandId, 'support_dispute', 'Dispute assistance is not available on your plan.');
-  if (!ok.ok) return res.status(403).json({ message: ok.message });
-
-  // ...create dispute ticket
-  return res.status(201).json({ message: 'Dispute opened' });
-};
-
-exports.getBrandQuotas = async (req, res) => {
-  const { brandId } = req.query;
-  if (!brandId) return res.status(400).json({ message: 'brandId is required' });
-
-  const brand = await Brand.findOne({ brandId }, 'subscription').lean();
-  if (!brand?.subscription) return res.status(404).json({ message: 'Subscription not found' });
-
-  const byKey = new Map((brand.subscription.features || []).map(f => [f.key, f]));
-  const v = (k) => byKey.get(k) || {};
-  const toNum = (x) => {
-    const n = Number(x);
-    return Number.isFinite(n) ? n : 0;
-  };
-
-  const publicCreditsShown =
-    toNum(v('search_quota').limit ?? v('search_quota').value) +
-    toNum(v('profile_view_quota').limit ?? v('profile_view_quota').value);
-
-  return res.status(200).json({
-    public: {
-      searches: { limit: v('search_quota').limit ?? 0, used: v('search_quota').used ?? 0 },
-      profileViews: { limit: v('profile_view_quota').limit ?? 0, used: v('profile_view_quota').used ?? 0 },
-      invites: { limit: v('invites_quota').limit ?? 0, used: v('invites_quota').used ?? 0 },
-      liveCampaigns: { limit: v('live_campaigns_limit').limit ?? 0, used: v('live_campaigns_limit').used ?? 0 },
-      publicCreditsShown, // per your doc
-    },
-    internal: {
-      modashCreditsUsed: brand.subscription.internalCredits?.used ?? 0,
-      resetsAt: brand.subscription.internalCredits?.resetsAt ?? null,
-    }
-  });
-};
-
-// GET /brand/onboarding
-exports.getOnboardingStatus = async (req, res) => {
-  try {
-    const brandId = req.brand?.brandId;
-    const brand = await Brand.findOne({ brandId }, 'onboarding').lean();
-    if (!brand) return res.status(404).json({ message: 'Brand not found' });
-
-    return res.status(200).json({
-      brandTourSeen: Boolean(brand.onboarding?.brandTourSeen),
-      brandTourSeenAt: brand.onboarding?.brandTourSeenAt || null,
-    });
-  } catch (err) {
-    console.error('getOnboardingStatus error:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-};
-
-// POST /brand/onboarding/brand-tour/seen
-exports.markBrandTourSeen = async (req, res) => {
-  try {
-    const brandId = req.brand?.brandId;
-
-    await Brand.updateOne(
-      { brandId },
-      {
-        $set: {
-          'onboarding.brandTourSeen': true,
-          'onboarding.brandTourSeenAt': new Date(),
-        },
-      }
-    );
-
-    return res.status(200).json({ ok: true });
-  } catch (err) {
-    console.error('markBrandTourSeen error:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
+module.exports = {
+  sendSignupOtp,
+  verifyOtpSignUp,
+  saveBrandOnboarding,
+  signInBrand,
+  sendOtpForgotBrand,
+  verifyOtpForgotBrand,
+  updatePasswordBrand,
 };

@@ -30,9 +30,6 @@ const {
   markInfluencerTourSeen,
 } = require('../controllers/influencerController');
 
-
-const { searchBrands } = require('../controllers/brandController');
-
 // Public endpoints:
 router.post('/request-otp', requestOtpInfluencer);
 router.post('/verify-otp', verifyOtpInfluencer);
@@ -57,17 +54,12 @@ router.post('/updatePaymentMethod', verifyToken, updatePaymentMethod);
 router.post('/suggestInfluencers', verifyToken, suggestInfluencers);
 
 // POST /influencer/searchBrands → search brands by name
-router.post(
-  '/searchBrand',
-  verifyToken,
-  searchBrands
-);
 
 router.post('/updateProfile', verifyToken, uploadProfileImage, updateProfile);
 router.post('/requestEmailUpdate', verifyToken, requestEmailUpdate);
 router.post('/verifyEmailUpdateOtp', verifyToken, verifyotp)
 
-router.get('/lite',verifyToken, getLiteById);;
+router.get('/lite', verifyToken, getLiteById);;
 
 router.post(
   '/claim-email/request-otp',

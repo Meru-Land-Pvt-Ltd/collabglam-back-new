@@ -1,0 +1,15 @@
+// src/core/http/errorCodes.js
+const ErrorCodes = Object.freeze({
+  VALIDATION_FAILED: "VALIDATION_FAILED",
+
+  AUTH_INVALID_TOKEN: "AUTH_INVALID_TOKEN",
+  AUTH_FORBIDDEN: "AUTH_FORBIDDEN",
+
+  RESOURCE_NOT_FOUND: "RESOURCE_NOT_FOUND",
+  CONFLICT: "CONFLICT",
+
+  RATE_LIMITED: "RATE_LIMITED",
+  INTERNAL_ERROR: "INTERNAL_ERROR",
+});
+
+module.exports = { ErrorCodes };
