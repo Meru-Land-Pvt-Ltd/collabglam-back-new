@@ -7,8 +7,6 @@ const { Schema } = mongoose;
 // ---- helpers / enums (optional) ----
 const emailRegex = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 
-const COMPANY_SIZE_ENUM = ["1-10", "11-50", "51-200", "200+"];
-
 const DEFAULT_FREE_PLAN_ID = "dcd11cf7-50ca-4891-ae15-5045080f72fe";
 
 // ---------------- Subscription sub-schemas ----------------
@@ -79,7 +77,7 @@ const brandSchema = new Schema(
     name: { type: String, required: true, trim: true },
 
     // optional (choose enum or plain string)
-    companySize: { type: String, required: false, trim: true, enum: COMPANY_SIZE_ENUM },
+    companySize: { type: String, required: false, trim: true },
 
     industry: { type: String, required: true, trim: true },
 

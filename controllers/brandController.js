@@ -1,4 +1,4 @@
-// controllers/brandAuth.controller.js
+// controllers/brandController.js  (NEW MODEL ONLY)
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -9,9 +9,6 @@ const BrandModel = BrandModelImport.BrandModel || BrandModelImport;
 
 const VerifyOtpModelImport = require("../models/verifyOtp");
 const VerifyOtpModel = VerifyOtpModelImport.VerifyOtpModel || VerifyOtpModelImport;
-
-const InfluencerModelImport = require("../models/influencer");
-const InfluencerModel = InfluencerModelImport.InfluencerModel || InfluencerModelImport;
 
 const OtpTemplateImport = require("../template/otpTemplate");
 const buildOtpEmailTemplate = OtpTemplateImport.buildOtpEmailTemplate || OtpTemplateImport;
@@ -35,45 +32,31 @@ const ConflictError = ApiErrorImport.ConflictError;
 const InternalError = ApiErrorImport.InternalError;
 const NotFoundError = ApiErrorImport.NotFoundError;
 
-// ✅ Local fallback (if your ErrorCodes module differs)
-const ErrorCodes = {
-  AUTH_INVALID_TOKEN: "AUTH_INVALID_TOKEN",
-  OTP_RATE_LIMIT: "OTP_RATE_LIMIT",
-  OTP_DAILY_LIMIT: "OTP_DAILY_LIMIT",
-  SIGNIN_RATE_LIMIT: "SIGNIN_RATE_LIMIT",
-  SIGNIN_DAILY_LIMIT: "SIGNIN_DAILY_LIMIT",
-};
+// Prefer your real ErrorCodes if available; else fallback
+let ErrorCodes;
+try {
+  ErrorCodes = require("../core/http/errorCodes").ErrorCodes;
+} catch {
+  ErrorCodes = {
+    AUTH_INVALID_TOKEN: "AUTH_INVALID_TOKEN",
+    AUTH_FORBIDDEN: "AUTH_FORBIDDEN",
+    OTP_RATE_LIMIT: "OTP_RATE_LIMIT",
+    OTP_DAILY_LIMIT: "OTP_DAILY_LIMIT",
+    SIGNIN_RATE_LIMIT: "SIGNIN_RATE_LIMIT",
+    SIGNIN_DAILY_LIMIT: "SIGNIN_DAILY_LIMIT",
+    INTERNAL_ERROR: "INTERNAL_ERROR",
+  };
+}
 
-// ------------------------------------------------------------------------------------
-// MODE DETECTION
-// "new" brand model = has brandName + industry fields (your new TS model)
-// "old" brand model = legacy required fields like phone/country/category, etc.
-// ------------------------------------------------------------------------------------
-const hasSchemaPath = (model, path) => {
-  try {
-    return Boolean(model?.schema?.path?.(path));
-  } catch {
-    return false;
-  }
-};
-
-const IS_NEW_BRAND_MODEL =
-  hasSchemaPath(BrandModel, "brandName") && hasSchemaPath(BrandModel, "industry");
-
-const IS_OLD_BRAND_MODEL = !IS_NEW_BRAND_MODEL;
-
-// ------------------------------------------------------------------------------------
-// CONFIG
-// New model flow: controller hashes password and stores hashed in brand.password
-// Old model flow: model likely hashes in pre-save hook => do NOT pre-hash when saving brand.password
-// ------------------------------------------------------------------------------------
+// -------------------- config --------------------
 const SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS || 10);
 const OTP_TTL_MIN = Number(process.env.OTP_TTL_MINUTES || 3);
 const RESET_TTL_MIN = Number(process.env.RESET_PASSWORD_TTL_MINUTES || 15);
 
-const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+const normalizeEmail = (e) => String(e || "").trim().toLowerCase();
+const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || ""));
+const genOtp = () => String(Math.floor(100000 + Math.random() * 900000));
 
-const genOtp = () => String(Math.floor(100000 + Math.random() * 900000)); // 6-digit
 const hashOtp = (email, otp) => {
   const secret = process.env.OTP_SECRET || "dev-secret";
   return crypto.createHash("sha256").update(`${email}:${otp}:${secret}`).digest("hex");
@@ -85,7 +68,7 @@ const isPasswordLenOk = (p) => {
 };
 
 async function hashPassword(password) {
-  return bcrypt.hash(password, SALT_ROUNDS);
+  return bcrypt.hash(String(password), SALT_ROUNDS);
 }
 
 function signJwt(payload) {
@@ -94,7 +77,6 @@ function signJwt(payload) {
   return jwt.sign(payload, secret, { expiresIn: process.env.JWT_EXPIRES_IN ?? "7d" });
 }
 
-// ✅ Reset token with short expiry
 function signResetJwt(payload) {
   const secret = process.env.JWT_SECRET;
   if (!secret) throw new InternalError("JWT_SECRET is missing in env");
@@ -113,43 +95,44 @@ function getBearerToken(req) {
   return auth.slice("Bearer ".length).trim();
 }
 
-const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const exactEmailRegex = (email) => new RegExp(`^${escapeRegExp(String(email).trim())}$`, "i");
-
-async function findBrandByEmail(email) {
-  const normalizedEmail = String(email || "").trim().toLowerCase();
-
-  // New model usually stores lowercase -> direct match works
-  if (IS_NEW_BRAND_MODEL) {
-    return BrandModel.findOne({ email: normalizedEmail }).exec();
-  }
-
-  // Old model may have mixed case -> use exact case-insensitive regex
-  return BrandModel.findOne({ email: exactEmailRegex(normalizedEmail) }).exec();
-}
-
-// ✅ expected page format: [{ question: string, answers: string[] }]
+// ✅ expected onboarding page format: [{ question: string, answers: string[] }]
 function isQAArray(v) {
   if (!Array.isArray(v)) return false;
-
   return v.every((item) => {
     if (item === null || typeof item !== "object" || Array.isArray(item)) return false;
-
     const q = item.question;
     const a = item.answers;
-
     if (typeof q !== "string" || q.trim().length === 0) return false;
     if (!Array.isArray(a) || a.length === 0) return false;
     if (!a.every((x) => typeof x === "string" && x.trim().length > 0)) return false;
-
     return true;
   });
 }
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////
-// ✅✅✅ OTP LIMITER (Signup + Forgot) stored in VerifyOtp collection
-//////////////////////////////////////////////////////////////////////////////////////////////////////
+// -------------------- mongoose error -> ApiError --------------------
+function rethrowAsApiError(err) {
+  // Duplicate key
+  if (err && err.code === 11000) {
+    throw new ConflictError("Email already registered. Please Login.", { keyValue: err.keyValue });
+  }
 
+  // Mongoose validation error
+  if (err && err.name === "ValidationError") {
+    const fields = err.errors ? Object.keys(err.errors) : [];
+    throw new ValidationError(err.message, { fields });
+  }
+
+  // Cast error etc.
+  if (err && err.name === "CastError") {
+    throw new ValidationError("Invalid input", { field: err.path });
+  }
+
+  throw err;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+// OTP LIMITER (Signup + Forgot) stored in VerifyOtp collection
+//////////////////////////////////////////////////////////////////////////////////////////////////////
 const OTP_TOTAL = 6;
 const OTP_BATCH_LIMIT = 3;
 const OTP_COOLDOWN_MIN = 15;
@@ -178,7 +161,6 @@ async function enforceOtpLimitByKey(email, key) {
     { new: true, upsert: true }
   ).exec();
 
-  // reset after 24 hours
   if (limitDoc.signupOtpResetAt && nowMs >= new Date(limitDoc.signupOtpResetAt).getTime()) {
     limitDoc.signupOtpSend = OTP_TOTAL;
     limitDoc.signupOtpBatchCount = 0;
@@ -187,7 +169,6 @@ async function enforceOtpLimitByKey(email, key) {
     await limitDoc.save();
   }
 
-  // daily limit
   if ((limitDoc.signupOtpSend ?? OTP_TOTAL) <= 0) {
     if (!limitDoc.signupOtpResetAt) {
       limitDoc.signupOtpResetAt = new Date(nowMs + OTP_RESET_HOURS * 60 * 60 * 1000);
@@ -200,7 +181,6 @@ async function enforceOtpLimitByKey(email, key) {
     });
   }
 
-  // cooldown
   if (limitDoc.signupOtpCooldownUntil && nowMs < new Date(limitDoc.signupOtpCooldownUntil).getTime()) {
     throw new ApiError({
       status: HttpStatus.TOO_MANY_REQUESTS || 429,
@@ -209,17 +189,14 @@ async function enforceOtpLimitByKey(email, key) {
     });
   }
 
-  // consume 1 OTP
   limitDoc.signupOtpSend = (limitDoc.signupOtpSend ?? OTP_TOTAL) - 1;
   limitDoc.signupOtpBatchCount = (limitDoc.signupOtpBatchCount ?? 0) + 1;
 
-  // after 3 => lock 15 min
   if (limitDoc.signupOtpBatchCount >= OTP_BATCH_LIMIT) {
     limitDoc.signupOtpCooldownUntil = new Date(nowMs + OTP_COOLDOWN_MIN * 60 * 1000);
     limitDoc.signupOtpBatchCount = 0;
   }
 
-  // when total becomes 0 => lock 24h
   if (limitDoc.signupOtpSend <= 0) {
     limitDoc.signupOtpSend = 0;
     limitDoc.signupOtpResetAt = new Date(nowMs + OTP_RESET_HOURS * 60 * 60 * 1000);
@@ -229,25 +206,23 @@ async function enforceOtpLimitByKey(email, key) {
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////
-// ✅✅✅ SIGNIN LIMITER (only for incorrect password) stored in VerifyOtp collection (NEW FLOW)
-// OLD FLOW will use brand.failedLoginAttempts + lockUntil if those fields exist
+// SIGNIN LIMITER stored in VerifyOtp collection
 //////////////////////////////////////////////////////////////////////////////////////////////////////
-
 const SIGNIN_TOTAL = 9;
 const SIGNIN_BATCH = 3;
 const SIGNIN_LOCK_1_MIN = 1;
 const SIGNIN_LOCK_15_MIN = 15;
 const SIGNIN_LOCK_24_HOURS = 24;
 
-async function getSigninLimitDoc(email, key) {
+async function getSigninLimitDoc(email) {
   return VerifyOtpModel.findOneAndUpdate(
-    { email, role: "brand", docType: "limit", key },
+    { email, role: "brand", docType: "limit", key: "signin_limit" },
     {
       $setOnInsert: {
         email,
         role: "brand",
         docType: "limit",
-        key,
+        key: "signin_limit",
         otp: "__SIGNIN_LIMIT__",
         status: 0,
         userId: null,
@@ -269,9 +244,9 @@ function msToWaitString(ms) {
   return `${hr} hours`;
 }
 
-async function enforceSigninLimit(email, key) {
+async function enforceSigninLimit(email) {
   const nowMs = Date.now();
-  const doc = await getSigninLimitDoc(email, key);
+  const doc = await getSigninLimitDoc(email);
 
   if (doc.signinResetAt && nowMs >= new Date(doc.signinResetAt).getTime()) {
     doc.signinFailedCount = 0;
@@ -302,9 +277,9 @@ async function enforceSigninLimit(email, key) {
   }
 }
 
-async function recordFailedSignin(email, key) {
+async function recordFailedSignin(email) {
   const nowMs = Date.now();
-  const doc = await getSigninLimitDoc(email, key);
+  const doc = await getSigninLimitDoc(email);
 
   if (doc.signinResetAt && nowMs >= new Date(doc.signinResetAt).getTime()) {
     doc.signinFailedCount = 0;
@@ -332,98 +307,71 @@ async function recordFailedSignin(email, key) {
 
   if (doc.signinCooldownUntil && nowMs < new Date(doc.signinCooldownUntil).getTime()) {
     const waitMs = new Date(doc.signinCooldownUntil).getTime() - nowMs;
-
-    if ((doc.signinFailedCount ?? 0) >= SIGNIN_TOTAL) {
-      throw new ApiError({
-        status: HttpStatus.TOO_MANY_REQUESTS || 429,
-        code: ErrorCodes.SIGNIN_DAILY_LIMIT,
-        message: "Too many failed login attempts. Try again after 24 hours.",
-      });
-    }
-
     throw new ApiError({
       status: HttpStatus.TOO_MANY_REQUESTS || 429,
-      code: ErrorCodes.SIGNIN_RATE_LIMIT,
-      message: `Too many failed login attempts. Try again in ${msToWaitString(waitMs)}.`,
+      code: (doc.signinFailedCount ?? 0) >= SIGNIN_TOTAL ? ErrorCodes.SIGNIN_DAILY_LIMIT : ErrorCodes.SIGNIN_RATE_LIMIT,
+      message:
+        (doc.signinFailedCount ?? 0) >= SIGNIN_TOTAL
+          ? "Too many failed login attempts. Try again after 24 hours."
+          : `Too many failed login attempts. Try again in ${msToWaitString(waitMs)}.`,
     });
   }
 }
 
-async function resetSigninLimit(email, key) {
+async function resetSigninLimit(email) {
   await VerifyOtpModel.updateOne(
-    { email, role: "brand", docType: "limit", key },
+    { email, role: "brand", docType: "limit", key: "signin_limit" },
     { $set: { signinFailedCount: 0, signinCooldownUntil: null, signinResetAt: null } }
   ).exec();
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////
-// ✅✅✅ CONTROLLERS
+// CONTROLLERS (NEW MODEL ONLY)
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// 1) SEND OTP SIGNUP
 async function sendSignupOtp(req, res, next) {
-  const requestId = req.requestId;
+  const requestId = req.requestId || "";
 
   try {
-    const body = req.body || {};
-    const email = body.email;
+    const { brandName, name, email, companySize, industry, password } = req.body || {};
 
+    if (!brandName || !String(brandName).trim()) throw new ValidationError("Brand Name is required");
+    if (!name || !String(name).trim()) throw new ValidationError("Name is required");
     if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
-    const normalizedEmail = String(email).toLowerCase().trim();
+    if (!industry || !String(industry).trim()) throw new ValidationError("Industry is required");
+    if (!password || !String(password).trim()) throw new ValidationError("Password is required");
+    if (!isPasswordLenOk(password)) throw new ValidationError("Password must be 8–16 characters.");
 
-    // block if brand exists
-    const brandExists = await BrandModel.exists(
-      IS_NEW_BRAND_MODEL ? { email: normalizedEmail } : { email: exactEmailRegex(normalizedEmail) }
-    );
+    const normalizedEmail = normalizeEmail(email);
+
+    const brandExists = await BrandModel.exists({ email: normalizedEmail });
     if (brandExists) throw new ConflictError("Email already registered. Please Login.");
 
-    // limiter
     await enforceOtpLimitByKey(normalizedEmail, "signup_limit");
 
     const otpPlain = genOtp();
     const otpHashed = hashOtp(normalizedEmail, otpPlain);
 
-    // NEW model stores payload for later brand creation
-    if (IS_NEW_BRAND_MODEL) {
-      const { brandName, name, companySize, industry, password } = body;
+    const cleanCompanySize =
+      typeof companySize === "string" && companySize.trim().length > 0 ? companySize.trim() : "";
 
-      if (!brandName || !String(brandName).trim()) throw new ValidationError("Brand Name is required");
-      if (!industry || !String(industry).trim()) throw new ValidationError("Industry is required");
-      if (!password || !String(password).trim()) throw new ValidationError("Password is required");
-
-      if (!isPasswordLenOk(password)) throw new ValidationError("Password must be 8–16 characters.");
-
-      const cleanCompanySize =
-        typeof companySize === "string" && companySize.trim().length > 0 ? companySize.trim() : "";
-
-      await VerifyOtpModel.create({
-        email: normalizedEmail,
-        role: "brand",
-        otp: otpHashed,
-        status: 0,
-        userId: null,
-        docType: "otp",
-        purpose: "signup",
-        signupPayload: {
-          brandName: String(brandName).trim(),
-          name: String(name || "").trim(),
-          companySize: cleanCompanySize,
-          industry: String(industry).trim(),
-          // controller-hash for NEW model
-          password: await hashPassword(String(password)),
-        },
-      });
-    } else {
-      // OLD model: no payload here (registration is separate in old system)
-      await VerifyOtpModel.create({
-        email: normalizedEmail,
-        role: "brand",
-        otp: otpHashed,
-        status: 0,
-        userId: null,
-        docType: "otp",
-        purpose: "signup",
-      });
-    }
+    await VerifyOtpModel.create({
+      email: normalizedEmail,
+      role: "brand",
+      otp: otpHashed,
+      status: 0,
+      userId: null,
+      docType: "otp",
+      purpose: "signup",
+      signupPayload: {
+        brandName: String(brandName).trim(),
+        name: String(name).trim(),
+        companySize: cleanCompanySize,
+        industry: String(industry).trim(),
+        password: await hashPassword(String(password)),
+      },
+    });
 
     const { subject, text, html } = buildOtpEmailTemplate({
       otp: otpPlain,
@@ -434,25 +382,17 @@ async function sendSignupOtp(req, res, next) {
 
     await sendEmail({ to: normalizedEmail, subject, text, html });
 
-    return ApiResponse.sendOk(
-      res,
-      HttpStatus.OK,
-      { message: "OTP sent successfully", email: normalizedEmail, mode: IS_NEW_BRAND_MODEL ? "new" : "old" },
-      requestId
-    );
+    return ApiResponse.sendOk(res, HttpStatus.OK, { message: "OTP sent successfully", email: normalizedEmail }, requestId);
   } catch (err) {
+    try { rethrowAsApiError(err); } catch (e) { err = e; }
     if (err instanceof ApiError) return next(err);
     return next(new InternalError("Internal server error", undefined, err));
   }
 }
 
-/**
- * VERIFY OTP + (NEW) CREATE BRAND
- * - NEW model: creates brand from saved signupPayload and returns token
- * - OLD model: only verifies OTP and returns success (registration happens elsewhere)
- */
+// 2) VERIFY OTP + CREATE BRAND
 async function verifyOtpSignUp(req, res, next) {
-  const requestId = req.requestId;
+  const requestId = req.requestId || "";
 
   try {
     const { email, otp } = req.body || {};
@@ -460,12 +400,9 @@ async function verifyOtpSignUp(req, res, next) {
     if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
     if (!otp || !/^\d{6}$/.test(String(otp))) throw new ValidationError("Valid 6-digit OTP is required");
 
-    const normalizedEmail = String(email).toLowerCase().trim();
+    const normalizedEmail = normalizeEmail(email);
 
-    // if brand already exists
-    const existing = await BrandModel.exists(
-      IS_NEW_BRAND_MODEL ? { email: normalizedEmail } : { email: exactEmailRegex(normalizedEmail) }
-    );
+    const existing = await BrandModel.exists({ email: normalizedEmail });
     if (existing) throw new ConflictError("Email already registered. Please Login.");
 
     const otpDoc = await VerifyOtpModel.findOne({
@@ -486,70 +423,46 @@ async function verifyOtpSignUp(req, res, next) {
     const incomingHash = hashOtp(normalizedEmail, String(otp));
     if (incomingHash !== otpDoc.otp) throw new ValidationError("Invalid OTP");
 
-    // OLD: only verify
-    if (IS_OLD_BRAND_MODEL) {
-      otpDoc.status = 1;
-      await otpDoc.save();
-
-      return ApiResponse.sendOk(
-        res,
-        HttpStatus.OK,
-        { message: "OTP verified. Please complete registration.", email: normalizedEmail, mode: "old" },
-        requestId
-      );
-    }
-
-    // NEW: create brand using saved payload
     const payload = otpDoc.signupPayload;
     if (!payload?.brandName || !payload?.industry || !payload?.password) {
       throw new ValidationError("Signup details missing. Please request OTP again.");
     }
 
+    const safeName = String(payload.name || "").trim() || String(payload.brandName).trim();
+
     const brand = await BrandModel.create({
       email: normalizedEmail,
       brandName: payload.brandName,
+      name: safeName,
+      companySize: payload.companySize || undefined,
       industry: payload.industry,
-      // password already hashed (NEW flow)
-      password: payload.password,
-      ...(payload?.name ? { name: payload.name } : {}),
-      ...(payload?.companySize ? { companySize: payload.companySize } : {}),
+      password: payload.password, // already hashed
     });
 
     otpDoc.status = 1;
     otpDoc.userId = brand._id;
     await otpDoc.save();
 
-    const token = signJwt({
-      brandId: brand._id.toString(),
-      role: "brand",
-      email: brand.email,
-    });
+    const token = signJwt({ brandId: brand._id.toString(), role: "brand", email: brand.email });
 
     return ApiResponse.sendOk(
       res,
       HttpStatus.CREATED,
-      { message: "Brand signup successful", brandId: brand._id.toString(), token, mode: "new" },
+      { message: "Brand signup successful", brandId: brand._id.toString(), token },
       requestId
     );
   } catch (err) {
+    try { rethrowAsApiError(err); } catch (e) { err = e; }
     if (err instanceof ApiError) return next(err);
     return next(new InternalError("Internal server error", undefined, err));
   }
 }
 
-/**
- * SAVE ONBOARDING
- * - NEW model: supports page1/page2/page3/proxyEmail/profilePic fields
- * - OLD model: returns 400 (not supported in legacy schema)
- */
+// 3) SAVE ONBOARDING
 async function saveBrandOnboarding(req, res, next) {
-  const requestId = req.requestId;
+  const requestId = req.requestId || "";
 
   try {
-    if (IS_OLD_BRAND_MODEL) {
-      throw new ValidationError("Onboarding pages are not supported on the old Brand model.");
-    }
-
     const user = req.user;
     if (!user?.brandId) throw new ValidationError("Invalid token payload");
     if (user.role !== "brand") throw new ValidationError("Invalid role");
@@ -582,8 +495,7 @@ async function saveBrandOnboarding(req, res, next) {
     const update = {};
 
     if (page1 !== undefined || ispage1Skip !== undefined) {
-      if (ispage1Skip !== undefined && typeof ispage1Skip !== "boolean")
-        throw new ValidationError("ispage1Skip must be boolean");
+      if (ispage1Skip !== undefined && typeof ispage1Skip !== "boolean") throw new ValidationError("ispage1Skip must be boolean");
       if (ispage1Skip === true) {
         update.page1 = [];
         update.ispage1Skip = true;
@@ -596,8 +508,7 @@ async function saveBrandOnboarding(req, res, next) {
     }
 
     if (page2 !== undefined || ispage2Skip !== undefined) {
-      if (ispage2Skip !== undefined && typeof ispage2Skip !== "boolean")
-        throw new ValidationError("ispage2Skip must be boolean");
+      if (ispage2Skip !== undefined && typeof ispage2Skip !== "boolean") throw new ValidationError("ispage2Skip must be boolean");
       if (ispage2Skip === true) {
         update.page2 = [];
         update.ispage2Skip = true;
@@ -610,8 +521,7 @@ async function saveBrandOnboarding(req, res, next) {
     }
 
     if (page3 !== undefined || ispage3Skip !== undefined) {
-      if (ispage3Skip !== undefined && typeof ispage3Skip !== "boolean")
-        throw new ValidationError("ispage3Skip must be boolean");
+      if (ispage3Skip !== undefined && typeof ispage3Skip !== "boolean") throw new ValidationError("ispage3Skip must be boolean");
       if (ispage3Skip === true) {
         update.page3 = [];
         update.ispage3Skip = true;
@@ -624,14 +534,12 @@ async function saveBrandOnboarding(req, res, next) {
     }
 
     if (proxyEmail !== undefined) {
-      if (typeof proxyEmail !== "string" || proxyEmail.trim().length === 0)
-        throw new ValidationError("proxyEmail must be a string");
+      if (typeof proxyEmail !== "string" || proxyEmail.trim().length === 0) throw new ValidationError("proxyEmail must be a string");
       update.proxyEmail = proxyEmail.trim();
     }
 
     if (profilePic !== undefined) {
-      if (typeof profilePic !== "string" || profilePic.trim().length === 0)
-        throw new ValidationError("profilePic must be a string");
+      if (typeof profilePic !== "string" || profilePic.trim().length === 0) throw new ValidationError("profilePic must be a string");
       update.profilePic = profilePic.trim();
       update.isProfilePicSkip = false;
     }
@@ -656,18 +564,15 @@ async function saveBrandOnboarding(req, res, next) {
       requestId
     );
   } catch (err) {
+    try { rethrowAsApiError(err); } catch (e) { err = e; }
     if (err instanceof ApiError) return next(err);
     return next(new InternalError("Internal server error", undefined, err));
   }
 }
 
-/**
- * SIGN IN (BRAND)
- * - NEW model: uses VerifyOtp signin limiter
- * - OLD model: uses legacy lockUntil/failedLoginAttempts if present
- */
+// 4) SIGN IN
 async function signInBrand(req, res, next) {
-  const requestId = req.requestId;
+  const requestId = req.requestId || "";
 
   try {
     const { email, password } = req.body || {};
@@ -675,108 +580,48 @@ async function signInBrand(req, res, next) {
     if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
     if (!password) throw new ValidationError("Valid password is required");
 
-    const normalizedEmail = String(email).toLowerCase().trim();
+    const normalizedEmail = normalizeEmail(email);
 
-    const brand = await findBrandByEmail(normalizedEmail);
+    const brand = await BrandModel.findOne({ email: normalizedEmail }).exec();
     if (!brand) throw new NotFoundError("Email does not exist. Please Sign Up");
-
     if (!brand.password) throw new ValidationError("Password not set. Please use Forgot Password");
 
-    // OLD model: keep legacy lock logic if fields exist
-    if (IS_OLD_BRAND_MODEL && (hasSchemaPath(BrandModel, "lockUntil") || hasSchemaPath(BrandModel, "failedLoginAttempts"))) {
-      const now = new Date();
-      if (brand.lockUntil && brand.lockUntil > now) {
-        throw new ApiError({
-          status: HttpStatus.FORBIDDEN,
-          code: ErrorCodes.SIGNIN_RATE_LIMIT,
-          message: "Account locked due to multiple failed login attempts. Try again later.",
-          details: { lockUntil: brand.lockUntil },
-        });
-      }
+    await enforceSigninLimit(normalizedEmail);
 
-      const isMatch =
-        typeof brand.comparePassword === "function"
-          ? await brand.comparePassword(password)
-          : await bcrypt.compare(password, String(brand.password));
-
-      if (!isMatch) {
-        brand.failedLoginAttempts = (brand.failedLoginAttempts || 0) + 1;
-
-        if (brand.failedLoginAttempts >= 3) {
-          brand.lockUntil = new Date(Date.now() + 24 * 60 * 60 * 1000);
-        }
-
-        await brand.save();
-
-        throw new ValidationError("Invalid credentials");
-      }
-
-      // reset on success
-      if (brand.failedLoginAttempts || brand.lockUntil) {
-        brand.failedLoginAttempts = 0;
-        brand.lockUntil = null;
-        await brand.save();
-      }
-
-      const token = signJwt({
-        brandId: brand.brandId ? String(brand.brandId) : brand._id.toString(),
-        role: "brand",
-        email: brand.email,
-      });
-
-      return ApiResponse.sendOk(
-        res,
-        HttpStatus.OK,
-        { message: "Brand sign in successful", brandId: brand.brandId ? String(brand.brandId) : brand._id.toString(), token, mode: "old" },
-        requestId
-      );
-    }
-
-    // NEW model: limiter
-    await enforceSigninLimit(normalizedEmail, "signin_limit");
-
-    const ok = await bcrypt.compare(password, String(brand.password));
+    const ok = await bcrypt.compare(String(password), String(brand.password));
     if (!ok) {
-      await recordFailedSignin(normalizedEmail, "signin_limit");
+      await recordFailedSignin(normalizedEmail);
       throw new ValidationError("Incorrect Password");
     }
 
-    // reset limiter on success (recommended)
-    await resetSigninLimit(normalizedEmail, "signin_limit");
+    await resetSigninLimit(normalizedEmail);
 
-    const token = signJwt({
-      brandId: brand._id.toString(),
-      role: "brand",
-      email: brand.email,
-    });
+    const token = signJwt({ brandId: brand._id.toString(), role: "brand", email: brand.email });
 
     return ApiResponse.sendOk(
       res,
       HttpStatus.OK,
-      { message: "Brand sign in successful", brandId: brand._id.toString(), token, mode: "new" },
+      { message: "Brand sign in successful", brandId: brand._id.toString(), token },
       requestId
     );
   } catch (err) {
+    try { rethrowAsApiError(err); } catch (e) { err = e; }
     if (err instanceof ApiError) return next(err);
     return next(new InternalError("Internal server error", undefined, err));
   }
 }
 
-/**
- * FORGOT API 1: SEND OTP (Brand)
- * - NEW model: VerifyOtp-based
- * - OLD model: (fallback) still uses VerifyOtp for OTP delivery but password update will be legacy-safe
- */
+// 5) FORGOT 1: SEND OTP
 async function sendOtpForgotBrand(req, res, next) {
-  const requestId = req.requestId;
+  const requestId = req.requestId || "";
 
   try {
     const { email } = req.body || {};
     if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
 
-    const normalizedEmail = String(email).toLowerCase().trim();
+    const normalizedEmail = normalizeEmail(email);
 
-    const brand = await findBrandByEmail(normalizedEmail);
+    const brand = await BrandModel.findOne({ email: normalizedEmail }).exec();
     if (!brand) throw new NotFoundError("Brand account not found");
 
     await enforceOtpLimitByKey(normalizedEmail, "forgot_limit");
@@ -803,24 +648,17 @@ async function sendOtpForgotBrand(req, res, next) {
 
     await sendEmail({ to: normalizedEmail, subject, text, html });
 
-    return ApiResponse.sendOk(
-      res,
-      HttpStatus.OK,
-      { message: "OTP sent for password reset", email: normalizedEmail, mode: IS_NEW_BRAND_MODEL ? "new" : "old" },
-      requestId
-    );
+    return ApiResponse.sendOk(res, HttpStatus.OK, { message: "OTP sent for password reset", email: normalizedEmail }, requestId);
   } catch (err) {
+    try { rethrowAsApiError(err); } catch (e) { err = e; }
     if (err instanceof ApiError) return next(err);
     return next(new InternalError("Internal server error", undefined, err));
   }
 }
 
-/**
- * FORGOT API 2: VERIFY OTP (Brand) -> returns resetToken
- * Works for both modes (token authorizes password reset).
- */
+// 6) FORGOT 2: VERIFY OTP -> reset token
 async function verifyOtpForgotBrand(req, res, next) {
-  const requestId = req.requestId;
+  const requestId = req.requestId || "";
 
   try {
     const { email, otp } = req.body || {};
@@ -828,9 +666,9 @@ async function verifyOtpForgotBrand(req, res, next) {
     if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
     if (!otp || !/^\d{6}$/.test(String(otp))) throw new ValidationError("Valid 6-digit OTP is required");
 
-    const normalizedEmail = String(email).toLowerCase().trim();
+    const normalizedEmail = normalizeEmail(email);
 
-    const brand = await findBrandByEmail(normalizedEmail);
+    const brand = await BrandModel.findOne({ email: normalizedEmail }).exec();
     if (!brand) throw new NotFoundError("Brand account not found");
 
     const otpDoc = await VerifyOtpModel.findOne({
@@ -855,36 +693,27 @@ async function verifyOtpForgotBrand(req, res, next) {
     otpDoc.userId = brand._id;
     await otpDoc.save();
 
-    // brandId claim:
-    // - NEW uses _id
-    // - OLD may prefer brandId uuid if exists (but _id works too if your reset uses _id)
-    const brandIdClaim = brand.brandId ? String(brand.brandId) : brand._id.toString();
-
     const resetToken = signResetJwt({
       tokenType: "pwd_reset",
       role: "brand",
-      brandId: brandIdClaim,
+      brandId: brand._id.toString(),
       email: brand.email,
       resetId: otpDoc._id.toString(),
     });
 
     return ApiResponse.sendOk(res, HttpStatus.OK, { message: "OTP verified", resetToken }, requestId);
   } catch (err) {
+    try { rethrowAsApiError(err); } catch (e) { err = e; }
     if (err instanceof ApiError) return next(err);
     return next(new InternalError("Internal server error", undefined, err));
   }
 }
 
-/**
- * FORGOT API 3: UPDATE PASSWORD (Brand)
- * - NEW model: expects controller-hash and stores hashed
- * - OLD model: sets plain password (model pre-save hook hashes) if old schema requires it
- */
+// 7) FORGOT 3: UPDATE PASSWORD (Bearer reset token)
 async function updatePasswordBrand(req, res, next) {
-  const requestId = req.requestId;
+  const requestId = req.requestId || "";
 
   try {
-    // accept Bearer token
     const token = getBearerToken(req);
 
     const secret = process.env.JWT_SECRET;
@@ -912,7 +741,7 @@ async function updatePasswordBrand(req, res, next) {
 
     const otpDoc = await VerifyOtpModel.findOne({
       _id: decoded.resetId,
-      email: String(decoded.email).toLowerCase().trim(),
+      email: normalizeEmail(decoded.email),
       role: "brand",
       status: 1,
       docType: "otp",
@@ -922,50 +751,27 @@ async function updatePasswordBrand(req, res, next) {
     if (!otpDoc) throw new ValidationError("Invalid or expired reset request");
 
     const verifiedAt = new Date(otpDoc.updatedAt ?? otpDoc.createdAt).getTime();
-    const ageMs = Date.now() - verifiedAt;
-    if (ageMs > RESET_TTL_MIN * 60 * 1000) throw new ValidationError("Reset session expired. Verify OTP again.");
-
-    // Find brand (support uuid brandId OR _id)
-    let brandExisting = null;
-    if (decoded.brandId && typeof decoded.brandId === "string") {
-      // try _id
-      brandExisting = await BrandModel.findById(decoded.brandId).exec();
-      if (!brandExisting) {
-        // try uuid field
-        if (hasSchemaPath(BrandModel, "brandId")) {
-          brandExisting = await BrandModel.findOne({ brandId: decoded.brandId }).exec();
-        }
-      }
+    if (Date.now() - verifiedAt > RESET_TTL_MIN * 60 * 1000) {
+      throw new ValidationError("Reset session expired. Verify OTP again.");
     }
+
+    const brandExisting = await BrandModel.findById(decoded.brandId).exec();
     if (!brandExisting) throw new NotFoundError("Brand not found");
 
-    // prevent reusing the last password (works for both)
     if (brandExisting.password) {
-      const same =
-        typeof brandExisting.comparePassword === "function"
-          ? await brandExisting.comparePassword(newPassword)
-          : await bcrypt.compare(newPassword, String(brandExisting.password));
+      const same = await bcrypt.compare(String(newPassword), String(brandExisting.password));
       if (same) throw new ValidationError("New password cannot be the same as your last password");
     }
 
-    if (IS_NEW_BRAND_MODEL) {
-      // NEW: store hashed
-      brandExisting.password = await hashPassword(newPassword);
-    } else {
-      // OLD: store plain; model hook hashes
-      brandExisting.password = String(newPassword);
-      // optional legacy lock reset
-      if (typeof brandExisting.failedLoginAttempts !== "undefined") brandExisting.failedLoginAttempts = 0;
-      if (typeof brandExisting.lockUntil !== "undefined") brandExisting.lockUntil = null;
-    }
-
+    brandExisting.password = await hashPassword(String(newPassword));
     await brandExisting.save();
 
     await VerifyOtpModel.deleteOne({ _id: otpDoc._id }).exec();
-    await resetSigninLimit(String(decoded.email).toLowerCase().trim(), "signin_limit");
+    await resetSigninLimit(normalizeEmail(decoded.email));
 
     return ApiResponse.sendOk(res, HttpStatus.OK, { message: "Password updated successfully" }, requestId);
   } catch (err) {
+    try { rethrowAsApiError(err); } catch (e) { err = e; }
     if (err instanceof ApiError) return next(err);
     return next(new InternalError("Internal server error", undefined, err));
   }
