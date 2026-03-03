@@ -1,69 +1,26 @@
-// routes/brandRoutes.js
+// routes/brandAuth.routes.js
+const express = require("express");
 
-const express = require('express');
-const router = express.Router();
 const {
-  register,
-  login,
-  verifyToken,
-  getBrandById,
-  getAllBrands,
-  requestOtp,
-  verifyOtp,
-  requestPasswordResetOtp,
-  verifyPasswordResetOtp,
-  resetPassword,
-  updateProfile,
-  requestEmailUpdate,
-  verifyEmailUpdate,
-  getMetaOptions,
-  uploadLogoMiddleware,
-  getOnboardingStatus,
-  markBrandTourSeen,
-} = require('../controllers/brandController');
+    sendSignupOtp,
+    verifyOtpSignUp,
+    saveBrandOnboarding,
+    signInBrand,
+    sendOtpForgotBrand,
+    verifyOtpForgotBrand,
+    updatePasswordBrand,
+} = require("../controllers/brandController");
 
-const { searchInfluencers } = require('../controllers/influencerController');
+const { brandAuth } = require("../auth/brandAuth");
 
-// POST /brand/register → register a new brand
-router.post('/register', uploadLogoMiddleware, register);
-router.post('/requestOtp', requestOtp);
-router.post('/verifyOtp', verifyOtp);
+const router = express.Router();
 
-router.post('/resetotp', requestPasswordResetOtp);
-router.post('/resetVerify', verifyPasswordResetOtp);
-router.post('/updatePassword', resetPassword);
-
-// POST /brand/login → login an existing brand
-router.post('/login', login);
-router.get(
-  '/',
-  verifyToken,
-  getBrandById
-);
-router.post(
-  '/getAll',
-  verifyToken,
-  getAllBrands
-);
-
-
-// POST /brand/searchInfluencers → search influencers by name
-router.post(
-  '/searchInf',
-  verifyToken,
-  searchInfluencers
-);
-
-router.post('/update', uploadLogoMiddleware, verifyToken, updateProfile);
-
-router.post('/requestEmailUpdate', verifyToken, requestEmailUpdate);
-
-router.post('/verifyEmailUpdate', verifyToken, verifyEmailUpdate);
-
-router.get('/metaOptions', getMetaOptions);
-
-router.get('/onboarding', verifyToken, getOnboardingStatus);
-router.post('/onboarding/brand-tour/seen', verifyToken, markBrandTourSeen);
-
+router.post("/send-otp-signup", sendSignupOtp);
+router.post("/verify-otp-signup", verifyOtpSignUp);
+router.post("/save-brand-onboarding", brandAuth, saveBrandOnboarding);
+router.post("/signin", signInBrand);
+router.post("/send-otp-forgot", sendOtpForgotBrand);
+router.post("/verify-otp-forgot", verifyOtpForgotBrand);
+router.post("/update-password", updatePasswordBrand);
 
 module.exports = router;

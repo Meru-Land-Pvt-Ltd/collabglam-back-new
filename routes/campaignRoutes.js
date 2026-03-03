@@ -4,10 +4,9 @@ const express = require('express');
 const router = express.Router();
 
 const campaignController = require('../controllers/campaignsController');
-const brandController = require('../controllers/brandController');
-const adminController = require('../controllers/adminController');
 const { verifyBrandOrAdmin } = require("../middlewares/verifyBrandOrAdmin");
 
+const { brandAuth } = require("../auth/brandAuth");
 
 // 1. Create a new campaign
 router.post(
@@ -19,66 +18,66 @@ router.post(
 // 2. Get all campaigns
 router.get(
   '/getAll',
-  brandController.verifyToken,
+  brandAuth,            // ensure the brand is authenticated
   campaignController.getAllCampaigns
 );
 
 // 3. Get one campaign by its campaignsId (UUID)
 router.get(
   '/id',
-  brandController.verifyToken,
+  brandAuth,
   campaignController.getCampaignById
 );
 
 // 4. Update a campaign by its campaignsId (UUID)
 router.post(
   '/update',
-  brandController.verifyToken,
+  brandAuth,
   campaignController.updateCampaign
 );
 
 // 5. Delete a campaign by its campaignsId (UUID)
 router.post(
   '/delete',
-  brandController.verifyToken,
+  brandAuth,
   campaignController.deleteCampaign
 );
 router.get(
   '/active',
-  brandController.verifyToken,            // ensure the brand is authenticated
+  brandAuth,            // ensure the brand is authenticated
   campaignController.getActiveCampaignsByBrand
 );
 
 router.get(
   '/previous',
-  brandController.verifyToken,            // ensure the brand is authenticated
+  brandAuth,            // ensure the brand is authenticated
   campaignController.getPreviousCampaigns
 );
 router.post(
   '/byCategoryId',
-  brandController.verifyToken,            // ensure the brand is authenticated
+  brandAuth,            // ensure the brand is authenticated
   campaignController.getActiveCampaignsByCategories
 );
 
-router.post('/checkApplied', brandController.verifyToken, campaignController.checkApplied);
-router.post('/byInfluencer', brandController.verifyToken, campaignController.getCampaignsByInfluencer);
-router.post('/myCampaign', brandController.verifyToken, campaignController.getApprovedCampaignsByInfluencer);
-router.post('/applied', brandController.verifyToken, campaignController.getAppliedCampaignsByInfluencer);
-router.post("/history", brandController.verifyToken, campaignController.getCampaignHistoryByBrand);
+router.post('/checkApplied', brandAuth, campaignController.checkApplied);
+router.post('/byInfluencer', brandAuth, campaignController.getCampaignsByInfluencer);
+router.post('/myCampaign', brandAuth, campaignController.getApprovedCampaignsByInfluencer);
+router.post('/applied', brandAuth, campaignController.getAppliedCampaignsByInfluencer);
+router.post("/history", brandAuth, campaignController.getCampaignHistoryByBrand);
 
-router.post('/accepted', brandController.verifyToken, campaignController.getAcceptedCampaigns);
+router.post('/accepted', brandAuth, campaignController.getAcceptedCampaigns);
 
 // POST /campaign/accepted-influencers → get accepted influencers for a Campaign
-router.post('/accepted-inf', brandController.verifyToken, campaignController.getAcceptedInfluencers);
+router.post('/accepted-inf', brandAuth, campaignController.getAcceptedInfluencers);
 
-router.post('/contracted', brandController.verifyToken, campaignController.getContractedCampaignsByInfluencer);
-router.post('/filter', brandController.verifyToken, campaignController.getCampaignsByFilter);
+router.post('/contracted', brandAuth, campaignController.getContractedCampaignsByInfluencer);
+router.post('/filter', brandAuth, campaignController.getCampaignsByFilter);
 
-router.post('/rejectedbyinf', brandController.verifyToken, campaignController.getRejectedCampaignsByInfluencer);
-router.get('/campaignSummary', brandController.verifyToken, campaignController.getCampaignSummary);
+router.post('/rejectedbyinf', brandAuth, campaignController.getRejectedCampaignsByInfluencer);
+router.get('/campaignSummary', brandAuth, campaignController.getCampaignSummary);
 
-router.post('/save-draft', brandController.verifyToken, campaignController.saveDraftCampaign);
-router.get('/draft', brandController.verifyToken, campaignController.getDraftCampaignByBrand);
+router.post('/save-draft', brandAuth, campaignController.saveDraftCampaign);
+router.get('/draft', brandAuth, campaignController.getDraftCampaignByBrand);
 
 router.post("/status", campaignController.updateCampaignStatus);
 
