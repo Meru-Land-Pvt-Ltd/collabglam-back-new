@@ -104,12 +104,17 @@ const brandSchema = new Schema(
   { timestamps: true }
 );
 
-// Hash password before saving
 brandSchema.pre("save", async function (next) {
   try {
     if (!this.isModified("password")) return next();
+
+    // ✅ if already bcrypt hashed, don't hash again
+    const pwd = String(this.password || "");
+    const looksHashed = /^\$2[aby]\$\d{2}\$/.test(pwd) && pwd.length === 60;
+    if (looksHashed) return next();
+
     const salt = await bcrypt.genSalt(12);
-    this.password = await bcrypt.hash(this.password, salt);
+    this.password = await bcrypt.hash(pwd, salt);
     next();
   } catch (err) {
     next(err);
