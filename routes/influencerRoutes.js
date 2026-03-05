@@ -37,7 +37,7 @@ const { searchBrands } = require('../controllers/brandController');
 router.post('/request-otp', sendSignupOtpInfluencer);
 router.post('/verify-otp', verifyOtpSignUpInfluencer);
 router.post('/register', uploadProfileImage, registerInfluencer);
-router.post('/onboarding', saveQuickOnboarding);
+router.post('/onboarding', verifyToken,saveQuickOnboarding);
 
 
 router.post('/login', signInInfluencer);

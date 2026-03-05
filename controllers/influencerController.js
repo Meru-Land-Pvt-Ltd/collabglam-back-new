@@ -419,6 +419,7 @@ exports.uploadProfileImage = upload.single('profileImage');
 
 /* ========================== OTP: Request & Verify ========================== */
 
+
 exports.sendSignupOtpInfluencer = async (req, res) => {
   try {
     const { email, name, password, countryId, languageIds, categoryIds } = req.body;
@@ -1277,254 +1278,91 @@ exports.registerInfluencer = async (req, res) => {
 /* ====================== Save Quick Questions Onboarding ====================== */
 exports.saveQuickOnboarding = async (req, res) => {
   try {
-    const {
-      influencerId,
-      email,
-
-      // step fields
-      formats,
-      budgets,
-      projectLength,
-      capacity,
-
-      categoryId,
-      subcategories,
-
-      collabTypes,
-      allowlisting,
-      cadences,
-
-      selectedPrompts,
-      promptAnswers,
-
-      onboardingStepCompleted,
-
-      // ✅ NEW (optional) skip flags
-      ispage2Skip,
-      ispage3Skip,
-    } = req.body;
-
-    if (!influencerId && !email) {
-      return res.status(400).json({ message: "influencerId or email is required" });
+    const user = req.user; // expect middleware sets req.user
+    if (!user || !user.influencerId) {
+      return res.status(401).json({ message: "Invalid token payload" });
+    }
+    if (user.role !== "influencer") {
+      return res.status(403).json({ message: "Invalid role" });
     }
 
-    const query = influencerId
-      ? { influencerId }
-      : { email: new RegExp(`^${escapeRegExp(String(email).trim().toLowerCase())}$`, "i") };
+    const { page1, page2, page3, ispage2Skip, ispage3Skip } = req.body;
 
-    const inf = await Influencer.findOne(query);
-    if (!inf) return res.status(404).json({ message: "Influencer not found" });
+    const isObjectArray = (arr) =>
+      Array.isArray(arr) && arr.every((x) => x && typeof x === "object" && !Array.isArray(x));
 
-    if (!inf.onboarding) inf.onboarding = {};
-
-    const patch = {};
-
-    // Track which step is being touched (so we update page arrays properly)
-    const step1Touched =
-      formats !== undefined ||
-      budgets !== undefined ||
-      projectLength !== undefined ||
-      capacity !== undefined;
-
-    const step2Touched =
-      categoryId !== undefined ||
-      subcategories !== undefined ||
-      collabTypes !== undefined ||
-      allowlisting !== undefined ||
-      cadences !== undefined;
-
-    const step3Touched =
-      selectedPrompts !== undefined ||
-      promptAnswers !== undefined;
-
-    // -------------------------
-    // Step 1: store normal fields
-    // -------------------------
-    let normalizedFormats;
-    let normalizedBudgets;
-    let normalizedProjectLength;
-    let normalizedCapacity;
-
-    if (formats !== undefined) {
-      normalizedFormats = Array.isArray(formats) ? formats : [];
-      patch["onboarding.formats"] = normalizedFormats;
+    if (page1 !== undefined && !isObjectArray(page1)) {
+      return res.status(400).json({ message: "page1 must be an array of objects" });
+    }
+    if (page2 !== undefined && !isObjectArray(page2)) {
+      return res.status(400).json({ message: "page2 must be an array of objects" });
+    }
+    if (page3 !== undefined && !isObjectArray(page3)) {
+      return res.status(400).json({ message: "page3 must be an array of objects" });
     }
 
-    if (budgets !== undefined) {
-      let budgetArr = [];
-      if (Array.isArray(budgets)) {
-        budgetArr = budgets;
-      } else if (budgets && typeof budgets === "object") {
-        budgetArr = Object.entries(budgets).map(([format, range]) => ({ format, range }));
-      }
-      normalizedBudgets = budgetArr;
-      patch["onboarding.budgets"] = normalizedBudgets;
+    if (ispage2Skip !== undefined && typeof ispage2Skip !== "boolean") {
+      return res.status(400).json({ message: "ispage2Skip must be boolean" });
+    }
+    if (ispage3Skip !== undefined && typeof ispage3Skip !== "boolean") {
+      return res.status(400).json({ message: "ispage3Skip must be boolean" });
     }
 
-    if (projectLength !== undefined) {
-      normalizedProjectLength = projectLength || "";
-      patch["onboarding.projectLength"] = normalizedProjectLength;
+    if (ispage2Skip === true && page2 !== undefined) {
+      return res.status(400).json({ message: "Cannot provide page2 when ispage2Skip is true" });
+    }
+    if (ispage3Skip === true && page3 !== undefined) {
+      return res.status(400).json({ message: "Cannot provide page3 when ispage3Skip is true" });
     }
 
-    if (capacity !== undefined) {
-      normalizedCapacity = capacity || "";
-      patch["onboarding.capacity"] = normalizedCapacity;
+    const existing = await InfluencerModel.findById(user.influencerId).select("_id page1").exec();
+    if (!existing) {
+      return res.status(404).json({ message: "Influencer not found" });
     }
 
-    // -------------------------
-    // Step 2: store normal fields
-    // -------------------------
-    let resolvedCatNumId;
-    let resolvedCatName;
-    let normalizedSubcats;
-
-    if (categoryId !== undefined) {
-      const { categoryId: catNumId, categoryName: catName } =
-        await resolveCategoryBasics(categoryId);
-
-      if (typeof catNumId === "number") {
-        resolvedCatNumId = catNumId;
-        patch["onboarding.categoryId"] = catNumId;
-      }
-
-      if (catName) {
-        resolvedCatName = catName;
-        patch["onboarding.categoryName"] = catName;
-      }
-
-      if (subcategories !== undefined) {
-        const idx = await buildCategoryIndex();
-        let subLinks = normalizeCategories(Array.isArray(subcategories) ? subcategories : [], idx);
-
-        if (typeof catNumId === "number") {
-          subLinks = subLinks.filter((s) => s.categoryId === catNumId);
-        }
-
-        normalizedSubcats = subLinks.map((s) => ({
-          subcategoryId: s.subcategoryId,
-          subcategoryName: s.subcategoryName,
-        }));
-
-        patch["onboarding.subcategories"] = normalizedSubcats;
-      }
-    } else if (subcategories !== undefined) {
-      const idx = await buildCategoryIndex();
-      const subLinks = normalizeCategories(Array.isArray(subcategories) ? subcategories : [], idx);
-
-      normalizedSubcats = subLinks.map((s) => ({
-        subcategoryId: s.subcategoryId,
-        subcategoryName: s.subcategoryName,
-      }));
-
-      patch["onboarding.subcategories"] = normalizedSubcats;
+    const page1AlreadySaved = Array.isArray(existing.page1) && existing.page1.length > 0;
+    if (!page1AlreadySaved && page1 === undefined) {
+      return res.status(400).json({ message: "page1 is required" });
     }
 
-    let normalizedCollabTypes;
-    let normalizedAllowlisting;
-    let normalizedCadences;
+    const update = {};
 
-    if (collabTypes !== undefined) {
-      normalizedCollabTypes = Array.isArray(collabTypes) ? collabTypes : [];
-      patch["onboarding.collabTypes"] = normalizedCollabTypes;
+    if (page1 !== undefined) update.page1 = page1;
+
+    if (ispage2Skip === true) {
+      update.ispage2Skip = true;
+      update.page2 = [];
+    } else {
+      if (ispage2Skip !== undefined) update.ispage2Skip = ispage2Skip;
+      if (page2 !== undefined) update.page2 = page2;
     }
 
-    if (allowlisting !== undefined) {
-      normalizedAllowlisting = !!allowlisting;
-      patch["onboarding.allowlisting"] = normalizedAllowlisting;
+    if (ispage3Skip === true) {
+      update.ispage3Skip = true;
+      update.page3 = [];
+    } else {
+      if (ispage3Skip !== undefined) update.ispage3Skip = ispage3Skip;
+      if (page3 !== undefined) update.page3 = page3;
     }
 
-    if (cadences !== undefined) {
-      normalizedCadences = Array.isArray(cadences) ? cadences : [];
-      patch["onboarding.cadences"] = normalizedCadences;
+    const influencer = await InfluencerModel.findByIdAndUpdate(
+      user.influencerId,
+      { $set: update },
+      { new: true }
+    ).exec();
+
+    if (!influencer) {
+      return res.status(404).json({ message: "Influencer not found" });
     }
 
-    // -------------------------
-    // Step 3: store normal fields
-    // -------------------------
-    let normalizedSelectedPrompts;
-    let normalizedPromptAnswers;
-
-    if (selectedPrompts !== undefined) {
-      normalizedSelectedPrompts = Array.isArray(selectedPrompts) ? selectedPrompts : [];
-      patch["onboarding.selectedPrompts"] = normalizedSelectedPrompts;
-    }
-
-    if (promptAnswers !== undefined && selectedPrompts !== undefined) {
-      normalizedPromptAnswers = normalizePromptAnswers(
-        Array.isArray(selectedPrompts) ? selectedPrompts : [],
-        promptAnswers || {}
-      );
-      patch["onboarding.promptAnswers"] = normalizedPromptAnswers;
-    } else if (promptAnswers !== undefined) {
-      normalizedPromptAnswers = promptAnswers || {};
-      patch["onboarding.promptAnswers"] = normalizedPromptAnswers;
-    }
-
-    // -------------------------
-    // ✅ Save step completed marker
-    // -------------------------
-    if (onboardingStepCompleted !== undefined) {
-      patch["onboarding.onboardingStepCompleted"] = onboardingStepCompleted;
-    }
-
-    // -------------------------
-    // ✅ NEW: Save skip flags
-    // -------------------------
-    if (ispage2Skip !== undefined) patch["onboarding.ispage2Skip"] = !!ispage2Skip;
-    if (ispage3Skip !== undefined) patch["onboarding.ispage3Skip"] = !!ispage3Skip;
-
-    // -------------------------
-    // ✅ NEW: Save page1/page2/page3 arrays for routing logic
-    // Done format: array length > 0
-    // -------------------------
-    if (step1Touched) {
-      const page1Obj = {
-        formats:
-          normalizedFormats ?? inf.onboarding.formats ?? [],
-        budgets:
-          normalizedBudgets ?? inf.onboarding.budgets ?? [],
-        projectLength:
-          normalizedProjectLength ?? inf.onboarding.projectLength ?? "",
-        capacity:
-          normalizedCapacity ?? inf.onboarding.capacity ?? "",
-      };
-      patch["onboarding.page1"] = [page1Obj];
-    }
-
-    if (step2Touched) {
-      const page2Obj = {
-        categoryId:
-          resolvedCatNumId ?? inf.onboarding.categoryId ?? null,
-        categoryName:
-          resolvedCatName ?? inf.onboarding.categoryName ?? null,
-        subcategories:
-          normalizedSubcats ?? inf.onboarding.subcategories ?? [],
-        collabTypes:
-          normalizedCollabTypes ?? inf.onboarding.collabTypes ?? [],
-        allowlisting:
-          normalizedAllowlisting ?? inf.onboarding.allowlisting ?? false,
-        cadences:
-          normalizedCadences ?? inf.onboarding.cadences ?? [],
-      };
-      patch["onboarding.page2"] = [page2Obj];
-    }
-
-    if (step3Touched) {
-      const page3Obj = {
-        selectedPrompts:
-          normalizedSelectedPrompts ?? inf.onboarding.selectedPrompts ?? [],
-        promptAnswers:
-          normalizedPromptAnswers ?? inf.onboarding.promptAnswers ?? {},
-      };
-      patch["onboarding.page3"] = [page3Obj];
-    }
-
-    // Apply patch
-    await Influencer.updateOne(query, { $set: patch });
-
-    return res.json({
-      message: "Onboarding saved",
-      influencerId: inf.influencerId,
+    return res.status(200).json({
+      message: "Onboarding questions saved successfully",
+      influencerId: influencer._id.toString(),
+      page1: influencer.page1 || [],
+      page2: influencer.page2 || [],
+      page3: influencer.page3 || [],
+      ispage2Skip: influencer.ispage2Skip || false,
+      ispage3Skip: influencer.ispage3Skip || false,
     });
   } catch (err) {
     console.error("saveQuickOnboarding error:", err);
