@@ -1,37 +1,49 @@
-// models/verifyEmail.js
-const mongoose = require('mongoose');
+// src/model/verifyOtp.js
+const mongoose = require("mongoose");
+const { Schema, model } = mongoose;
 
-const emailRegex =
-  /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/; // relaxed + valid TLD length
-
-const verifyEmailSchema = new mongoose.Schema(
+const VerifyOtpSchema = new Schema(
   {
-    email: {
+    email: { type: String, required: true, lowercase: true, trim: true },
+    otp: { type: String, required: true, trim: true },
+
+    status: { type: Number, enum: [0, 1], default: 0, required: true },
+    role: { type: String, enum: ["brand", "influencer"], required: true },
+    userId: { type: Schema.Types.ObjectId, default: null, required: false },
+
+    docType: { type: String, enum: ["otp", "limit"], default: "otp" },
+    purpose: { type: String, enum: ["signup", "reset_password"], required: false },
+
+    // ✅ UPDATED enum
+    key: {
       type: String,
-      required: true,
-      match: [emailRegex, 'Invalid email'],
-      trim: true,
-      lowercase: true, // normalize for unique index + equality matches
-    },
-    role: {
-      type: String,
-      enum: ['Brand', 'Influencer'],
-      required: true,
+      enum: ["signup_limit", "forgot_limit", "signin_limit"],
+      required: false,
     },
 
-    otpCode: { type: String },
-    otpExpiresAt: { type: Date },
+    // ✅ OTP limiter (existing)
+    signupOtpSend: { type: Number, default: 6 },
+    signupOtpBatchCount: { type: Number, default: 0 },
+    signupOtpCooldownUntil: { type: Date, default: null },
+    signupOtpResetAt: { type: Date, default: null },
 
-    verified: { type: Boolean, default: false },
-    verifiedAt: { type: Date },
+    // ✅ NEW signin limiter
+    signinFailedCount: { type: Number, default: 0 },
+    signinCooldownUntil: { type: Date, default: null },
+    signinResetAt: { type: Date, default: null },
 
-    // number of OTP sends / attempts
-    attempts: { type: Number, default: 0 },
+    signupPayload: { type: Schema.Types.Mixed, default: null },
   },
   { timestamps: true }
 );
 
-// Ensure one verification record per (email, role)
-verifyEmailSchema.index({ email: 1, role: 1 }, { unique: true });
+// ✅ only ONE limiter doc per email+role+key
+VerifyOtpSchema.index(
+  { email: 1, role: 1, key: 1 },
+  { unique: true, partialFilterExpression: { key: { $exists: true } } }
+);
 
-module.exports = mongoose.model('VerifyEmail', verifyEmailSchema);
+const VerifyOtpModel = model("VerifyOtp", VerifyOtpSchema);
+
+// ✅ export model directly
+module.exports = VerifyOtpModel;

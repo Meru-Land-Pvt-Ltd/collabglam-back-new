@@ -10,11 +10,20 @@ const fs = require('fs');
 
 // Models
 const Brand = require('../models/brand');
-const Influencer = require('../models/influencer');
-const Category = require('../models/categories');
+// influencerController.js
+const influencerExport = require("../models/influencer");
+
+// handles all cases:
+// 1) module.exports = InfluencerModel
+// 2) module.exports = { InfluencerModel }
+// 3) module.exports.default = InfluencerModel (ESM transpile)
+const InfluencerModel =
+  influencerExport.InfluencerModel || influencerExport.default || influencerExport;
+
+console.log("DEBUG InfluencerModel.findOne type:", typeof InfluencerModel.findOne);const Category = require('../models/categories');
 const Country = require('../models/country');
 const Language = require('../models/language');
-const VerifyEmail = require('../models/verifyEmail');
+const VerifyOtpModel = require('../models/verifyEmail');
 const ApplyCampaign = require('../models/applyCampaign');
 const Campaign = require('../models/campaign');
 // These two are referenced later in updateProfile; include them if you use them
@@ -25,7 +34,7 @@ const { linkConversationsForInfluencer } = require('../services/emailLinking');
 const { attachExternalEmailToInfluencer } = require('../utils/emailAliases');
 const { getFreePlan, computeExpiry } = require("../utils/subscriptionHelper");
 const { escapeRegExp } = require('../utils/searchTokens');
-
+const {buildOtpEmailTemplate}=require('../template/buildOtpEmailTemplate')
 const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const BASE_API_URL = 'https://api.collabglam.com';
@@ -47,7 +56,153 @@ const transporter = nodemailer.createTransport({
   secure: SMTP_PORT === 465,
   auth: { user: SMTP_USER, pass: SMTP_PASS }
 });
+const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
+// const mongoose = require("mongoose");
 
+// If you already have these envs, keep them; else defaults are fine for dev
+const OTP_TTL_MIN = Number(process.env.OTP_TTL_MIN || 10);
+const OTP_HASH_SECRET = process.env.OTP_HASH_SECRET || "CHANGE_ME_OTP_SECRET";
+const OTP_LIMIT_MAX = Number(process.env.OTP_LIMIT_MAX || 6);            // max OTP sends per window
+const OTP_LIMIT_WINDOW_MIN = Number(process.env.OTP_LIMIT_WINDOW_MIN || 60); // window reset
+const OTP_LIMIT_COOLDOWN_MIN = Number(process.env.OTP_LIMIT_COOLDOWN_MIN || 10);
+
+// ---- basic utils ----
+// function escapeRegex(str) {
+//   return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// }
+// (alias if some code uses escapeRegExp)
+// const escapeRegExp = escapeRegex;
+
+function isValidEmail(email) {
+  const e = String(email || "").trim().toLowerCase();
+  // simple + practical
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e);
+}
+
+function isValidObjectId(id) {
+  return mongoose.Types.ObjectId.isValid(String(id || ""));
+}
+// const jwt = require("jsonwebtoken");
+
+// same behavior as your TS version
+function signJwt(payload) {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    // if you don't have InternalError class, throw normal Error
+    throw new Error("JWT_SECRET is missing in env");
+  }
+
+  const expiresIn = process.env.JWT_EXPIRES_IN || "7d";
+
+  return jwt.sign(payload, secret, { expiresIn });
+}
+function uniqueValidObjectIds(ids) {
+  if (!Array.isArray(ids)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const x of ids) {
+    const s = String(x || "").trim();
+    if (!s) continue;
+    if (!isValidObjectId(s)) continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+// ✅ this fixes your error
+function isStrongPassword(pw) {
+  const s = String(pw || "");
+  // >=8, at least 1 upper, 1 lower, 1 number, 1 special
+  return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/.test(s);
+}
+
+function genOtp() {
+  return String(Math.floor(100000 + Math.random() * 900000)); // 6-digit
+}
+
+function hashOtp(email, otp) {
+  // Must match verify side: hashOtp(normalizedEmail, otp)
+  const data = `${String(email).trim().toLowerCase()}|${String(otp).trim()}|${OTP_HASH_SECRET}`;
+  return crypto.createHash("sha256").update(data).digest("hex");
+}
+
+async function hashPassword(password) {
+  return bcrypt.hash(String(password), 10);
+}
+
+/**
+ * Rate-limit OTP sends using VerifyOtpModel (docType:"limit").
+ * Expects VerifyOtpModel to be in scope (require it above in this file).
+ * Throws ValidationError (or plain Error) when limited.
+ */
+async function enforceOtpLimitByKey(email, role, key) {
+  const normalizedEmail = String(email).trim().toLowerCase();
+  const normalizedRole = String(role).trim().toLowerCase(); // "influencer" | "brand"
+  const now = new Date();
+
+  // You must have VerifyOtpModel imported in this file
+  // const { VerifyOtpModel } = require("../model/verifyOtp");
+  let limiter = await VerifyOtpModel.findOne({
+    email: normalizedEmail,
+    role: normalizedRole,
+    docType: "limit",
+    key,
+  }).exec();
+
+  // schema requires otp, so store dummy
+  if (!limiter) {
+    limiter = await VerifyOtpModel.create({
+      email: normalizedEmail,
+      role: normalizedRole,
+      otp: "LIMIT",
+      status: 0,
+      userId: null,
+      docType: "limit",
+      key,
+      signupOtpSend: OTP_LIMIT_MAX,
+      signupOtpBatchCount: 0,
+      signupOtpCooldownUntil: null,
+      signupOtpResetAt: new Date(Date.now() + OTP_LIMIT_WINDOW_MIN * 60 * 1000),
+    });
+  }
+
+  // reset window
+  if (limiter.signupOtpResetAt && new Date(limiter.signupOtpResetAt) <= now) {
+    limiter.signupOtpBatchCount = 0;
+    limiter.signupOtpCooldownUntil = null;
+    limiter.signupOtpResetAt = new Date(Date.now() + OTP_LIMIT_WINDOW_MIN * 60 * 1000);
+  }
+
+  // cooldown
+  if (limiter.signupOtpCooldownUntil && new Date(limiter.signupOtpCooldownUntil) > now) {
+    const errMsg = "Too many OTP requests. Please try again later.";
+    if (typeof ValidationError === "function") throw new ValidationError(errMsg);
+    const e = new Error(errMsg);
+    e.statusCode = 429;
+    throw e;
+  }
+
+  const maxSend = typeof limiter.signupOtpSend === "number" ? limiter.signupOtpSend : OTP_LIMIT_MAX;
+  const count = typeof limiter.signupOtpBatchCount === "number" ? limiter.signupOtpBatchCount : 0;
+
+  if (count >= maxSend) {
+    limiter.signupOtpCooldownUntil = new Date(Date.now() + OTP_LIMIT_COOLDOWN_MIN * 60 * 1000);
+    await limiter.save();
+
+    const errMsg = "Too many OTP requests. Please try again later.";
+    if (typeof ValidationError === "function") throw new ValidationError(errMsg);
+    const e = new Error(errMsg);
+    e.statusCode = 429;
+    throw e;
+  }
+
+  // increment usage
+  limiter.signupOtpBatchCount = count + 1;
+  await limiter.save();
+}
 /* ===== Shared professional HTML OTP template (orange/yellow accents) ===== */
 const esc = (s = '') => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const PREHEADER = (t) => `<div style="display:none;opacity:0;visibility:hidden;overflow:hidden;height:0;width:0;mso-hide:all;">${esc(t)}</div>`;
@@ -264,95 +419,316 @@ exports.uploadProfileImage = upload.single('profileImage');
 
 /* ========================== OTP: Request & Verify ========================== */
 
-exports.requestOtpInfluencer = async (req, res) => {
-  const { email, role = 'Influencer' } = req.body;
-  if (!email || !role) return res.status(400).json({ message: 'Both email and role are required' });
 
-  const normalizedEmail = String(email).trim().toLowerCase();
-  const normalizedRole = String(role).trim();
-  if (!['Influencer', 'Brand'].includes(normalizedRole)) {
-    return res.status(400).json({ message: 'role must be "Influencer" or "Brand"' });
-  }
-
+exports.sendSignupOtpInfluencer = async (req, res) => {
   try {
-    const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, 'i');
-
-    if (normalizedRole === 'Influencer') {
-      // Only treat as "already registered" if this email belongs to a fully registered account
-      const existingInf = await Influencer.findOne(
-        { email: emailRegexCI },
-        'otpVerified'
-      );
-
-      if (existingInf && existingInf.otpVerified) {
-        return res.status(409).json({ message: 'User already present' });
-      }
-      // if influencer exists but otpVerified === false → allow OTP so they can "claim" it
-    } else {
-      const existingBrand = await Brand.findOne({ email: emailRegexCI }, '_id');
-      if (existingBrand) {
-        return res.status(409).json({ message: 'User already present' });
-      }
+    const { email, name, password, countryId, languageIds, categoryIds } = req.body;
+    console.log("InfluencerModel.findOne:", typeof InfluencerModel.findOne);
+    console.log("VerifyOtpModel.findOne:", typeof VerifyOtpModel.findOne);
+    // ✅ email validation back ON (recommended)
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({ message: "Valid email is required" });
     }
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-    await VerifyEmail.findOneAndUpdate(
-      { email: normalizedEmail, role: normalizedRole },
-      { $set: { otpCode: code, otpExpiresAt: expiresAt, verified: false }, $inc: { attempts: 1 } },
-      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
+    if (!name || typeof name !== "string" || name.trim().length < 2) {
+      return res.status(400).json({ message: "Valid name is required" });
+    }
+
+    if (!password || typeof password !== "string") {
+      return res.status(400).json({ message: "Password is required" });
+    }
+
+    if (!isStrongPassword(password)) {
+      return res.status(400).json({
+        message:
+          "Password must be at least 8 characters and include uppercase, lowercase, number, and special character",
+      });
+    }
+
+    if (!countryId || !isValidObjectId(countryId)) {
+      return res.status(400).json({ message: "Valid countryId is required" });
+    }
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    // ✅ IMPORTANT: use your mongoose model (InfluencerModel), not Influencer
+    // Make sure you imported it like:
+    // const { InfluencerModel } = require("../model/influencer");
+    const influencerExists = await InfluencerModel.findOne({ email: normalizedEmail })
+      .select("_id")
+      .lean();
+
+    if (influencerExists) {
+      return res.status(409).json({
+        message: "Email already registered as Influencer. Please Login.",
+      });
+    }
+    console.log("Passed email existence check");
+    // ✅ OTP limit check
+    await enforceOtpLimitByKey(normalizedEmail, "influencer", "signup_limit");
+
+    const country = await Country.findById(countryId).select("_id countryName countryCode callingCode").lean();
+    if (!country) {
+      return res.status(400).json({ message: "Invalid countryId" });
+    }
+ console.log("Fetched country:", country);
+    const countryName = String(country.countryName ?? country.name ?? "").trim();
+    if (!countryName) {
+      return res.status(400).json({ message: "Country name missing for this countryId" });
+    }
+console.log("Determined countryName:", countryName);
+    const langIds = uniqueValidObjectIds(languageIds);
+    const catIds = uniqueValidObjectIds(categoryIds);
+
+    if (catIds.length === 0) {
+      return res.status(400).json({ message: "Select at least 1 category" });
+    }
+
+    if (langIds.length > 5) {
+      return res.status(400).json({ message: "Maximum 5 languages allowed" });
+    }
+
+    if (catIds.length > 5) {
+      return res.status(400).json({ message: "Maximum 5 categories allowed" });
+    }
+
+    const [langs, cats] = await Promise.all([
+      langIds.length
+        ? Language.find({ _id: { $in: langIds } }).select("_id name").lean()
+        : Promise.resolve([]),
+      Category.find({ _id: { $in: catIds } }).select("_id name").lean(),
+    ]);
+
+    if (langIds.length && langs.length !== langIds.length) {
+      return res.status(400).json({ message: "One or more languageIds invalid" });
+    }
+
+    if (cats.length !== catIds.length) {
+      return res.status(400).json({ message: "One or more categoryIds invalid" });
+    }
+
+    // ✅ Generate OTP
+    const otpPlain = genOtp();
+    const otpHashed = hashOtp(normalizedEmail, otpPlain);
+
+    const hashedPassword = await hashPassword(password);
+
+    // ✅ Optional: invalidate old unused OTP docs for this email (cleaner)
+    await VerifyOtpModel.updateMany(
+      { email: normalizedEmail, role: "influencer", docType: "otp", purpose: "signup", status: 0 },
+      { $set: { status: 1 } }
     );
 
-    const subject = `${PRODUCT_NAME} email verification`;
-    const html = otpHtmlTemplate({
-      title: 'Verify your email',
-      subtitle: `Use this verification code to continue signing up as an ${normalizedRole}.`,
-      code,
-      minutes: 10,
-      preheader: `${PRODUCT_NAME} verification code`,
+    await VerifyOtpModel.create({
+      email: normalizedEmail,
+      role: "influencer",
+      otp: otpHashed,
+      status: 0,
+      userId: null,
+      docType: "otp",
+      purpose: "signup",
+      signupPayload: {
+        name: name.trim(),
+        country: { _id: country._id, name: countryName },
+        languages: (langs || []).map((l) => ({ _id: l._id, name: String(l.name).trim() })),
+        categories: (cats || []).map((c) => ({ _id: c._id, name: String(c.name).trim() })),
+        password: hashedPassword,
+      },
     });
-    const text = otpTextFallback({ code, minutes: 10, title: 'Verify your email' });
 
-    await sendMail({ to: normalizedEmail, subject, html, text });
+    const { subject, text, html } = buildOtpEmailTemplate({
+      otp: otpPlain,
+      role: "Influencer",
+      expiryMinutes: OTP_TTL_MIN, // ✅ don't hardcode 3
+      purpose: "signup",
+    });
 
-    return res.json({ message: 'OTP sent to email' });
-  } catch (err) {
-    if (err.code === 11000) return res.status(409).json({ message: 'Conflict while creating/updating verification record.' });
-    console.error('Error in requestOtpInfluencer:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    // use your mail function (you used sendMail earlier)
+    await sendMail({ to: normalizedEmail, subject, text, html });
+
+    return res.status(200).json({
+      message: "OTP sent successfully",
+      email: normalizedEmail,
+    });
+  } catch (error) {
+    console.error("sendSignupOtpInfluencer error:", error);
+    return res.status(500).json({ message: "Internal Server Error" });
   }
 };
 
-exports.verifyOtpInfluencer = async (req, res) => {
-  const { email, role = 'Influencer', otp } = req.body;
-  if (!email || !role || otp == null) return res.status(400).json({ message: 'email, role and otp are required' });
 
-  const normalizedEmail = String(email).trim().toLowerCase();
-  const normalizedRole = String(role).trim();
-  if (!['Influencer', 'Brand'].includes(normalizedRole)) {
-    return res.status(400).json({ message: 'role must be "Influencer" or "Brand"' });
-  }
+
+exports.verifyOtpSignUpInfluencer = async (req, res) => {
+  let otpDoc = null;
+  let createdInfluencer = null;
 
   try {
-    const doc = await VerifyEmail.findOne({
+    const { email, otp, location } = req.body;
+
+    // ✅ Pre-check JWT before ANY create happens
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      return res.status(500).json({ message: "JWT_SECRET is missing in env" });
+    }
+    const expiresIn = process.env.JWT_EXPIRES_IN || "7d";
+
+    // ✅ validations
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({ message: "Valid email is required" });
+    }
+    if (!otp || !/^\d{6}$/.test(String(otp))) {
+      return res.status(400).json({ message: "Valid 6-digit OTP is required" });
+    }
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    // ✅ already registered?
+    const existing = await InfluencerModel.exists({ email: normalizedEmail });
+    if (existing) {
+      return res.status(409).json({ message: "Email already registered. Please Login." });
+    }
+
+    // ✅ get latest OTP doc
+    otpDoc = await VerifyOtpModel.findOne({
       email: normalizedEmail,
-      role: normalizedRole,
-      otpCode: otp.toString().trim(),
-      otpExpiresAt: { $gt: new Date() }
+      role: "influencer",
+      status: 0,
+      docType: "otp",
+      purpose: "signup",
+    })
+      .sort({ createdAt: -1 })
+      .exec();
+
+    if (!otpDoc) {
+      return res.status(400).json({ message: "OTP not requested" });
+    }
+
+    // ✅ TTL check
+    const ageMs = Date.now() - new Date(otpDoc.createdAt).getTime();
+    if (ageMs > OTP_TTL_MIN * 60 * 1000) {
+      return res.status(400).json({ message: "OTP expired. Please resend otp." });
+    }
+
+    // ✅ OTP hash check
+    const incomingHash = hashOtp(normalizedEmail, String(otp));
+    if (incomingHash !== otpDoc.otp) {
+      return res.status(400).json({ message: "Invalid OTP" });
+    }
+
+    // ✅ CLAIM OTP (prevents double-use/race). status 2 = processing
+    const claim = await VerifyOtpModel.updateOne(
+      { _id: otpDoc._id, status: 0 },
+      { $set: { status: 2 } }
+    );
+
+    if (!claim || claim.modifiedCount !== 1) {
+      return res.status(409).json({ message: "OTP already used or being processed" });
+    }
+
+    // ✅ payload validations
+    const payload = otpDoc.signupPayload || {};
+    const countryName = payload?.country?.name;
+
+    if (!countryName) {
+      // revert claim
+      await VerifyOtpModel.updateOne({ _id: otpDoc._id, status: 2 }, { $set: { status: 0 } });
+      return res.status(400).json({
+        message: "Signup details missing (country). Please request OTP again.",
+      });
+    }
+
+    if (!payload?.password) {
+      await VerifyOtpModel.updateOne({ _id: otpDoc._id, status: 2 }, { $set: { status: 0 } });
+      return res.status(400).json({
+        message: "Signup details missing (password). Please request OTP again.",
+      });
+    }
+
+    const cleanLanguages = Array.isArray(payload?.languages)
+      ? payload.languages
+          .filter((l) => l && typeof l.name === "string" && l.name.trim().length > 0)
+          .map((l) => ({ _id: l._id || undefined, name: String(l.name).trim() }))
+      : [];
+
+    const cleanCategories = Array.isArray(payload?.categories)
+      ? payload.categories
+          .filter((c) => c && typeof c.name === "string" && c.name.trim().length > 0)
+          .map((c) => ({ _id: c._id || undefined, name: String(c.name).trim() }))
+      : [];
+
+    // ✅ create influencer
+    createdInfluencer = await InfluencerModel.create({
+      email: normalizedEmail,
+      name: payload?.name,
+      location: location || "",
+      countryId: payload?.country?._id || undefined,
+      countryName: String(countryName).trim(),
+      languages: cleanLanguages,
+      categories: cleanCategories,
+      password: payload.password, // already hashed in signupPayload
     });
 
-    if (!doc) return res.status(400).json({ message: 'Invalid or expired OTP' });
+    // ✅ mark OTP used (status 1)
+    await VerifyOtpModel.updateOne(
+      { _id: otpDoc._id, status: 2 },
+      { $set: { status: 1, userId: createdInfluencer._id } }
+    );
 
-    doc.verified = true;
-    doc.verifiedAt = new Date();
-    doc.otpCode = undefined;
-    doc.otpExpiresAt = undefined;
-    await doc.save();
+    // ✅ token
+    const token = jwt.sign(
+      {
+        influencerId: createdInfluencer._id.toString(),
+        role: "influencer",
+        email: createdInfluencer.email,
+      },
+      secret,
+      { expiresIn }
+    );
 
-    return res.json({ message: 'Email verified — you may now complete registration' });
+    // ✅ route (safe fallback)
+    const routeInfo =
+      typeof computeInfluencerNextRoute === "function"
+        ? computeInfluencerNextRoute(createdInfluencer)
+        : { route: "page1", page1Done: false, page2Done: false, page3Done: false };
+
+    return res.status(201).json({
+      message: "Influencer signup successful",
+      influencerId: createdInfluencer._id.toString(),
+      token,
+      route: routeInfo.route,
+      onboarding: {
+        page1Done: routeInfo.page1Done,
+        page2Done: routeInfo.page2Done,
+        page3Done: routeInfo.page3Done,
+      },
+    });
   } catch (err) {
-    console.error('Error in verifyOtpInfluencer:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+    console.error("verifyOtpSignUpInfluencer error:", err);
+
+    // ✅ ROLLBACK if influencer got created but something later failed
+    if (createdInfluencer?._id) {
+      try {
+        await InfluencerModel.deleteOne({ _id: createdInfluencer._id });
+      } catch (e) {
+        console.error("Rollback influencer delete failed:", e);
+      }
+    }
+
+    // ✅ Revert OTP claim (status 2 -> 0) if we had claimed it
+    if (otpDoc?._id) {
+      try {
+        await VerifyOtpModel.updateOne({ _id: otpDoc._id, status: 2 }, { $set: { status: 0 } });
+      } catch (e) {
+        console.error("Rollback otp revert failed:", e);
+      }
+    }
+
+    // duplicate key safety (email unique)
+    if (err && err.code === 11000) {
+      return res.status(409).json({ message: "Email already registered. Please Login." });
+    }
+
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
@@ -902,206 +1278,151 @@ exports.registerInfluencer = async (req, res) => {
 /* ====================== Save Quick Questions Onboarding ====================== */
 exports.saveQuickOnboarding = async (req, res) => {
   try {
-    const {
-      influencerId,
-      email,
-
-      // step fields (do NOT default these)
-      formats,
-      budgets,
-      projectLength,
-      capacity,
-
-      categoryId,
-      subcategories,
-
-      collabTypes,
-      allowlisting,
-      cadences,
-
-      selectedPrompts,
-      promptAnswers,
-
-      onboardingStepCompleted
-    } = req.body;
-
-    if (!influencerId && !email) {
-      return res.status(400).json({ message: 'influencerId or email is required' });
+    const user = req.user; // expect middleware sets req.user
+    if (!user || !user.influencerId) {
+      return res.status(401).json({ message: "Invalid token payload" });
+    }
+    if (user.role !== "influencer") {
+      return res.status(403).json({ message: "Invalid role" });
     }
 
-    const query = influencerId
-      ? { influencerId }
-      : { email: new RegExp(`^${escapeRegExp(String(email).trim().toLowerCase())}$`, 'i') };
+    const { page1, page2, page3, ispage2Skip, ispage3Skip } = req.body;
 
-    const inf = await Influencer.findOne(query);
-    if (!inf) return res.status(404).json({ message: 'Influencer not found' });
+    const isObjectArray = (arr) =>
+      Array.isArray(arr) && arr.every((x) => x && typeof x === "object" && !Array.isArray(x));
 
-    // Ensure onboarding object exists
-    if (!inf.onboarding) inf.onboarding = {};
-
-    // Build a patch object only from provided fields
-    const patch = {};
-
-    // Step 1
-    if (formats !== undefined) {
-      patch['onboarding.formats'] = Array.isArray(formats) ? formats : [];
+    if (page1 !== undefined && !isObjectArray(page1)) {
+      return res.status(400).json({ message: "page1 must be an array of objects" });
+    }
+    if (page2 !== undefined && !isObjectArray(page2)) {
+      return res.status(400).json({ message: "page2 must be an array of objects" });
+    }
+    if (page3 !== undefined && !isObjectArray(page3)) {
+      return res.status(400).json({ message: "page3 must be an array of objects" });
     }
 
-    if (budgets !== undefined) {
-      let budgetArr = [];
-      if (Array.isArray(budgets)) {
-        budgetArr = budgets;
-      } else if (budgets && typeof budgets === 'object') {
-        budgetArr = Object.entries(budgets).map(([format, range]) => ({ format, range }));
-      }
-      patch['onboarding.budgets'] = budgetArr;
+    if (ispage2Skip !== undefined && typeof ispage2Skip !== "boolean") {
+      return res.status(400).json({ message: "ispage2Skip must be boolean" });
+    }
+    if (ispage3Skip !== undefined && typeof ispage3Skip !== "boolean") {
+      return res.status(400).json({ message: "ispage3Skip must be boolean" });
     }
 
-    if (projectLength !== undefined) patch['onboarding.projectLength'] = projectLength || '';
-    if (capacity !== undefined) patch['onboarding.capacity'] = capacity || '';
-
-    // Step 2
-    if (categoryId !== undefined) {
-      const { categoryId: catNumId, categoryName: catName } = await resolveCategoryBasics(categoryId);
-
-      patch['onboarding.categoryId'] = typeof catNumId === 'number' ? catNumId : undefined;
-      patch['onboarding.categoryName'] = catName || undefined;
-
-      // If subcategories are provided, normalize & store them
-      if (subcategories !== undefined) {
-        const idx = await buildCategoryIndex();
-        let subLinks = normalizeCategories(Array.isArray(subcategories) ? subcategories : [], idx);
-
-        if (typeof catNumId === 'number') {
-          subLinks = subLinks.filter(s => s.categoryId === catNumId);
-        }
-
-        patch['onboarding.subcategories'] = subLinks.map(s => ({
-          subcategoryId: s.subcategoryId,
-          subcategoryName: s.subcategoryName
-        }));
-      }
-    } else if (subcategories !== undefined) {
-      // category not provided but subcategories provided (optional case)
-      const idx = await buildCategoryIndex();
-      const subLinks = normalizeCategories(Array.isArray(subcategories) ? subcategories : [], idx);
-
-      patch['onboarding.subcategories'] = subLinks.map(s => ({
-        subcategoryId: s.subcategoryId,
-        subcategoryName: s.subcategoryName
-      }));
+    if (ispage2Skip === true && page2 !== undefined) {
+      return res.status(400).json({ message: "Cannot provide page2 when ispage2Skip is true" });
+    }
+    if (ispage3Skip === true && page3 !== undefined) {
+      return res.status(400).json({ message: "Cannot provide page3 when ispage3Skip is true" });
     }
 
-    if (collabTypes !== undefined) patch['onboarding.collabTypes'] = Array.isArray(collabTypes) ? collabTypes : [];
-    if (allowlisting !== undefined) patch['onboarding.allowlisting'] = !!allowlisting;
-    if (cadences !== undefined) patch['onboarding.cadences'] = Array.isArray(cadences) ? cadences : [];
-
-    // Step 3
-    if (selectedPrompts !== undefined) patch['onboarding.selectedPrompts'] = Array.isArray(selectedPrompts) ? selectedPrompts : [];
-    if (promptAnswers !== undefined && selectedPrompts !== undefined) {
-      patch['onboarding.promptAnswers'] = normalizePromptAnswers(
-        Array.isArray(selectedPrompts) ? selectedPrompts : [],
-        promptAnswers || {}
-      );
-    } else if (promptAnswers !== undefined) {
-      // if they send promptAnswers alone, store raw-ish (or skip)
-      patch['onboarding.promptAnswers'] = promptAnswers || {};
+    const existing = await InfluencerModel.findById(user.influencerId).select("_id page1").exec();
+    if (!existing) {
+      return res.status(404).json({ message: "Influencer not found" });
     }
 
-    if (onboardingStepCompleted !== undefined) {
-      patch['onboarding.onboardingStepCompleted'] = onboardingStepCompleted;
+    const page1AlreadySaved = Array.isArray(existing.page1) && existing.page1.length > 0;
+    if (!page1AlreadySaved && page1 === undefined) {
+      return res.status(400).json({ message: "page1 is required" });
     }
 
-    // Apply patch
-    await Influencer.updateOne(query, { $set: patch });
+    const update = {};
 
-    return res.json({ message: 'Onboarding saved', influencerId: inf.influencerId });
-  } catch (err) {
-    console.error('saveQuickOnboarding error:', err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-};
+    if (page1 !== undefined) update.page1 = page1;
 
-exports.login = async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) {
-    return res.status(400).json({ message: 'Both fields are required' });
-  }
+    if (ispage2Skip === true) {
+      update.ispage2Skip = true;
+      update.page2 = [];
+    } else {
+      if (ispage2Skip !== undefined) update.ispage2Skip = ispage2Skip;
+      if (page2 !== undefined) update.page2 = page2;
+    }
 
-  try {
-    const influencer = await Influencer.findOne({
-      email: { $regex: `^${email.trim()}$`, $options: 'i' }
-    });
+    if (ispage3Skip === true) {
+      update.ispage3Skip = true;
+      update.page3 = [];
+    } else {
+      if (ispage3Skip !== undefined) update.ispage3Skip = ispage3Skip;
+      if (page3 !== undefined) update.page3 = page3;
+    }
+
+    const influencer = await InfluencerModel.findByIdAndUpdate(
+      user.influencerId,
+      { $set: update },
+      { new: true }
+    ).exec();
+
     if (!influencer) {
-      return res.status(404).json({ message: 'Influencer not found' });
+      return res.status(404).json({ message: "Influencer not found" });
     }
-
-    const now = new Date();
-    if (influencer.lockUntil && influencer.lockUntil > now) {
-      const msLeft = influencer.lockUntil.getTime() - now.getTime();
-      const minutesLeft = Math.ceil(msLeft / (60 * 1000));
-      return res.status(403).json({
-        message: 'Account locked due to multiple failed login attempts. Try again after the lock period.',
-        lockUntil: influencer.lockUntil,
-        minutesLeft
-      });
-    }
-
-    const isMatch = await influencer.comparePassword(password);
-    if (!isMatch) {
-      influencer.failedLoginAttempts = (influencer.failedLoginAttempts || 0) + 1;
-
-      if (influencer.failedLoginAttempts >= 3) {
-        const LOCK_WINDOW_MS = 24 * 60 * 60 * 1000;
-        influencer.lockUntil = new Date(Date.now() + LOCK_WINDOW_MS);
-      }
-
-      await influencer.save();
-      await linkConversationsForInfluencer(influencer, influencer.email);
-      if (influencer.lockUntil && influencer.lockUntil > now) {
-        return res.status(403).json({
-          message: 'Too many failed attempts. Account locked for 24 hours.',
-          lockUntil: influencer.lockUntil
-        });
-      }
-
-      const attemptsLeft = Math.max(0, 3 - influencer.failedLoginAttempts);
-      return res.status(400).json({
-        message: 'Invalid credentials',
-        attemptsLeft
-      });
-    }
-
-    if (influencer.failedLoginAttempts || influencer.lockUntil) {
-      influencer.failedLoginAttempts = 0;
-      influencer.lockUntil = null;
-      await influencer.save();
-    }
-
-    const token = jwt.sign(
-      { influencerId: influencer.influencerId, email: influencer.email },
-      JWT_SECRET,
-      { expiresIn: '100d' }
-    );
-
-    // 🔹 NEW: prepare subscription info for response
-    const subscription = influencer.subscription || {};
 
     return res.status(200).json({
-      message: 'Login successful',
-      influencerId: influencer.influencerId,
-      categoryId: influencer.categoryId, // keep whatever you already use
-      token,
-      // convenience top-level field
-      subscriptionPlanName: subscription.planName,
-      // full subscription object (planId, planName, startedAt, expiresAt, features, etc.)
-      subscription,
-      // if you want explicit flag in response too:
-      subscriptionExpired: influencer.subscriptionExpired
+      message: "Onboarding questions saved successfully",
+      influencerId: influencer._id.toString(),
+      page1: influencer.page1 || [],
+      page2: influencer.page2 || [],
+      page3: influencer.page3 || [],
+      ispage2Skip: influencer.ispage2Skip || false,
+      ispage3Skip: influencer.ispage3Skip || false,
     });
-  } catch (error) {
-    console.error('Error in influencer.login:', error);
-    return res.status(500).json({ message: 'Internal server error' });
+  } catch (err) {
+    console.error("saveQuickOnboarding error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+function computeInfluencerNextRoute(influencer) {
+  const onboarding = (influencer && influencer.onboarding) ? influencer.onboarding : {};
+
+  const page1Done = Array.isArray(onboarding.page1) && onboarding.page1.length > 0;
+
+  const page2Done =
+    (Array.isArray(onboarding.page2) && onboarding.page2.length > 0) ||
+    onboarding.ispage2Skip === true;
+
+  const page3Done =
+    (Array.isArray(onboarding.page3) && onboarding.page3.length > 0) ||
+    onboarding.ispage3Skip === true;
+
+  let route = "home";
+  if (!page1Done) route = "page1";
+  else if (!page2Done) route = "page2";
+  else if (!page3Done) route = "page3";
+
+  return { route, page1Done, page2Done, page3Done };
+}
+exports.signInInfluencer = async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
+    if (!password) throw new ValidationError("Valid password is required");
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    const influencer = await InfluencerModel.findOne({ email: normalizedEmail }).exec();
+    if (!influencer || !influencer.password) throw new ValidationError("Invalid email or password");
+
+    const bcrypt = require("bcryptjs");
+    const ok = await bcrypt.compare(String(password), String(influencer.password));
+    if (!ok) throw new ValidationError("Invalid email or password");
+
+    const token = signJwt({
+      influencerId: influencer._id.toString(),
+      role: "influencer",
+      email: influencer.email,
+    });
+
+    const { route, page1Done, page2Done, page3Done } = computeInfluencerNextRoute(influencer);
+
+    return ApiResponse.sendOk(res, HttpStatus.OK, {
+      message: "Influencer sign in successful",
+      influencerId: influencer._id.toString(),
+      token,
+      route,
+      onboarding: { page1Done, page2Done, page3Done },
+    });
+  } catch (err) {
+    if (err instanceof ApiError) return next(err);
+    return next(new InternalError("Internal server error", undefined, err));
   }
 };
 

@@ -4,13 +4,13 @@ const router = express.Router();
 const {
   registerInfluencer,
   uploadProfileImage,
-  login,
+  signInInfluencer,
   verifyToken,
   getList,
   getById,
   getCampaignsByInfluencer,
-  requestOtpInfluencer,
-  verifyOtpInfluencer,
+  sendSignupOtpInfluencer,
+  verifyOtpSignUpInfluencer,
   requestPasswordResetOtpInfluencer,
   verifyPasswordResetOtpInfluencer,
   resetPasswordInfluencer,
@@ -31,13 +31,13 @@ const {
 } = require('../controllers/influencerController');
 
 // Public endpoints:
-router.post('/request-otp', requestOtpInfluencer);
-router.post('/verify-otp', verifyOtpInfluencer);
+router.post('/request-otp', sendSignupOtpInfluencer);
+router.post('/verify-otp', verifyOtpSignUpInfluencer);
 router.post('/register', uploadProfileImage, registerInfluencer);
-router.post('/onboarding', saveQuickOnboarding);
+router.post('/onboarding', verifyToken,saveQuickOnboarding);
 
 
-router.post('/login', login);
+router.post('/login', signInInfluencer);
 router.post('/get-campaign', getCampaignsByInfluencer);
 router.post('/getlist', verifyToken, getList);
 router.get('/getById', verifyToken, getById);
