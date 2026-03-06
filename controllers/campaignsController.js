@@ -1,31 +1,49 @@
+const mongoose = require("mongoose");
+const { Types } = require("mongoose");
+const multer = require("multer");
 const OpenAI = require("openai");
 const { DateTime } = require("luxon");
-const { Types } = require("mongoose");
 
+const { uploadToGridFS } = require("../utils/gridfs");
+
+const Campaign = require("../models/campaign");
+const Brand = require("../models/brand");
+const { CategoryModel } = require("../models/categories");
+const ApplyCampaign = require("../models/applyCampaign");
+const {InfluencerModel:Influencer} = require("../models/influencer");
+const Contract = require("../models/contract");
+const Country = require("../models/country");
+const Modash = require("../models/modash");
+const Admin = require("../models/admin");
+
+const { AgeRangeModel: AgeRange } = require("../models/ageRange");
+const ContentLanguage = require("../models/language");
+const { InfluencerTierModel: InfluencerTier } = require("../models/influencerTier");
+const { ProductServiceGoalModel } = require("../models/productServiceGoal");
+const { ContentFormatModel: ContentFormat } = require("../models/contentFormat");
+const { PreferredHashtagModel: PreferredHashtag } = require("../models/preferredHashtag");
+
+const { CONTRACT_STATUS } = require("../constants/contract");
+const { createAndEmit } = require("../utils/notifier");
+const { detectGeoFromRequest } = require("../utils/ipGeo");
 const { ApiResponse } = require("../core/http/ApiResponse.js");
 const { HttpStatus } = require("../core/http/HttpStatus.js");
 
-const { CampaignModel } = require("../models/campaign.js");
-const { CategoryModel } = require("../models/categories.js");
-const { CountryModel } = require("../models/country.js");
-const { AgeRangeModel } = require("../models/ageRange.js");
-const { ContentLanguageModel } = require("../models/language.js");
-const { InfluencerTierModel } = require("../models/influencerTier.js");
-const { ProductServiceGoalModel } = require("../models/productServiceGoal.js");
-const { ContentFormatModel } = require("../models/contentFormat.js");
-const { PreferredHashtagModel } = require("../models/preferredHashtag.js");
+// ===============================
+//  New Create / AI helpers
+// ===============================
 
-const { detectGeoFromRequest } = require("../utils/ipGeo.js");
+const escapeRegex = (s = "") =>
+  String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-// ---------------- Helpers ----------------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const clean = (v) => (typeof v === "string" ? v.trim() : "");
 const EC = (code) => code;
 const getRequestId = (req) => req.requestId || req.id || req.headers?.["x-request-id"] || "NA";
 
-const isOid = (v) => Types.ObjectId.isValid(clean(v));
-const toObjectId = (id) => new Types.ObjectId(clean(id));
+const isOid = (v) => mongoose.Types.ObjectId.isValid(clean(v));
+const toObjectId = (id) => new mongoose.Types.ObjectId(clean(id));
 const toUnknownArray = (v) => (Array.isArray(v) ? v : []);
 
 const toNumber = (v) => {
@@ -44,6 +62,12 @@ const toInt = (v) => {
   return Number.isFinite(n) ? Math.trunc(n) : NaN;
 };
 
+const clampInt = (v, def, min, max) => {
+  const n = toInt(v);
+  if (!Number.isFinite(n)) return def;
+  return Math.max(min, Math.min(max, n));
+};
+
 const isValidHttpUrl = (v) => {
   const s = clean(v);
   if (!s) return false;
@@ -56,9 +80,9 @@ const isValidHttpUrl = (v) => {
 };
 
 const normalizeObjectIdArray = (v) => {
-  if (Array.isArray(v)) return v.map((x) => clean(String(x))).filter((id) => Types.ObjectId.isValid(id));
+  if (Array.isArray(v)) return v.map((x) => clean(String(x))).filter((id) => mongoose.Types.ObjectId.isValid(id));
   const s = clean(v);
-  return s && Types.ObjectId.isValid(s) ? [s] : [];
+  return s && mongoose.Types.ObjectId.isValid(s) ? [s] : [];
 };
 
 const fail = (res, http, code, message, requestId, meta) => {
@@ -79,7 +103,7 @@ const requireObjectId = (res, requestId, field, v) => {
   if (!s) {
     return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field, requestId) };
   }
-  if (!Types.ObjectId.isValid(s)) {
+  if (!mongoose.Types.ObjectId.isValid(s)) {
     return {
       ok: false,
       resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field, requestId, `Invalid ${field}`),
@@ -197,7 +221,6 @@ const sendControllerError = (res, requestId, err) => {
   );
 };
 
-// ---------------- Status + Platforms ----------------
 const pickStatus = (v) => {
   const allowed = ["draft", "scheduled", "active", "paused", "completed"];
   return typeof v === "string" && allowed.includes(v) ? v : "draft";
@@ -212,9 +235,11 @@ const toPlatformArray = (v) => {
   return [...new Set(out)];
 };
 
-// ---------------- Category/Subcategory ----------------
 const resolveCategoryAndSubcategories = async (categoryId, subIds) => {
-  const cat = await CategoryModel.findById(categoryId).select("_id name subcategories").lean();
+  const cat = await CategoryModel.findById(categoryId)
+    .select("_id name subcategories")
+    .lean();
+
   if (!cat) return { cat: null, subs: [], error: "Category not found" };
 
   const allSubs = Array.isArray(cat.subcategories) ? cat.subcategories : [];
@@ -228,7 +253,6 @@ const resolveCategoryAndSubcategories = async (categoryId, subIds) => {
   return { cat, subs: orderedSubs, error: "" };
 };
 
-// ---------------- Time ----------------
 const DEFAULT_CAMPAIGN_TZ = "UTC";
 
 const normalizeTimezone = (tzRaw) => {
@@ -273,10 +297,9 @@ const assertNotPastUtc = (dtUtc, tz, field) => {
   return { ok: true };
 };
 
-// ---------------- Enrichment ----------------
 const oidToStr = (v) => (v ? String(v) : "");
 const asIdArray = (v) =>
-  Array.isArray(v) ? v.map((x) => oidToStr(x)).filter((x) => Types.ObjectId.isValid(x)) : [];
+  Array.isArray(v) ? v.map((x) => oidToStr(x)).filter((x) => mongoose.Types.ObjectId.isValid(x)) : [];
 
 const orderByIds = (ids, docs) => {
   const map = new Map(docs.map((d) => [String(d._id), d]));
@@ -297,7 +320,7 @@ const enrichCampaigns = async (itemsRaw) => {
 
   for (const c of items) {
     const cid = oidToStr(c.categoryId);
-    if (Types.ObjectId.isValid(cid)) categoryIds.add(cid);
+    if (mongoose.Types.ObjectId.isValid(cid)) categoryIds.add(cid);
 
     asIdArray(c.campaignGoals).forEach((id) => goalIds.add(id));
     asIdArray(c.influencerTierIds).forEach((id) => tierIds.add(id));
@@ -311,44 +334,44 @@ const enrichCampaigns = async (itemsRaw) => {
   const [cats, goals, tiers, formats, langs, countries, ages, prefHashtags] = await Promise.all([
     categoryIds.size
       ? CategoryModel.find({ _id: { $in: [...categoryIds].map((id) => toObjectId(id)) } })
-          .select("_id name subcategories")
-          .lean()
+        .select("_id name subcategories")
+        .lean()
       : Promise.resolve([]),
 
     goalIds.size
       ? ProductServiceGoalModel.find({ _id: { $in: [...goalIds].map((id) => toObjectId(id)) } })
-          .select("_id goal sortOrder isActive")
-          .lean()
+        .select("_id goal sortOrder isActive")
+        .lean()
       : Promise.resolve([]),
 
     tierIds.size
-      ? InfluencerTierModel.find({ _id: { $in: [...tierIds].map((id) => toObjectId(id)) } })
-          .select("_id category value sortOrder")
-          .lean()
+      ? InfluencerTier.find({ _id: { $in: [...tierIds].map((id) => toObjectId(id)) } })
+        .select("_id category value sortOrder")
+        .lean()
       : Promise.resolve([]),
 
     formatIds.size
-      ? ContentFormatModel.find({ _id: { $in: [...formatIds].map((id) => toObjectId(id)) } }).lean()
+      ? ContentFormat.find({ _id: { $in: [...formatIds].map((id) => toObjectId(id)) } }).lean()
       : Promise.resolve([]),
 
     langIds.size
-      ? ContentLanguageModel.find({ _id: { $in: [...langIds].map((id) => toObjectId(id)) } })
-          .select("_id code name isActive")
-          .lean()
+      ? ContentLanguage.find({ _id: { $in: [...langIds].map((id) => toObjectId(id)) } })
+        .select("_id code name isActive")
+        .lean()
       : Promise.resolve([]),
 
     countryIds.size
-      ? CountryModel.find({ _id: { $in: [...countryIds].map((id) => toObjectId(id)) } })
-          .select("_id countryNameEn countryNameLocal countryCode currencyCode currencyNameEn region flag")
-          .lean()
+      ? Country.find({ _id: { $in: [...countryIds].map((id) => toObjectId(id)) } })
+        .select("_id countryNameEn countryNameLocal countryName name countryCode currencyCode currencyNameEn region flag")
+        .lean()
       : Promise.resolve([]),
 
     ageIds.size
-      ? AgeRangeModel.find({ _id: { $in: [...ageIds].map((id) => toObjectId(id)) } }).select("_id range").lean()
+      ? AgeRange.find({ _id: { $in: [...ageIds].map((id) => toObjectId(id)) } }).select("_id range").lean()
       : Promise.resolve([]),
 
     prefHashtagIds.size
-      ? PreferredHashtagModel.find({ _id: { $in: [...prefHashtagIds].map((id) => toObjectId(id)) } }).lean()
+      ? PreferredHashtag.find({ _id: { $in: [...prefHashtagIds].map((id) => toObjectId(id)) } }).lean()
       : Promise.resolve([]),
   ]);
 
@@ -363,15 +386,15 @@ const enrichCampaigns = async (itemsRaw) => {
 
   return items.map((c) => {
     const categoryId = oidToStr(c.categoryId);
-    const cat = Types.ObjectId.isValid(categoryId) ? catMap.get(categoryId) : null;
+    const cat = mongoose.Types.ObjectId.isValid(categoryId) ? catMap.get(categoryId) : null;
 
     const subIds = asIdArray(c.subcategoryIds);
     const subDetails =
       cat && Array.isArray(cat.subcategories)
         ? orderByIds(
-            subIds,
-            cat.subcategories.map((s) => ({ ...s, _id: String(s._id) }))
-          ).map((s) => ({ id: String(s._id), name: s.name, tags: s.tags ?? [] }))
+          subIds,
+          cat.subcategories.map((s) => ({ ...s, _id: String(s._id) }))
+        ).map((s) => ({ id: String(s._id), name: s.name, tags: s.tags ?? [] }))
         : [];
 
     const goalDetails = asIdArray(c.campaignGoals)
@@ -427,7 +450,6 @@ const enrichCampaigns = async (itemsRaw) => {
   });
 };
 
-// ---------------- Validation + Timing ----------------
 const toUtcDateFromAny = (v, tz) => {
   if (!v) return null;
   if (v instanceof Date) return Number.isFinite(v.getTime()) ? v : null;
@@ -441,13 +463,24 @@ const parseCampaignWindow = (body, tz, requestId, res, required) => {
 
   if (!required && !body.startAt && !body.endAt) return { ok: true, value: {} };
 
-  if (!startAtUtc) return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "startAt", requestId) };
-  if (!endAtUtc) return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId) };
+  if (!startAtUtc) {
+    return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "startAt", requestId) };
+  }
+  if (!endAtUtc) {
+    return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId) };
+  }
 
   if (startAtUtc.getTime() >= endAtUtc.getTime()) {
     return {
       ok: false,
-      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId, "startAt must be < endAt"),
+      resp: failField(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "endAt",
+        requestId,
+        "startAt must be < endAt"
+      ),
     };
   }
 
@@ -707,106 +740,6 @@ const parseDraftWindowSoft = (body, tz) => {
   return { startAt: startAtUtc, endAt: endAtUtc };
 };
 
-const buildCampaignDoc = (body, geo, status, byAi, timing) => {
-  const isDraft = status === "draft";
-
-  const oid = (v) => {
-    const s = clean(v);
-    return s && isOid(s) ? toObjectId(s) : undefined;
-  };
-
-  const oidArray = (v) =>
-    normalizeObjectIdArray(v)
-      .filter((x) => isOid(x))
-      .map((x) => toObjectId(x));
-
-  const oidArrayOrUndef = (v) => {
-    const arr = oidArray(v);
-    return arr.length ? arr : undefined;
-  };
-
-  const arrOrUndef = (v) => {
-    const arr = toUnknownArray(v);
-    return arr.length ? arr : undefined;
-  };
-
-  const strOrUndef = (v) => {
-    const s = clean(v);
-    return s ? s : undefined;
-  };
-
-  const base = {
-    brandId: toObjectId(body.brandId),
-    byAi,
-    createdLocation: {
-      ip: geo?.ip,
-      timezone: geo?.timezone,
-      country: geo?.country,
-      state: geo?.state,
-      city: geo?.city,
-      latitude: typeof geo?.latitude === "number" ? geo.latitude : undefined,
-      longitude: typeof geo?.longitude === "number" ? geo.longitude : undefined,
-      source: geo?.source,
-    },
-    status,
-    campaignTimezone: clean(body.campaignTimezone) || undefined,
-
-    campaignTitle: clean(body.campaignTitle),
-    description: isDraft ? strOrUndef(body.description) : clean(body.description),
-
-    campaignType: isDraft ? strOrUndef(body.campaignType) : clean(body.campaignType) || "",
-
-    categoryId: oid(body.categoryId),
-    subcategoryIds: isDraft ? oidArrayOrUndef(body.subcategoryIds) : oidArray(body.subcategoryIds),
-
-    productImages: isDraft ? arrOrUndef(body.productImages) : toUnknownArray(body.productImages),
-
-    productLink: strOrUndef(body.productLink),
-    videoLink: strOrUndef(body.videoLink),
-
-    campaignGoals: isDraft ? oidArrayOrUndef(body.campaignGoals) : oidArray(body.campaignGoals),
-    influencerTierIds: isDraft ? oidArrayOrUndef(body.influencerTierIds) : oidArray(body.influencerTierIds),
-    contentFormats: isDraft ? oidArrayOrUndef(body.contentFormats) : oidArray(body.contentFormats),
-
-    contentLanguageIds: oidArrayOrUndef(body.contentLanguageIds),
-    preferredHashtags: oidArrayOrUndef(body.preferredHashtags),
-
-    platformSelection: (() => {
-      const ps = toPlatformArray(body.platformSelection);
-      return isDraft ? (ps.length ? ps : undefined) : ps;
-    })(),
-
-    targetCountryIds: isDraft ? oidArrayOrUndef(body.targetCountryIds) : oidArray(body.targetCountryIds),
-    targetAgeRanges: isDraft ? oidArrayOrUndef(body.targetAgeRanges) : oidArray(body.targetAgeRanges),
-
-    paymentType: clean(body.paymentType) ? normalizePaymentType(body.paymentType) : undefined,
-
-    campaignBudget: Number.isFinite(toNumber(body.campaignBudget)) ? toNumber(body.campaignBudget) : undefined,
-    numberOfInfluencers: Number.isFinite(toInt(body.numberOfInfluencers)) ? toInt(body.numberOfInfluencers) : undefined,
-    minFollowers: Number.isFinite(toInt(body.minFollowers)) ? toInt(body.minFollowers) : undefined,
-    maxFollowers: Number.isFinite(toInt(body.maxFollowers)) ? toInt(body.maxFollowers) : undefined,
-
-    additionalNotes: isDraft ? strOrUndef(body.additionalNotes) : clean(body.additionalNotes) || "",
-  };
-
-  if (timing?.startAt) base.startAt = timing.startAt;
-  if (timing?.endAt) base.endAt = timing.endAt;
-
-  if (status === "active") base.publishedAt = new Date();
-  if (status === "draft") {
-    base.publishedAt = undefined;
-    base.scheduledAt = undefined;
-    base.scheduledLocation = undefined;
-  }
-  if (status === "scheduled") {
-    base.scheduledAt = timing?.scheduledAt;
-    base.scheduledLocation = base.createdLocation;
-    base.publishedAt = undefined;
-  }
-
-  return base;
-};
-
 const parseSchedule = (body, tz, requestId, res) => {
   const scheduledAtStr = clean(body.scheduledAt);
   if (!scheduledAtStr) {
@@ -869,7 +802,199 @@ const parseSchedule = (body, tz, requestId, res) => {
   };
 };
 
-// ---------------- AI prompt ----------------
+const findBrandDocByAnyId = async (brandId) => {
+  const s = clean(brandId);
+  if (!s) return null;
+
+  let brand = null;
+
+  if (mongoose.Types.ObjectId.isValid(s)) {
+    brand = await Brand.findById(s).lean();
+  }
+
+  if (!brand) {
+    brand = await Brand.findOne({ brandId: s }).lean();
+  }
+
+  return brand;
+};
+
+const getCampaignDisplayName = (campaign) =>
+  String(campaign?.campaignTitle || campaign?.productOrServiceName || "Campaign").trim();
+
+const getCampaignEntityId = (campaign) =>
+  String(campaign?.campaignsId || campaign?._id || "");
+
+const buildCampaignDoc = (body, geo, status, byAi, timing, extra = {}) => {
+  const isDraft = status === "draft";
+
+  const oid = (v) => {
+    const s = clean(v);
+    return s && isOid(s) ? toObjectId(s) : undefined;
+  };
+
+  const oidArray = (v) =>
+    normalizeObjectIdArray(v)
+      .filter((x) => isOid(x))
+      .map((x) => toObjectId(x));
+
+  const oidArrayOrUndef = (v) => {
+    const arr = oidArray(v);
+    return arr.length ? arr : undefined;
+  };
+
+  const arrOrUndef = (v) => {
+    const arr = toUnknownArray(v);
+    return arr.length ? arr : undefined;
+  };
+
+  const strOrUndef = (v) => {
+    const s = clean(v);
+    return s ? s : undefined;
+  };
+
+  const budget = toNumber(body.campaignBudget);
+  const numInfluencers = toInt(body.numberOfInfluencers);
+  const minFollowers = toInt(body.minFollowers);
+  const maxFollowers = toInt(body.maxFollowers);
+
+  const base = {
+    brandId: toObjectId(body.brandId),
+    brandName: clean(extra.brandName) || "",
+    byAi,
+
+    createdLocation: {
+      ip: geo?.ip,
+      timezone: geo?.timezone,
+      country: geo?.country,
+      state: geo?.state,
+      city: geo?.city,
+      latitude: typeof geo?.latitude === "number" ? geo.latitude : undefined,
+      longitude: typeof geo?.longitude === "number" ? geo.longitude : undefined,
+      source: geo?.source,
+    },
+
+    createdBy: extra.createdBy || null,
+    approvalMode: extra.approvalMode || "direct",
+
+    status,
+    campaignTimezone: clean(body.campaignTimezone) || undefined,
+
+    campaignTitle: clean(body.campaignTitle),
+    description: isDraft ? strOrUndef(body.description) : clean(body.description),
+    campaignType: isDraft ? strOrUndef(body.campaignType) : clean(body.campaignType) || "",
+
+    categoryId: oid(body.categoryId),
+    subcategoryIds: isDraft ? oidArrayOrUndef(body.subcategoryIds) : oidArray(body.subcategoryIds),
+
+    productImages: isDraft ? arrOrUndef(body.productImages) : toUnknownArray(body.productImages),
+    productLink: strOrUndef(body.productLink),
+    videoLink: strOrUndef(body.videoLink),
+
+    campaignGoals: isDraft ? oidArrayOrUndef(body.campaignGoals) : oidArray(body.campaignGoals),
+    influencerTierIds: isDraft ? oidArrayOrUndef(body.influencerTierIds) : oidArray(body.influencerTierIds),
+    contentFormats: isDraft ? oidArrayOrUndef(body.contentFormats) : oidArray(body.contentFormats),
+
+    contentLanguageIds: oidArrayOrUndef(body.contentLanguageIds),
+    preferredHashtags: oidArrayOrUndef(body.preferredHashtags),
+
+    platformSelection: (() => {
+      const ps = toPlatformArray(body.platformSelection);
+      return isDraft ? (ps.length ? ps : undefined) : ps;
+    })(),
+
+    targetCountryIds: isDraft ? oidArrayOrUndef(body.targetCountryIds) : oidArray(body.targetCountryIds),
+    targetAgeRanges: isDraft ? oidArrayOrUndef(body.targetAgeRanges) : oidArray(body.targetAgeRanges),
+
+    paymentType: clean(body.paymentType) ? normalizePaymentType(body.paymentType) : undefined,
+    campaignBudget: Number.isFinite(budget) ? budget : undefined,
+    numberOfInfluencers: Number.isFinite(numInfluencers) ? numInfluencers : undefined,
+    minFollowers: Number.isFinite(minFollowers) ? minFollowers : undefined,
+    maxFollowers: Number.isFinite(maxFollowers) ? maxFollowers : undefined,
+
+    additionalNotes: isDraft ? strOrUndef(body.additionalNotes) : clean(body.additionalNotes) || "",
+
+    // compatibility fields for your unchanged APIs
+    productOrServiceName: clean(body.campaignTitle),
+    images: toUnknownArray(body.productImages),
+    budget: Number.isFinite(budget) ? budget : 0,
+    influencerBudget: Number.isFinite(toNumber(body.influencerBudget)) ? toNumber(body.influencerBudget) : 0,
+
+    isDraft: status === "draft" ? 1 : 0,
+    isActive: status === "active" ? 1 : 0,
+    publishStatus: status === "draft" ? "draft" : status === "scheduled" ? "scheduled" : "published",
+    campaignStatus: status === "active" ? "open" : "paused",
+    statusUpdatedAt: new Date(),
+  };
+
+  if (extra.categoryName) {
+    base.campaignCategory = extra.categoryName;
+  }
+  if (Array.isArray(extra.subcategoryNames) && extra.subcategoryNames.length) {
+    base.campaignSubcategory = extra.subcategoryNames.join(", ");
+    base.categories = extra.subcategoryNames.map((subName, idx) => ({
+      categoryId: String(body.categoryId),
+      categoryName: extra.categoryName || "",
+      subcategoryId: String(normalizeObjectIdArray(body.subcategoryIds)[idx] || ""),
+      subcategoryName: subName,
+    }));
+  }
+
+  if (timing?.startAt) base.startAt = timing.startAt;
+  if (timing?.endAt) base.endAt = timing.endAt;
+
+  if (timing?.startAt || timing?.endAt) {
+    base.timeline = {
+      startDate: timing?.startAt,
+      endDate: timing?.endAt,
+    };
+  }
+
+  if (status === "active") base.publishedAt = new Date();
+
+  if (status === "draft") {
+    base.publishedAt = undefined;
+    base.scheduledAt = undefined;
+    base.scheduledLocation = undefined;
+  }
+
+  if (status === "scheduled") {
+    base.scheduledAt = timing?.scheduledAt;
+    base.scheduledLocation = base.createdLocation;
+    base.publishedAt = undefined;
+  }
+
+  return base;
+};
+
+const notifyMatchingInfluencersForNewCampaign = async (campaignDoc, subIds = []) => {
+  try {
+    if (!Array.isArray(subIds) || !subIds.length) return;
+
+    const influencers = await findMatchingInfluencers({ subIds, catNumIds: [] });
+    if (!Array.isArray(influencers) || !influencers.length) return;
+
+    const entityId = getCampaignEntityId(campaignDoc);
+    const title = getCampaignDisplayName(campaignDoc);
+
+    await Promise.all(
+      influencers.map((inf) =>
+        createAndEmit({
+          influencerId: String(inf.influencerId),
+          type: "campaign.match",
+          title: "New campaign matches your profile",
+          message: `${campaignDoc.brandName || "A brand"} posted "${title}".`,
+          entityType: "campaign",
+          entityId,
+          actionPath: `/influencer/dashboard/view-campaign?id=${entityId}`,
+        }).catch(() => null)
+      )
+    );
+  } catch (e) {
+    console.warn("notifyMatchingInfluencersForNewCampaign failed:", e?.message || e);
+  }
+};
+
 const buildAIPrompt = (ui) => `
 You are an expert campaign strategist for influencer marketing.
 Your job: infer missing MANUAL form fields from the given Please Fill the Required Fields.
@@ -926,8 +1051,407 @@ INPUT:
 ${JSON.stringify(ui, null, 2)}
 `.trim();
 
+// ===============================
+//  Existing helpers below
+// ===============================
+function toNum(v, def = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : def;
+}
+
+function isPlainObject(v) {
+  return v && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date);
+}
+
+function sortLocations(arr = []) {
+  return [...arr].sort((a, b) => String(a.countryId).localeCompare(String(b.countryId)));
+}
+
+function sortCategories(arr = []) {
+  return [...arr].sort((a, b) => {
+    const ak = `${a.categoryId}-${a.subcategoryId}`;
+    const bk = `${b.categoryId}-${b.subcategoryId}`;
+    return ak.localeCompare(bk);
+  });
+}
+
+function normalizeForDiff(obj) {
+  const out = { ...obj };
+  if (out.targetAudience?.locations) {
+    out.targetAudience = {
+      ...out.targetAudience,
+      locations: sortLocations(out.targetAudience.locations),
+    };
+  }
+  if (out.categories) {
+    out.categories = sortCategories(out.categories);
+  }
+  if (out.budget !== undefined) out.budget = Number(out.budget);
+  if (out.influencerBudget !== undefined) out.influencerBudget = Number(out.influencerBudget);
+  return out;
+}
+
+function diffObject(base, next) {
+  if (Array.isArray(base) || Array.isArray(next)) {
+    return JSON.stringify(base) === JSON.stringify(next) ? undefined : next;
+  }
+  if (!isPlainObject(base) || !isPlainObject(next)) {
+    return base === next ? undefined : next;
+  }
+  const patch = {};
+  for (const key of Object.keys(next)) {
+    const d = diffObject(base?.[key], next[key]);
+    if (d !== undefined) patch[key] = d;
+  }
+  return Object.keys(patch).length ? patch : undefined;
+}
+
+function isAdminRequest(req) {
+  const role = String(req.user?.role || req.user?.userType || "").toLowerCase();
+  if (req.user?.brandId || role.includes("brand")) return false;
+  if (role.includes("admin")) return true;
+  if (req.user?.isAdmin === true) return true;
+  if (req.user?.adminId && !req.user?.brandId) return true;
+
+  if (req.body?.adminId || req.query?.adminId) return true;
+
+  return false;
+}
+
+async function resolveActorFromPayload(req, fallbackBrandId = "") {
+  const role = String(req.user?.role || req.user?.userType || "").toLowerCase();
+
+  if (!req.user?.brandId && (role.includes("admin") || req.user?.isAdmin === true || req.user?.adminId)) {
+    let adminKey = String(req.user?.adminId || req.user?._id || req.user?.id || "").trim();
+    if (mongoose.Types.ObjectId.isValid(adminKey)) {
+      const a = await Admin.findById(adminKey, "adminId").lean();
+      if (a?.adminId) adminKey = String(a.adminId);
+    } else {
+      const a = await Admin.findOne({ adminId: adminKey }, "adminId").lean();
+      if (a?.adminId) adminKey = String(a.adminId);
+    }
+    return { role: "admin", userId: adminKey };
+  }
+
+  const raw = req.body?.adminId;
+  const adminId = raw == null ? "" : String(raw).trim();
+  if (adminId) {
+    const admin = await Admin.findOne({ adminId }, "adminId").lean();
+    if (admin) return { role: "admin", userId: String(admin.adminId) };
+  }
+
+  return { role: "brand", userId: String(fallbackBrandId || "") };
+}
+
+function mapCampaignForInfluencer(c) {
+  if (!c) return c;
+  const brandBudget = toNum(c.budget, 0);
+  const infBudget = toNum(c.influencerBudget, 0);
+  return {
+    ...c,
+    budget: infBudget > 0 ? infBudget : brandBudget,
+    brandBudget,
+    influencerBudget: infBudget
+  };
+}
+
+// ===============================
+//  Notifications
+// ===============================
+async function notifyBrandDraftReady(campaign) {
+  const title = getCampaignDisplayName(campaign);
+  const entityId = getCampaignEntityId(campaign);
+
+  return createAndEmit({
+    brandId: String(campaign.brandId),
+    type: "campaign.draft_review",
+    title: "Review your new campaign draft",
+    message: `Admin has drafted "${title}". Please review and confirm.`,
+    entityType: "campaign",
+    entityId,
+    actionPath: { brand: `/brand/review-campaigns/view?id=${entityId}` },
+  });
+}
+
+async function notifyAdminBrandConfirmed(campaign) {
+  const admins = await Admin.find({}, "adminId").lean();
+  const adminIds = admins.map((a) => String(a.adminId || "").trim()).filter(Boolean);
+  const title = getCampaignDisplayName(campaign);
+  const entityId = getCampaignEntityId(campaign);
+
+  return createAndEmit({
+    adminIds,
+    type: "campaign.brand_confirmed",
+    title: "Brand confirmed campaign readiness",
+    message: `${campaign.brandName || "Brand"} has reviewed and confirmed "${title}". It is ready to be published.`,
+    entityType: "campaign",
+    entityId,
+    actionPath: { admin: `/admin/campaigns/view?id=${entityId}` },
+  });
+}
+
+async function notifyAdminsCampaignPending(campaign, patch = null) {
+  const admins = await Admin.find({}, "adminId").lean();
+  const adminIds = (admins || []).map((a) => String(a.adminId || "").trim()).filter(Boolean);
+  const title = getCampaignDisplayName(campaign);
+  const entityId = getCampaignEntityId(campaign);
+
+  const changedKeys = patch ? Object.keys(patch) : [];
+  const changedText = changedKeys.length
+    ? ` Changes: ${changedKeys.slice(0, 8).join(", ")}${changedKeys.length > 8 ? "..." : ""}`
+    : "";
+
+  return createAndEmit({
+    adminIds,
+    type: "campaign.pending_update",
+    title: "Campaign updated (needs approval)",
+    message: `${campaign.brandName || "Brand"} updated "${title}".${changedText}`,
+    entityType: "campaign",
+    entityId,
+    actionPath: { admin: `/admin/campaigns/view?id=${entityId}` },
+  });
+}
+
+async function notifyBrandApproved(campaign) {
+  const title = getCampaignDisplayName(campaign);
+  const entityId = getCampaignEntityId(campaign);
+
+  return createAndEmit({
+    brandId: String(campaign.brandId),
+    type: "campaign.update_approved",
+    title: "Campaign update approved",
+    message: `Admin approved changes for "${title}".`,
+    entityType: "campaign",
+    entityId,
+    actionPath: { brand: `/brand/edit-review-campaign/view?id=${entityId}` },
+  });
+}
+
+async function notifyBrandRejected(campaign, note) {
+  const title = getCampaignDisplayName(campaign);
+  const entityId = getCampaignEntityId(campaign);
+
+  return createAndEmit({
+    brandId: String(campaign.brandId),
+    type: "campaign.update_rejected",
+    title: "Campaign update rejected",
+    message: `Admin rejected changes for "${title}". ${note ? `Reason: ${note}` : ""}`,
+    entityType: "campaign",
+    entityId,
+    actionPath: { brand: `/brand/edit-review-campaign/view?id=${entityId}` },
+  });
+}
+
+// ===============================
+//  Multer setup
+// ===============================
+const storage = multer.memoryStorage();
+const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif', 'image/svg+xml']);
+const DOC_MIMES = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'text/plain'
+]);
+
+function fileFilter(req, file, cb) {
+  if (file.fieldname === 'image') return cb(null, IMAGE_MIMES.has(file.mimetype));
+  if (file.fieldname === 'creativeBrief') return cb(null, DOC_MIMES.has(file.mimetype));
+  return cb(null, false);
+}
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter
+}).fields([
+  { name: 'image', maxCount: 10 },
+  { name: 'creativeBrief', maxCount: 10 }
+]);
+
+// ===============================
+//  Subscription & Utils
+// ===============================
+async function ensureBrandQuota(brandId, featureKey, amount = 1) {
+  if (!brandId) throw new Error('brandId is required for quota checks');
+  const brand = await Brand.findOne({ brandId }, 'subscription').lean();
+  if (!brand || !brand.subscription) throw new Error('Brand subscription not configured');
+  const feature = getFeature.getFeature(brand.subscription, featureKey);
+  if (!feature) return { limit: 0, used: 0, remaining: Infinity };
+  const limit = readLimit(feature);
+  const used = Number(feature.used || 0) || 0;
+  if (limit === 0) return { limit: 0, used, remaining: Infinity };
+  if (used + amount > limit) {
+    const remaining = Math.max(limit - used, 0);
+    const err = new Error(`Quota exceeded for feature ${featureKey}`);
+    err.code = 'QUOTA_EXCEEDED';
+    err.meta = { limit, used, requested: amount, remaining };
+    throw err;
+  }
+  await Brand.updateOne({ brandId, 'subscription.features.key': featureKey }, { $inc: { 'subscription.features.$.used': amount } });
+  return { limit, used: used + amount, remaining: limit - (used + amount) };
+}
+
+function readLimit(featureRow) {
+  if (!featureRow) return 0;
+  const raw = featureRow.limit ?? featureRow.value ?? 0;
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : 0;
+}
+
+async function ensureMonthlyWindow(influencerId, featureKey, featureRow) { return featureRow; }
+
+async function countActiveCollaborationsForInfluencer(influencerId) {
+  if (!influencerId) return 0;
+  return Contract.countDocuments({ influencerId: String(influencerId), isRejected: { $ne: 1 }, isAccepted: 1 });
+}
+
+function activeAcceptedFilter() {
+  return {
+    isAccepted: 1,
+    isRejected: { $ne: 1 },
+    status: { $nin: [CONTRACT_STATUS.REJECTED, CONTRACT_STATUS.SUPERSEDED] },
+    $or: [{ supersededBy: { $exists: false } }, { supersededBy: null }, { supersededBy: "" }]
+  };
+}
+
+function activeAcceptedFilter2() {
+  return {
+    isAccepted: 1,
+    isRejected: { $ne: 1 },
+    status: { $in: [CONTRACT_STATUS.CONTRACT_SIGNED, CONTRACT_STATUS.MILESTONES_CREATED], $nin: [CONTRACT_STATUS.REJECTED, CONTRACT_STATUS.SUPERSEDED] },
+    $or: [{ supersededBy: { $exists: false } }, { supersededBy: null }, { supersededBy: "" }],
+  };
+}
+
+function campaignIdFilter(campaignId) {
+  const id = String(campaignId);
+  const or = [{ campaignId: id }, { campaignsId: id }];
+  if (mongoose.Types.ObjectId.isValid(id)) or.push({ campaignId: new mongoose.Types.ObjectId(id) });
+  return { $or: or };
+}
+
+function computeIsActive(timeline) {
+  if (!timeline || !timeline.endDate) return 1;
+  const now = new Date();
+  return timeline.endDate < now ? 0 : 1;
+}
+
+const toStr = (v) => (v == null ? '' : String(v));
+
+async function milestoneSetForInfluencer(influencerId, campaignIds = []) {
+  if (!campaignIds.length) return new Set();
+  const docs = await Milestone.find(
+    { 'milestoneHistory.influencerId': influencerId, 'milestoneHistory.campaignId': { $in: campaignIds } },
+    'milestoneHistory.campaignId milestoneHistory.influencerId'
+  ).lean();
+  const set = new Set();
+  docs.forEach((d) => {
+    d.milestoneHistory.forEach((e) => {
+      if (toStr(e.influencerId) === toStr(influencerId) && campaignIds.includes(toStr(e.campaignId))) {
+        set.add(toStr(e.campaignId));
+      }
+    });
+  });
+  return set;
+}
+
+async function normalizeCategoriesPayload(raw) {
+  if (!raw) return [];
+  let items = raw;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch { throw new Error('Invalid JSON in categories.'); }
+  }
+  if (!Array.isArray(items)) throw new Error('categories must be an array.');
+
+  const catNums = [...new Set(items.map(it => Number(it?.categoryId)).filter(n => Number.isFinite(n)))];
+  if (!catNums.length) throw new Error('categories must contain numeric categoryId.');
+
+  const cats = await CategoryModel.find({ id: { $in: catNums } }, 'id name subcategories').lean();
+  const byNum = new Map(cats.map(c => [c.id, c]));
+
+  const out = [];
+  for (const it of items) {
+    const catNum = Number(it?.categoryId);
+    const subId = String(it?.subcategoryId || '');
+    if (!Number.isFinite(catNum)) throw new Error(`Invalid categoryId: ${it?.categoryId}`);
+    if (!subId) throw new Error('subcategoryId is required');
+    const catDoc = byNum.get(catNum);
+    if (!catDoc) throw new Error(`Category not found (id: ${catNum})`);
+    const sub = (catDoc.subcategories || []).find(s => String(s.subcategoryId) === subId);
+    if (!sub) throw new Error(`Subcategory ${subId} not under category id ${catNum}`);
+    out.push({ categoryId: catDoc.id, categoryName: catDoc.name, subcategoryId: sub.subcategoryId, subcategoryName: sub.name });
+  }
+  return out;
+}
+
+function buildSearchOr(term) {
+  const or = [
+    { brandName: { $regex: term, $options: 'i' } },
+    { productOrServiceName: { $regex: term, $options: 'i' } },
+    { description: { $regex: term, $options: 'i' } },
+    { 'categories.subcategoryName': { $regex: term, $options: 'i' } },
+    { 'categories.categoryName': { $regex: term, $options: 'i' } }
+  ];
+  const num = Number(term);
+  if (!isNaN(num)) {
+    or.push({ budget: { $lte: num } });
+    or.push({ influencerBudget: { $lte: num } });
+  }
+  return or;
+}
+
+async function buildSubToParentNumMap() {
+  const rows = await CategoryModel.find({}, "_id subcategories").lean();
+  const subIdToParentNum = new Map();
+
+  for (const r of rows) {
+    for (const s of r.subcategories || []) {
+      subIdToParentNum.set(String(s._id), String(r._id));
+    }
+  }
+
+  return subIdToParentNum;
+}
+
+async function findMatchingInfluencers({ subIds = [], catNumIds = [] }) {
+  if (!subIds.length && !catNumIds.length) return [];
+  const or = [];
+  if (subIds.length) {
+    or.push(
+      { 'onboarding.subcategories.subcategoryId': { $in: subIds } },
+      { 'subcategories.subcategoryId': { $in: subIds } },
+      { 'categories.subcategoryId': { $in: subIds } },
+      { 'socialProfiles.categories.subcategoryId': { $in: subIds } },
+      { 'categories': { $in: subIds } }
+    );
+  }
+  if (catNumIds.length) {
+    or.push(
+      { 'onboarding.categoryId': { $in: catNumIds } },
+      { 'categories.categoryId': { $in: catNumIds } }
+    );
+  }
+  const filter = or.length ? { $or: or } : {};
+  const influencers = await Influencer.find(filter, 'influencerId name primaryPlatform handle onboarding socialProfiles').lean();
+  return influencers || [];
+}
+
+function addInfluencerOpenStatusGate(filter) {
+  filter.$and = filter.$and || [];
+  filter.$and.push({ $or: [{ campaignStatus: 'open' }, { campaignStatus: { $exists: false } }] });
+  return filter;
+}
+
+const CAMPAIGN_STATUS = Object.freeze({ OPEN: "open", PAUSED: "paused" });
+const ALLOWED_CAMPAIGN_STATUSES = new Set([CAMPAIGN_STATUS.OPEN, CAMPAIGN_STATUS.PAUSED]);
+
+function normalizeStatus(v) {
+  return String(v || "").toLowerCase().trim();
+}
+
 // =======================================================
-// POST: Create Campaign
+// UPDATED CREATE CAMPAIGN
 // =======================================================
 exports.createCampaign = async (req, res) => {
   const requestId = getRequestId(req);
@@ -936,11 +1460,22 @@ exports.createCampaign = async (req, res) => {
     const geo = await detectGeoFromRequest(req);
     const campaignTz = getCampaignTimezone(req.body);
 
+    const brandDoc = await findBrandDocByAnyId(req.body.brandId);
+    if (!brandDoc) {
+      return fail(res, HttpStatus.NOT_FOUND, "NOT_FOUND", "Brand not found", requestId);
+    }
+
+    const actor = await resolveActorFromPayload(
+      req,
+      String(brandDoc.brandId || brandDoc._id || req.body.brandId || "")
+    );
+
     const mode = inferMode(req.body.status, req.body.scheduledAt);
     const v = await validateForMode(res, requestId, mode, req.body);
     if (!v.ok) return v.resp;
 
-    const status = mode === "draft" ? "draft" : mode === "schedule" ? "scheduled" : "active";
+    const status =
+      mode === "draft" ? "draft" : mode === "schedule" ? "scheduled" : "active";
 
     let timing = {};
 
@@ -958,23 +1493,46 @@ exports.createCampaign = async (req, res) => {
 
     req.body.campaignTimezone = campaignTz;
 
-    const docToCreate = buildCampaignDoc(req.body, geo, status, 0, timing);
-    const created = await CampaignModel.create(docToCreate);
+    const docToCreate = buildCampaignDoc(
+      req.body,
+      geo,
+      status,
+      0,
+      timing,
+      {
+        brandName: String(brandDoc.name || brandDoc.brandName || ""),
+        createdBy: actor,
+        approvalMode: actor.role === "admin" ? "admin_review" : "direct",
+        categoryName: v?.rel?.cat?.name || "",
+        subcategoryNames: Array.isArray(v?.rel?.subs)
+          ? v.rel.subs.map((s) => String(s.name || ""))
+          : [],
+      }
+    );
+
+    const created = await Campaign.create(docToCreate);
+
+    if (status === "draft" && actor.role === "admin") {
+      await notifyBrandDraftReady(created).catch(console.error);
+    }
+
+    if (status === "active") {
+      await notifyMatchingInfluencersForNewCampaign(
+        { ...created.toObject(), brandName: String(brandDoc.name || brandDoc.brandName || "") },
+        normalizeObjectIdArray(req.body.subcategoryIds)
+      );
+    }
 
     const enriched = (await enrichCampaigns([created]))[0];
-    return ApiResponse.sendOk(
-      res,
-      HttpStatus.CREATED,
-      { doc: enriched },
-      requestId
-    );
+
+    return ApiResponse.sendOk(res, HttpStatus.CREATED, { doc: enriched }, requestId);
   } catch (err) {
     return sendControllerError(res, requestId, err);
   }
 };
 
 // =======================================================
-// POST: AI Prefill
+// NEW AI PREFILL CAMPAIGN
 // =======================================================
 exports.prefillCampaignWithAI = async (req, res) => {
   const requestId = getRequestId(req);
@@ -983,6 +1541,16 @@ exports.prefillCampaignWithAI = async (req, res) => {
     const geo = await detectGeoFromRequest(req);
     const tz = getCampaignTimezone(req.body);
     const nowLocal = DateTime.now().setZone(tz);
+
+    const brandDoc = await findBrandDocByAnyId(req.body.brandId);
+    if (!brandDoc) {
+      return fail(res, HttpStatus.NOT_FOUND, "NOT_FOUND", "Brand not found", requestId);
+    }
+
+    const actor = await resolveActorFromPayload(
+      req,
+      String(brandDoc.brandId || brandDoc._id || req.body.brandId || "")
+    );
 
     const brandIdR = requireObjectId(res, requestId, "brandId", req.body.brandId);
     if (!brandIdR.ok) return brandIdR.resp;
@@ -1050,12 +1618,12 @@ exports.prefillCampaignWithAI = async (req, res) => {
 
     const [goals, tiers, formats, langs] = await Promise.all([
       ProductServiceGoalModel.find({ isActive: true }).select("_id goal").lean().limit(120),
-      InfluencerTierModel.find({}).select("_id category value sortOrder").lean().limit(120),
-      ContentFormatModel.find({}).select("_id name title type format").lean().limit(200),
-      ContentLanguageModel.find({ isActive: true }).select("_id code name").lean().limit(200),
+      InfluencerTier.find({}).select("_id category value sortOrder").lean().limit(120),
+      ContentFormat.find({}).select("_id name title type format").lean().limit(200),
+      ContentLanguage.find({ isActive: true }).select("_id code name").lean().limit(200),
     ]);
 
-    const prefHashtagsDocs = await PreferredHashtagModel.find({
+    const prefHashtagsDocs = await PreferredHashtag.find({
       subcategoryId: { $in: subR.value.map((x) => toObjectId(x)) },
     })
       .select("_id hashtag tag name")
@@ -1104,7 +1672,7 @@ exports.prefillCampaignWithAI = async (req, res) => {
         paymentTypesAllowed: ["Milestone", "Fixed", "Gifting"],
         hints: [
           "Infer sensible influencer count based on campaign type/category/description and budget.",
-          "Pick formats/goals/tier based on description + category/subcategory.",
+          "Pick formats/goals/tier based on description + category/CategoryModel.",
         ],
       },
     };
@@ -1137,11 +1705,8 @@ exports.prefillCampaignWithAI = async (req, res) => {
       return allowedIds.slice(0, Math.min(min, allowedIds.length));
     };
 
-    const clampInt = (v, def, min, max) => {
-      const n = toInt(v);
-      if (!Number.isFinite(n)) return def;
-      return Math.max(min, Math.min(max, n));
-    };
+
+
 
     const normalizePayment = (v) => {
       const s = clean(v);
@@ -1276,9 +1841,22 @@ exports.prefillCampaignWithAI = async (req, res) => {
         geo,
         "draft",
         1,
-        win.value
+        win.value,
+        {
+          brandName: String(brandDoc.name || brandDoc.brandName || ""),
+          createdBy: actor,
+          approvalMode: actor.role === "admin" ? "admin_review" : "direct",
+          categoryName: rel?.cat?.name || "",
+          subcategoryNames: Array.isArray(rel?.subs) ? rel.subs.map((s) => String(s.name || "")) : [],
+        }
       );
-      const savedDoc = await CampaignModel.create(docToCreate);
+
+      const savedDoc = await Campaign.create(docToCreate);
+
+      if (actor.role === "admin") {
+        await notifyBrandDraftReady(savedDoc).catch(console.error);
+      }
+
       const enrichedSaved = (await enrichCampaigns([savedDoc]))[0];
 
       return ApiResponse.sendOk(
@@ -1769,12 +2347,13 @@ exports.getCampaignsByFilter = async (req, res) => {
 
     if (Array.isArray(subcategoryIds) && subcategoryIds.length) filter['categories.subcategoryId'] = { $in: subcategoryIds.map(String) };
     if (Array.isArray(categoryIds) && categoryIds.length) {
-      const nums = categoryIds.map(v => Number(v)).filter(n => Number.isFinite(n));
-      const maybeObjIds = categoryIds.filter(v => typeof v === 'string' && mongoose.Types.ObjectId.isValid(v));
-      let fromObj = [];
-      if (maybeObjIds.length) { const rows = await Category.find({ _id: { $in: maybeObjIds } }, 'id').lean(); fromObj = rows.map(r => r.id).filter(n => Number.isFinite(n)); }
-      const combined = [...new Set([...nums, ...fromObj])];
-      if (combined.length) filter['categories.categoryId'] = { $in: combined };
+      const maybeObjIds = categoryIds.filter(
+        (v) => typeof v === "string" && mongoose.Types.ObjectId.isValid(v)
+      );
+
+      if (maybeObjIds.length) {
+        filter["categoryId"] = { $in: maybeObjIds.map((id) => new mongoose.Types.ObjectId(id)) };
+      }
     }
 
     if ([0, 1].includes(Number(gender))) filter['targetAudience.gender'] = Number(gender);
@@ -2088,5 +2667,273 @@ exports.getAdminCampaigns = async (req, res) => {
       success: false,
       message: err.message || "Server error",
     });
+  }
+};
+
+
+
+exports.getCategories = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const search = clean(req.query.search);
+    const filter = {};
+
+    if (search) {
+      const regex = new RegExp(escapeRegex(search), "i");
+      filter.$or = [
+        { name: regex },
+        { globalTags: regex },
+        { "subcategories.name": regex },
+        { "subcategories.tags": regex },
+      ];
+    }
+
+    const data = await CategoryModel.find(filter).sort({ name: 1 }).lean();
+
+    return ApiResponse.sendOk(res, HttpStatus.OK, data, requestId);
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
+  }
+};
+
+
+exports.getSubcategories = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const categoryId = clean(req.query.categoryId);
+    const search = clean(req.query.search);
+    const rx = search ? new RegExp(escapeRegex(search), "i") : null;
+
+    const normalizeTags = (obj) => {
+      const t = obj?.tag ?? obj?.tags ?? [];
+      return Array.isArray(t) ? t : t ? [t] : [];
+    };
+
+    const normalizeGlobalTags = (cat) => {
+      const gt = cat?.globalTags ?? cat?.tags ?? [];
+      return Array.isArray(gt) ? gt : gt ? [gt] : [];
+    };
+
+    if (categoryId) {
+      if (!mongoose.Types.ObjectId.isValid(categoryId)) {
+        return failField(
+          res,
+          HttpStatus.BAD_REQUEST,
+          "VALIDATION_ERROR",
+          "categoryId",
+          requestId,
+          "Invalid categoryId"
+        );
+      }
+
+      const cat = await CategoryModel.findById(categoryId)
+        .select("_id name subcategories globalTags tags")
+        .lean();
+
+      if (!cat) {
+        return fail(res, HttpStatus.NOT_FOUND, "NOT_FOUND", "Category not found", requestId);
+      }
+
+      const subs = cat.subcategories ?? [];
+      const filtered = rx ? subs.filter((s) => rx.test(String(s.name ?? ""))) : subs;
+
+      const globalTags = normalizeGlobalTags(cat);
+
+      const data = filtered
+        .map((s) => ({
+          _id: s._id,
+          name: s.name,
+          tags: normalizeTags(s),
+          globalTags,
+          categoryId: cat._id,
+          categoryName: cat.name,
+        }))
+        .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+
+      return ApiResponse.sendOk(res, HttpStatus.OK, data, requestId);
+    }
+
+    const pipeline = [{ $unwind: "$subcategories" }];
+
+    if (rx) {
+      pipeline.push({ $match: { "subcategories.name": { $regex: rx } } });
+    }
+
+    pipeline.push(
+      {
+        $project: {
+          _id: "$subcategories._id",
+          name: "$subcategories.name",
+          tags: { $ifNull: ["$subcategories.tag", "$subcategories.tags"] },
+          globalTags: { $ifNull: ["$globalTags", "$tags"] },
+          categoryId: "$_id",
+          categoryName: "$name",
+        },
+      },
+      { $sort: { name: 1 } },
+      { $limit: 1000 }
+    );
+
+    const data = await CategoryModel.aggregate(pipeline);
+    return ApiResponse.sendOk(res, HttpStatus.OK, data, requestId);
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
+  }
+};
+
+
+
+exports.viewCampaignByIdForBrand = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const user = req.user || {};
+
+    const tokenBrandId = String(
+      user.brandId ?? user.id ?? user._id ?? user.userId ?? ""
+    ).trim();
+
+    if (!tokenBrandId || !Types.ObjectId.isValid(tokenBrandId)) {
+      return fail(res, 401, "UNAUTHORIZED", "Invalid brand token", requestId, {
+        hasUser: !!req.user,
+        tokenKeys: Object.keys(user || {}),
+      });
+    }
+
+    const bodyBrandId = clean(req.body.brandId);
+    if (!bodyBrandId || !Types.ObjectId.isValid(bodyBrandId)) {
+      return fail(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        "Valid brandId is required",
+        requestId
+      );
+    }
+
+    if (bodyBrandId !== tokenBrandId) {
+      return fail(
+        res,
+        403,
+        "FORBIDDEN",
+        "brandId does not match token",
+        requestId
+      );
+    }
+
+    const campaignId = clean(req.body.campaignId);
+
+    if (!campaignId) {
+      return fail(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        "campaignId is required",
+        requestId
+      );
+    }
+
+    const campaign = await Campaign.findOne({
+      campaignsId: campaignId,
+      brandId: toObjectId(tokenBrandId),
+    });
+
+    if (!campaign) {
+      return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
+    }
+
+    const enriched = (await enrichCampaigns([campaign]))[0];
+
+    return ApiResponse.sendOk(res, 200, { doc: enriched }, requestId);
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
+  }
+};
+
+
+exports.getRecommendedInfluencersByCampaignId = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const brandId = clean(req.body.brandId);
+    if (!brandId || !Types.ObjectId.isValid(brandId)) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid brandId is required", requestId);
+    }
+
+    const campaignId = clean(req.body.campaignId);
+    if (!campaignId) {
+      return fail(res, 400, "VALIDATION_ERROR", "campaignId is required", requestId);
+    }
+
+    const page = clampInt(req.body.page, 1, 1, 1000000);
+    const limit = clampInt(req.body.limit, 20, 1, 100);
+    const skip = (page - 1) * limit;
+
+    const campaign = await Campaign.findOne({
+      campaignsId: campaignId,
+      brandId: new Types.ObjectId(brandId),
+    })
+      .select("_id campaignsId brandId categoryId status")
+      .lean();
+
+    if (!campaign) {
+      return fail(res, 404, "NOT_FOUND", "Campaign not found for this brand", requestId);
+    }
+
+    const categoryId = String(campaign.categoryId || "").trim();
+    if (!categoryId || !Types.ObjectId.isValid(categoryId)) {
+      return fail(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        "Campaign categoryId is missing. Please select at least one category.",
+        requestId
+      );
+    }
+
+    const catOid = new Types.ObjectId(categoryId);
+
+    const match = {
+      $or: [
+        { "categories._id": catOid },
+        { categories: catOid },
+        { categoryId: catOid },
+        { categoryIds: { $in: [catOid] } },
+      ],
+    };
+
+    const [items, total] = await Promise.all([
+      Influencer.find(match)
+        .select("-password")
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Influencer.countDocuments(match),
+    ]);
+
+    const out = (items || []).map((inf) => ({
+      ...inf,
+      _id: String(inf._id),
+      influencerId: String(inf._id),
+    }));
+
+    return ApiResponse.sendOk(
+      res,
+      200,
+      {
+        items: out,
+        meta: {
+          total,
+          page,
+          limit,
+          totalPages: Math.max(1, Math.ceil(total / limit)),
+        },
+      },
+      requestId
+    );
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
   }
 };

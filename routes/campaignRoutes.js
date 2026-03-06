@@ -91,4 +91,11 @@ router.post("/reject-pending", campaignController.rejectCampaignPendingUpdate);
 // router.post('/publish', campaignController.publishCampaign);
 router.get('/created-by-admin/:brandId', campaignController.getAdminCampaigns);
 
+router.get('/category', brandAuth, campaignController.getCategories);
+router.get('/subcategory', brandAuth, campaignController.getSubcategories);
+
+router.post("/view-campaign-brand", brandAuth, campaignController.viewCampaignByIdForBrand);
+
+router.post("/recommended-influencers", brandAuth, campaignController.getRecommendedInfluencersByCampaignId);
+
 module.exports = router;

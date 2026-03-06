@@ -43,14 +43,14 @@ exports.getAllCountries = async (req, res) => {
     if (search) {
       const s = escapeRegExp(search);
       filter.$or = [
-        { countryNameEn: { $regex: s, $options: "i" } },
+        { countryName: { $regex: s, $options: "i" } },
         { countryCode: { $regex: `^${s}`, $options: "i" } },
       ];
     }
 
     const countries = await CountryModel.find(filter)
-      .select("_id countryNameEn flag countryCode")
-      .sort({ countryNameEn: 1 })
+      .select("_id countryName flag countryCode")
+      .sort({ countryName: 1 })
       .limit(limit)
       .lean();
 
@@ -271,7 +271,7 @@ exports.getAllContentLanguages = async (req, res) => {
     const search = getSearch(req);
     const limit = getLimit(req, 500);
 
-    const filter = { isActive: true };
+    const filter = {};
     if (search) {
       const s = escapeRegExp(search);
       filter.$or = [
