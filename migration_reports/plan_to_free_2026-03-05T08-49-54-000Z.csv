@@ -1,0 +1,4 @@
+userType,mongoId,publicId,email,oldPlanName,oldPlanId,newPlanName,newPlanId,loggedAt,action
+Brand,69a6b9a50d2ab50f67c3e62b,,devanshd78@gmail.com,free,dcd11cf7-50ca-4891-ae15-5045080f72fe,free,4c6e497d-a6f9-4c3b-8d64-65bf843be685,2026-03-05T08:49:54.060Z,UPDATED
+Influencer,69a6d95be68838a3cff7278f,62502315-10df-44e1-a059-59457641e503,shivanshraheja81@gmail.com,,,free,49ad0056-3d32-4543-b5da-db24b76dbd5a,2026-03-05T08:49:54.190Z,UPDATED
+Influencer,69a6dfc3e68838a3cff727e3,c550521d-eb8b-474d-ab3b-aad138c61ea8,bafawo5963@cslua.com,,,free,49ad0056-3d32-4543-b5da-db24b76dbd5a,2026-03-05T08:49:54.190Z,UPDATED

@@ -9,6 +9,7 @@ const {
     sendOtpForgotBrand,
     verifyOtpForgotBrand,
     updatePasswordBrand,
+    getBrandById,
 } = require("../controllers/brandController");
 
 const { brandAuth } = require("../auth/brandAuth");
@@ -22,5 +23,6 @@ router.post("/signin", signInBrand);
 router.post("/send-otp-forgot", sendOtpForgotBrand);
 router.post("/verify-otp-forgot", verifyOtpForgotBrand);
 router.post("/update-password", updatePasswordBrand);
+router.get("/:id", getBrandById);
 
 module.exports = router;
