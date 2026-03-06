@@ -1,68 +1,89 @@
-// models/categories.js
-const mongoose = require('mongoose');
-const { v4: uuidv4 } = require('uuid');
+// src/model/category.js
 
-const subcategorySchema = new mongoose.Schema(
-  {
-    subcategoryId: {
-      type: String,
-      required: true,
-      unique: true,          // unique across the whole collection
-      default: uuidv4,       // auto-generate v4 UUID
-      immutable: true,
-      match: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-    },
-    name: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-  },
-  { _id: false }
-);
+const mongoose = require("mongoose");
+const { Schema, model } = mongoose;
 
-const categoriesSchema = new mongoose.Schema(
-  {
-    id: {
-      type: Number,
-      required: true,
-      unique: true,
-      index: true,
-    },
-    name: {
-      type: String,
-      required: true,
-      unique: true,
-      trim: true,
-    },
-    subcategories: {
-      type: [subcategorySchema],
-      default: [],
-    },
-  },
-  {
-    timestamps: true,
-    id: false,
-    versionKey: false,
-  }
-);
-
-// Ensure UUID uniqueness across all subdocuments
-categoriesSchema.index({ 'subcategories.subcategoryId': 1 }, { unique: true, sparse: true });
-
-// Guardrail: no duplicate subcategory names within the same category
-categoriesSchema.path('subcategories').validate(function (subs) {
-  const names = subs.map((s) => s.name.trim().toLowerCase());
-  return names.length === new Set(names).size;
-}, 'Subcategory names must be unique within a category.');
-
-// Backfill UUIDs if any subcategory is missing one
-categoriesSchema.pre('validate', function (next) {
-  this.subcategories = (this.subcategories || []).map((s) => ({
-    name: s.name,
-    subcategoryId: s.subcategoryId || uuidv4(),
-  }));
-  next();
+const SubcategorySchema = new Schema({
+  // ✅ mongoose will auto-generate _id for each subcategory item
+  name: { type: String, required: true, trim: true },
+  tags: { type: [String], default: [] },
 });
 
-module.exports = mongoose.model('Category', categoriesSchema);
+const CategorySchema = new Schema(
+  {
+    name: { type: String, required: true, trim: true },
+    globalTags: { type: [String], default: [] },
+    subcategories: { type: [SubcategorySchema], default: [] },
+  },
+  { timestamps: true }
+);
+
+// Unique category name (case-insensitive via collation)
+CategorySchema.index(
+  { name: 1 },
+  { unique: true, collation: { locale: "en", strength: 2 } }
+);
+
+// Full-text search index
+CategorySchema.index(
+  {
+    name: "text",
+    globalTags: "text",
+    "subcategories.name": "text",
+    "subcategories.tags": "text",
+  },
+  { name: "category_fulltext_search", default_language: "none" }
+);
+
+CategorySchema.pre("validate", function () {
+  const doc = this;
+
+  const norm = (s) => (s ?? "").trim();
+  const normTag = (s) => norm(s).replace(/^#/, "").toLowerCase();
+
+  doc.name = norm(doc.name);
+  if (!doc.name) throw new Error("Category name cannot be empty");
+
+  // globalTags unique + normalized
+  {
+    const seen = new Set();
+    doc.globalTags = (doc.globalTags ?? [])
+      .map(normTag)
+      .filter(Boolean)
+      .filter((t) => {
+        if (seen.has(t)) return false;
+        seen.add(t);
+        return true;
+      });
+  }
+
+  // subcategories unique + tags unique inside each subcategory
+  {
+    const seenSubs = new Set();
+    doc.subcategories = (doc.subcategories ?? []).map((s) => {
+      const name = norm(s.name);
+      const key = name.toLowerCase();
+
+      if (!name) throw new Error("Subcategory name cannot be empty");
+      if (seenSubs.has(key)) throw new Error(`Duplicate subcategory: "${name}"`);
+      seenSubs.add(key);
+
+      const seenTags = new Set();
+      const tags = (s.tags ?? [])
+        .map(normTag)
+        .filter(Boolean)
+        .filter((t) => {
+          if (seenTags.has(t)) return false;
+          seenTags.add(t);
+          return true;
+        });
+
+      // ✅ preserve mongoose _id if exists
+      return { ...s.toObject?.() ?? s, name, tags };
+    });
+  }
+});
+
+const CategoryModel = model("Category", CategorySchema);
+
+module.exports = { CategoryModel };

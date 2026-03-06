@@ -1,5 +1,5 @@
 // controllers/audienceController.js
-const Audience = require('../models/audienceRange');
+const Audience = require('../models/ageRange');
 
 /**
  * GET /audience-ranges

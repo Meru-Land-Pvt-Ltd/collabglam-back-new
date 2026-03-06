@@ -19,7 +19,7 @@ const ApplyCampaign = require('../models/applyCampaign');
 const Campaign = require('../models/campaign');
 // These two are referenced later in updateProfile; include them if you use them
 const Audience = require('../models/audience');            // ensure this path exists
-const AudienceRange = require('../models/audienceRange');  // ensure this path exists
+const AudienceRange = require('../models/ageRange');  // ensure this path exists
 const Modash = require('../models/modash');
 const { linkConversationsForInfluencer } = require('../services/emailLinking');
 const { attachExternalEmailToInfluencer } = require('../utils/emailAliases');
