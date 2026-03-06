@@ -1,7 +1,7 @@
 // src/scripts/ageGroup.js
 require("dotenv").config();
 const mongoose = require("mongoose");
-const { AgeRangeModel } = require("../model/ageRange");
+const { AgeRangeModel } = require("../models/ageRange");
 
 const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI || "";
 

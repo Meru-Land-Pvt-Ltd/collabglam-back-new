@@ -42,7 +42,8 @@ const Invitationsroutes = require('./routes/Invitationsroutes');
 const unseenMessageNotifier = require('./jobs/unseenMessageNotifier');
 const youtubeRoutes = require('./routes/youtubeRoutes');
 const campaignInvitationRoutes = require('./routes/campaignInvitationRoutes');
- const delieverableRoutes = require('./routes/delieverableRoute')
+const delieverableRoutes = require('./routes/delieverableRoute')
+const listRoutes = require('./routes/listRoutes');
 // sockets (Socket.IO + native WS)
 const sockets = require('./sockets');
 
@@ -59,7 +60,7 @@ app.set('broadcastToRoom', sockets.legacyBroadcastToRoom);
 
 // ====== Express middleware ======
 app.use(cors({
-  origin: process.env.FRONTEND_ORIGIN || ['https://collabglam.com','http://localhost:3000','http://localhost:3001','https://mhd.sharemitra.com'],
+  origin: process.env.FRONTEND_ORIGIN || ['https://collabglam.com', 'http://localhost:3000', 'http://localhost:3001', 'https://mhd.sharemitra.com'],
   credentials: true
 }));
 
@@ -104,6 +105,7 @@ app.use('/newinvitations', Invitationsroutes);
 app.use('/youtube', youtubeRoutes);
 app.use('/admin-invitations', campaignInvitationRoutes);
 app.use('/deliverable', delieverableRoutes);
+app.use('/list', listRoutes);
 
 // Friendly 413 response (must be after body parsers)
 app.use((err, req, res, next) => {

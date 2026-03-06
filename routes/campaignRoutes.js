@@ -29,12 +29,12 @@ router.get(
   campaignController.getCampaignById
 );
 
-// 4. Update a campaign by its campaignsId (UUID)
-router.post(
-  '/update',
-  brandAuth,
-  campaignController.updateCampaign
-);
+// // 4. Update a campaign by its campaignsId (UUID)
+// router.post(
+//   '/update',
+//   brandAuth,
+//   campaignController.updateCampaign
+// );
 
 // 5. Delete a campaign by its campaignsId (UUID)
 router.post(
@@ -76,19 +76,19 @@ router.post('/filter', brandAuth, campaignController.getCampaignsByFilter);
 router.post('/rejectedbyinf', brandAuth, campaignController.getRejectedCampaignsByInfluencer);
 router.get('/campaignSummary', brandAuth, campaignController.getCampaignSummary);
 
-router.post('/save-draft', brandAuth, campaignController.saveDraftCampaign);
+// router.post('/save-draft', brandAuth, campaignController.saveDraftCampaign);
 router.get('/draft', brandAuth, campaignController.getDraftCampaignByBrand);
 
-router.post("/status", campaignController.updateCampaignStatus);
+// router.post("/status", campaignController.updateCampaignStatus);
 
 router.post("/history-list", campaignController.listApplicants);
 
 router.post("/update-pending", campaignController.approveCampaignPendingUpdate);
 router.post("/reject-pending", campaignController.rejectCampaignPendingUpdate);
 
-router.post('/request-review', campaignController.requestBrandReview);
-router.post('/confirm-readiness', campaignController.confirmCampaignReadiness);
-router.post('/publish', campaignController.publishCampaign);
+// router.post('/request-review', campaignController.requestBrandReview);
+// router.post('/confirm-readiness', campaignController.confirmCampaignReadiness);
+// router.post('/publish', campaignController.publishCampaign);
 router.get('/created-by-admin/:brandId', campaignController.getAdminCampaigns);
 
 module.exports = router;

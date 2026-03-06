@@ -1,943 +1,1326 @@
-const mongoose = require('mongoose');
-const multer = require('multer');
-const { uploadToGridFS } = require('../utils/gridfs');
+const OpenAI = require("openai");
+const { DateTime } = require("luxon");
+const { Types } = require("mongoose");
 
-const Campaign = require('../models/campaign');
-const Brand = require('../models/brand');
-const Category = require('../models/categories');
-const ApplyCampaign = require('../models/applyCampaign');
-const Influencer = require('../models/influencer');
-const Contract = require('../models/contract');
-const Country = require('../models/country');
-const Modash = require('../models/modash');
-const { CONTRACT_STATUS } = require("../constants/contract");
-const Admin = require("../models/admin");
+const { ApiResponse } = require("../core/http/ApiResponse.js");
+const { HttpStatus } = require("../core/http/HttpStatus.js");
 
-const { createAndEmit } = require('../utils/notifier');
+const { CampaignModel } = require("../models/campaign.js");
+const { CategoryModel } = require("../models/categories.js");
+const { CountryModel } = require("../models/country.js");
+const { AgeRangeModel } = require("../models/ageRange.js");
+const { ContentLanguageModel } = require("../models/language.js");
+const { InfluencerTierModel } = require("../models/influencerTier.js");
+const { ProductServiceGoalModel } = require("../models/productServiceGoal.js");
+const { ContentFormatModel } = require("../models/contentFormat.js");
+const { PreferredHashtagModel } = require("../models/preferredHashtag.js");
 
-// ===============================
-//  Helpers & Normalizers
-// ===============================
-function toNum(v, def = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : def;
-}
+const { detectGeoFromRequest } = require("../utils/ipGeo.js");
 
-function isPlainObject(v) {
-  return v && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date);
-}
+// ---------------- Helpers ----------------
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-function sortLocations(arr = []) {
-  return [...arr].sort((a, b) => String(a.countryId).localeCompare(String(b.countryId)));
-}
+const clean = (v) => (typeof v === "string" ? v.trim() : "");
+const EC = (code) => code;
+const getRequestId = (req) => req.requestId || req.id || req.headers?.["x-request-id"] || "NA";
 
-function sortCategories(arr = []) {
-  return [...arr].sort((a, b) => {
-    const ak = `${a.categoryId}-${a.subcategoryId}`;
-    const bk = `${b.categoryId}-${b.subcategoryId}`;
-    return ak.localeCompare(bk);
+const isOid = (v) => Types.ObjectId.isValid(clean(v));
+const toObjectId = (id) => new Types.ObjectId(clean(id));
+const toUnknownArray = (v) => (Array.isArray(v) ? v : []);
+
+const toNumber = (v) => {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  const s = String(v ?? "").trim();
+  if (!s) return NaN;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : NaN;
+};
+
+const toInt = (v) => {
+  if (typeof v === "number") return Number.isFinite(v) ? Math.trunc(v) : NaN;
+  const s = String(v ?? "").trim();
+  if (!s) return NaN;
+  const n = Number(s);
+  return Number.isFinite(n) ? Math.trunc(n) : NaN;
+};
+
+const isValidHttpUrl = (v) => {
+  const s = clean(v);
+  if (!s) return false;
+  try {
+    const u = new URL(s);
+    return /^https?:$/i.test(u.protocol);
+  } catch {
+    return false;
+  }
+};
+
+const normalizeObjectIdArray = (v) => {
+  if (Array.isArray(v)) return v.map((x) => clean(String(x))).filter((id) => Types.ObjectId.isValid(id));
+  const s = clean(v);
+  return s && Types.ObjectId.isValid(s) ? [s] : [];
+};
+
+const fail = (res, http, code, message, requestId, meta) => {
+  return ApiResponse.sendFail(res, http, EC(code), message, requestId, meta);
+};
+
+const missingRequired = (field) => `Missing required field: ${field}`;
+
+const failField = (res, http, code, field, requestId, message) => {
+  const msg = message || missingRequired(field);
+  return ApiResponse.sendFail(res, http, EC(code), msg, requestId, {
+    fieldErrors: { [field]: msg },
   });
-}
+};
 
-function normalizeForDiff(obj) {
-  const out = { ...obj };
-  if (out.targetAudience?.locations) {
-    out.targetAudience = {
-      ...out.targetAudience,
-      locations: sortLocations(out.targetAudience.locations),
+const requireObjectId = (res, requestId, field, v) => {
+  const s = clean(v);
+  if (!s) {
+    return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field, requestId) };
+  }
+  if (!Types.ObjectId.isValid(s)) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field, requestId, `Invalid ${field}`),
     };
   }
-  if (out.categories) {
-    out.categories = sortCategories(out.categories);
+  return { ok: true, value: s };
+};
+
+const requireString = (res, requestId, field, v) => {
+  const s = clean(v);
+  if (!s) {
+    return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field, requestId) };
   }
-  if (out.budget !== undefined) out.budget = Number(out.budget);
-  if (out.influencerBudget !== undefined) out.influencerBudget = Number(out.influencerBudget);
-  return out;
-}
+  return { ok: true, value: s };
+};
 
-function diffObject(base, next) {
-  if (Array.isArray(base) || Array.isArray(next)) {
-    return JSON.stringify(base) === JSON.stringify(next) ? undefined : next;
+const requireIdArray = (res, requestId, field, v) => {
+  const ids = normalizeObjectIdArray(v);
+  if (!ids.length) {
+    return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field, requestId) };
   }
-  if (!isPlainObject(base) || !isPlainObject(next)) {
-    return base === next ? undefined : next;
+  return { ok: true, value: ids };
+};
+
+const requireArray = (res, requestId, field, v) => {
+  const arr = toUnknownArray(v);
+  if (!arr.length) {
+    return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field, requestId) };
   }
-  const patch = {};
-  for (const key of Object.keys(next)) {
-    const d = diffObject(base?.[key], next[key]);
-    if (d !== undefined) patch[key] = d;
+  return { ok: true, value: arr };
+};
+
+const normalizePaymentType = (v) => {
+  const s = clean(v).toLowerCase();
+  if (s === "milestone") return "Milestone";
+  if (s === "fixed") return "Fixed";
+  if (s === "gifting") return "Gifting";
+  return s ? s[0].toUpperCase() + s.slice(1) : "Milestone";
+};
+
+const hasDateInput = (v) => (v instanceof Date ? Number.isFinite(v.getTime()) : !!clean(v));
+
+const MIN_FOLLOWERS_ALLOWED = 1000;
+
+const fmtInt = (n) => {
+  const x = typeof n === "number" ? n : Number(n);
+  return Number.isFinite(x) ? new Intl.NumberFormat("en-US").format(Math.trunc(x)) : "";
+};
+
+const sendControllerError = (res, requestId, err) => {
+  const e = err;
+
+  if (e?.code === 11000) {
+    return ApiResponse.sendFail(
+      res,
+      HttpStatus.CONFLICT,
+      EC("VALIDATION_ERROR"),
+      "Duplicate record",
+      requestId,
+      { keyValue: e?.keyValue }
+    );
   }
-  return Object.keys(patch).length ? patch : undefined;
-}
 
-function isAdminRequest(req) {
-  const role = String(req.user?.role || req.user?.userType || "").toLowerCase();
-  if (req.user?.brandId || role.includes("brand")) return false;
-  if (role.includes("admin")) return true;
-  if (req.user?.isAdmin === true) return true;
-  if (req.user?.adminId && !req.user?.brandId) return true;
+  if (e?.name === "CastError") {
+    const field = String(e?.path || "value");
+    const msg = `Invalid ${field}`;
+    return ApiResponse.sendFail(
+      res,
+      HttpStatus.BAD_REQUEST,
+      EC("VALIDATION_ERROR"),
+      msg,
+      requestId,
+      {
+        fieldErrors: { [field]: msg },
+        value: e?.value,
+      }
+    );
+  }
 
-  if (req.body?.adminId || req.query?.adminId) return true;
+  if (e?.name === "ValidationError") {
+    const first = Object.values(e?.errors || {})[0];
+    const field = String(first?.path || "unknown");
+    const fieldKey = field.replace(/\s+/g, "").toLowerCase();
 
-  return false;
-}
+    const minFromSchema = first?.properties?.min;
+    let msg = String(first?.message || "Validation failed");
 
-async function resolveActorFromPayload(req, fallbackBrandId = "") {
-  const role = String(req.user?.role || req.user?.userType || "").toLowerCase();
+    if (first?.kind === "min" && (fieldKey === "minfollowers" || fieldKey === "maxfollowers")) {
+      const minVal = Number.isFinite(Number(minFromSchema)) ? Number(minFromSchema) : MIN_FOLLOWERS_ALLOWED;
+      msg =
+        fieldKey === "minfollowers"
+          ? `Min followers must be at least ${fmtInt(minVal)}.`
+          : `Max followers must be at least ${fmtInt(minVal)}.`;
+    }
 
-  if (!req.user?.brandId && (role.includes("admin") || req.user?.isAdmin === true || req.user?.adminId)) {
-    let adminKey = String(req.user?.adminId || req.user?._id || req.user?.id || "").trim();
-    if (mongoose.Types.ObjectId.isValid(adminKey)) {
-      const a = await Admin.findById(adminKey, "adminId").lean();
-      if (a?.adminId) adminKey = String(a.adminId);
+    return ApiResponse.sendFail(
+      res,
+      HttpStatus.BAD_REQUEST,
+      EC("VALIDATION_ERROR"),
+      msg,
+      requestId,
+      {
+        fieldErrors: { [field]: msg },
+      }
+    );
+  }
+
+  const message = err instanceof Error ? err.message : "Internal error";
+  return ApiResponse.sendFail(
+    res,
+    HttpStatus.INTERNAL_SERVER_ERROR,
+    EC("INTERNAL_ERROR"),
+    message,
+    requestId
+  );
+};
+
+// ---------------- Status + Platforms ----------------
+const pickStatus = (v) => {
+  const allowed = ["draft", "scheduled", "active", "paused", "completed"];
+  return typeof v === "string" && allowed.includes(v) ? v : "draft";
+};
+
+const toPlatformArray = (v) => {
+  const allowed = ["youtube", "instagram", "tiktok"];
+  const raw = Array.isArray(v) ? v : typeof v === "string" ? [v] : [];
+  const out = raw
+    .map((x) => clean(String(x)).toLowerCase())
+    .filter((x) => allowed.includes(x));
+  return [...new Set(out)];
+};
+
+// ---------------- Category/Subcategory ----------------
+const resolveCategoryAndSubcategories = async (categoryId, subIds) => {
+  const cat = await CategoryModel.findById(categoryId).select("_id name subcategories").lean();
+  if (!cat) return { cat: null, subs: [], error: "Category not found" };
+
+  const allSubs = Array.isArray(cat.subcategories) ? cat.subcategories : [];
+  const subMap = new Map(allSubs.map((s) => [String(s._id), s]));
+
+  const orderedSubs = subIds.map((id) => subMap.get(String(id))).filter(Boolean);
+  if (subIds.length && orderedSubs.length !== subIds.length) {
+    return { cat: null, subs: [], error: "One or more subcategories not found in this category" };
+  }
+
+  return { cat, subs: orderedSubs, error: "" };
+};
+
+// ---------------- Time ----------------
+const DEFAULT_CAMPAIGN_TZ = "UTC";
+
+const normalizeTimezone = (tzRaw) => {
+  const tz = clean(tzRaw) || DEFAULT_CAMPAIGN_TZ;
+  const probe = DateTime.now().setZone(tz);
+  return probe.isValid ? tz : DEFAULT_CAMPAIGN_TZ;
+};
+
+const getCampaignTimezone = (body, fallback) => {
+  return normalizeTimezone(body?.campaignTimezone ?? body?.timezone ?? body?.tz ?? fallback ?? DEFAULT_CAMPAIGN_TZ);
+};
+
+const hasOffsetOrZ = (s) => /([zZ]|[+\-]\d{2}:\d{2})$/.test(s);
+
+const toUtcFromLocalOrAbsolute = (dtRaw, tzRaw) => {
+  const dt = clean(dtRaw);
+  if (!dt) return null;
+
+  if (hasOffsetOrZ(dt)) {
+    const d = new Date(dt);
+    return Number.isFinite(d.getTime()) ? d : null;
+  }
+
+  const tz = normalizeTimezone(tzRaw);
+  const lx = DateTime.fromISO(dt, { zone: tz });
+  return lx.isValid ? lx.toUTC().toJSDate() : null;
+};
+
+const assertNotPastUtc = (dtUtc, tz, field) => {
+  const nowUtc = DateTime.utc();
+  if (dtUtc.getTime() < nowUtc.toMillis()) {
+    const prettyNowUtc = `${nowUtc.toFormat("yyyy-LL-dd HH:mm:ss")} UTC`;
+    return {
+      ok: false,
+      message: `${field} cannot be in the past. Choose current/future time (${prettyNowUtc}). Timezone used for scheduling: ${normalizeTimezone(tz)}`,
+      meta: {
+        timezone: normalizeTimezone(tz),
+        currentUtcTime: nowUtc.toISO({ suppressMilliseconds: true }),
+      },
+    };
+  }
+  return { ok: true };
+};
+
+// ---------------- Enrichment ----------------
+const oidToStr = (v) => (v ? String(v) : "");
+const asIdArray = (v) =>
+  Array.isArray(v) ? v.map((x) => oidToStr(x)).filter((x) => Types.ObjectId.isValid(x)) : [];
+
+const orderByIds = (ids, docs) => {
+  const map = new Map(docs.map((d) => [String(d._id), d]));
+  return ids.map((id) => map.get(id)).filter(Boolean);
+};
+
+const enrichCampaigns = async (itemsRaw) => {
+  const items = itemsRaw.map((x) => (typeof x?.toObject === "function" ? x.toObject() : x));
+
+  const categoryIds = new Set();
+  const goalIds = new Set();
+  const tierIds = new Set();
+  const formatIds = new Set();
+  const langIds = new Set();
+  const countryIds = new Set();
+  const ageIds = new Set();
+  const prefHashtagIds = new Set();
+
+  for (const c of items) {
+    const cid = oidToStr(c.categoryId);
+    if (Types.ObjectId.isValid(cid)) categoryIds.add(cid);
+
+    asIdArray(c.campaignGoals).forEach((id) => goalIds.add(id));
+    asIdArray(c.influencerTierIds).forEach((id) => tierIds.add(id));
+    asIdArray(c.contentFormats).forEach((id) => formatIds.add(id));
+    asIdArray(c.contentLanguageIds).forEach((id) => langIds.add(id));
+    asIdArray(c.targetCountryIds).forEach((id) => countryIds.add(id));
+    asIdArray(c.targetAgeRanges).forEach((id) => ageIds.add(id));
+    asIdArray(c.preferredHashtags).forEach((id) => prefHashtagIds.add(id));
+  }
+
+  const [cats, goals, tiers, formats, langs, countries, ages, prefHashtags] = await Promise.all([
+    categoryIds.size
+      ? CategoryModel.find({ _id: { $in: [...categoryIds].map((id) => toObjectId(id)) } })
+          .select("_id name subcategories")
+          .lean()
+      : Promise.resolve([]),
+
+    goalIds.size
+      ? ProductServiceGoalModel.find({ _id: { $in: [...goalIds].map((id) => toObjectId(id)) } })
+          .select("_id goal sortOrder isActive")
+          .lean()
+      : Promise.resolve([]),
+
+    tierIds.size
+      ? InfluencerTierModel.find({ _id: { $in: [...tierIds].map((id) => toObjectId(id)) } })
+          .select("_id category value sortOrder")
+          .lean()
+      : Promise.resolve([]),
+
+    formatIds.size
+      ? ContentFormatModel.find({ _id: { $in: [...formatIds].map((id) => toObjectId(id)) } }).lean()
+      : Promise.resolve([]),
+
+    langIds.size
+      ? ContentLanguageModel.find({ _id: { $in: [...langIds].map((id) => toObjectId(id)) } })
+          .select("_id code name isActive")
+          .lean()
+      : Promise.resolve([]),
+
+    countryIds.size
+      ? CountryModel.find({ _id: { $in: [...countryIds].map((id) => toObjectId(id)) } })
+          .select("_id countryNameEn countryNameLocal countryCode currencyCode currencyNameEn region flag")
+          .lean()
+      : Promise.resolve([]),
+
+    ageIds.size
+      ? AgeRangeModel.find({ _id: { $in: [...ageIds].map((id) => toObjectId(id)) } }).select("_id range").lean()
+      : Promise.resolve([]),
+
+    prefHashtagIds.size
+      ? PreferredHashtagModel.find({ _id: { $in: [...prefHashtagIds].map((id) => toObjectId(id)) } }).lean()
+      : Promise.resolve([]),
+  ]);
+
+  const catMap = new Map(cats.map((d) => [String(d._id), d]));
+  const goalMap = new Map(goals.map((d) => [String(d._id), d]));
+  const tierMap = new Map(tiers.map((d) => [String(d._id), d]));
+  const formatMap = new Map(formats.map((d) => [String(d._id), d]));
+  const langMap = new Map(langs.map((d) => [String(d._id), d]));
+  const countryMap = new Map(countries.map((d) => [String(d._id), d]));
+  const ageMap = new Map(ages.map((d) => [String(d._id), d]));
+  const prefMap = new Map(prefHashtags.map((d) => [String(d._id), d]));
+
+  return items.map((c) => {
+    const categoryId = oidToStr(c.categoryId);
+    const cat = Types.ObjectId.isValid(categoryId) ? catMap.get(categoryId) : null;
+
+    const subIds = asIdArray(c.subcategoryIds);
+    const subDetails =
+      cat && Array.isArray(cat.subcategories)
+        ? orderByIds(
+            subIds,
+            cat.subcategories.map((s) => ({ ...s, _id: String(s._id) }))
+          ).map((s) => ({ id: String(s._id), name: s.name, tags: s.tags ?? [] }))
+        : [];
+
+    const goalDetails = asIdArray(c.campaignGoals)
+      .map((id) => goalMap.get(id))
+      .filter(Boolean)
+      .map((g) => ({ id: String(g._id), goal: g.goal, sortOrder: g.sortOrder, isActive: g.isActive }));
+
+    const tierDetails = asIdArray(c.influencerTierIds)
+      .map((id) => tierMap.get(id))
+      .filter(Boolean)
+      .map((t) => ({ id: String(t._id), category: t.category, value: t.value, sortOrder: t.sortOrder }));
+
+    const formatDetails = asIdArray(c.contentFormats)
+      .map((id) => formatMap.get(id))
+      .filter(Boolean)
+      .map((f) => ({ id: String(f._id), ...f, _id: undefined }));
+
+    const langDetails = asIdArray(c.contentLanguageIds)
+      .map((id) => langMap.get(id))
+      .filter(Boolean)
+      .map((l) => ({ id: String(l._id), code: l.code, name: l.name, isActive: l.isActive }));
+
+    const countryDetails = asIdArray(c.targetCountryIds)
+      .map((id) => countryMap.get(id))
+      .filter(Boolean)
+      .map((x) => ({ id: String(x._id), ...x, _id: undefined }));
+
+    const ageDetails = asIdArray(c.targetAgeRanges)
+      .map((id) => ageMap.get(id))
+      .filter(Boolean)
+      .map((a) => ({ id: String(a._id), range: a.range }));
+
+    const prefDetails = asIdArray(c.preferredHashtags)
+      .map((id) => prefMap.get(id))
+      .filter(Boolean)
+      .map((h) => ({ id: String(h._id), ...h, _id: undefined }));
+
+    return {
+      ...c,
+      id: String(c._id || c.id || ""),
+      details: {
+        category: cat ? { id: String(cat._id), name: cat.name } : null,
+        subcategories: subDetails,
+        campaignGoals: goalDetails,
+        influencerTiers: tierDetails,
+        contentFormats: formatDetails,
+        contentLanguages: langDetails,
+        targetCountries: countryDetails,
+        targetAgeRanges: ageDetails,
+        preferredHashtags: prefDetails,
+      },
+    };
+  });
+};
+
+// ---------------- Validation + Timing ----------------
+const toUtcDateFromAny = (v, tz) => {
+  if (!v) return null;
+  if (v instanceof Date) return Number.isFinite(v.getTime()) ? v : null;
+  const s = clean(v);
+  return s ? toUtcFromLocalOrAbsolute(s, tz) : null;
+};
+
+const parseCampaignWindow = (body, tz, requestId, res, required) => {
+  const startAtUtc = toUtcDateFromAny(body.startAt, tz);
+  const endAtUtc = toUtcDateFromAny(body.endAt, tz);
+
+  if (!required && !body.startAt && !body.endAt) return { ok: true, value: {} };
+
+  if (!startAtUtc) return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "startAt", requestId) };
+  if (!endAtUtc) return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId) };
+
+  if (startAtUtc.getTime() >= endAtUtc.getTime()) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId, "startAt must be < endAt"),
+    };
+  }
+
+  const c1 = assertNotPastUtc(startAtUtc, tz, "startAt");
+  if (!c1.ok) {
+    return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "startAt", requestId, c1.message) };
+  }
+
+  const c2 = assertNotPastUtc(endAtUtc, tz, "endAt");
+  if (!c2.ok) {
+    return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId, c2.message) };
+  }
+
+  return { ok: true, value: { startAt: startAtUtc, endAt: endAtUtc } };
+};
+
+const inferMode = (statusRaw, scheduledAt) => {
+  if (clean(scheduledAt)) return "schedule";
+  const statusStr = clean(statusRaw);
+  if (!statusStr) return "publish";
+
+  const status = pickStatus(statusRaw);
+  if (status === "draft") return "draft";
+  if (status === "scheduled") return "schedule";
+  return "publish";
+};
+
+const validateForMode = async (res, requestId, mode, body) => {
+  const brandIdR = requireObjectId(res, requestId, "brandId", body.brandId);
+  if (!brandIdR.ok) return { ok: false, resp: brandIdR.resp };
+
+  const titleR = requireString(res, requestId, "campaignTitle", body.campaignTitle);
+  if (!titleR.ok) return { ok: false, resp: titleR.resp };
+
+  if (mode === "draft") {
+    return {
+      ok: true,
+      brandId: brandIdR.value,
+      rel: null,
+      normalized: {
+        platformSelection: toPlatformArray(body.platformSelection),
+        paymentType: clean(body.paymentType) ? normalizePaymentType(body.paymentType) : undefined,
+      },
+    };
+  }
+
+  const descR = requireString(res, requestId, "description", body.description);
+  if (!descR.ok) return { ok: false, resp: descR.resp };
+
+  const catR = requireObjectId(res, requestId, "categoryId", body.categoryId);
+  if (!catR.ok) return { ok: false, resp: catR.resp };
+
+  const subIds = normalizeObjectIdArray(body.subcategoryIds);
+  if (!subIds.length) {
+    return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "subcategoryIds", requestId) };
+  }
+
+  const rel = await resolveCategoryAndSubcategories(catR.value, subIds);
+  if (rel.error) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "subcategoryIds", requestId, rel.error),
+    };
+  }
+
+  const imgsR = requireArray(res, requestId, "productImages", body.productImages);
+  if (!imgsR.ok) return { ok: false, resp: imgsR.resp };
+
+  const link = clean(body.productLink);
+  if (link && !isValidHttpUrl(link)) {
+    return {
+      ok: false,
+      resp: failField(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "productLink",
+        requestId,
+        "productLink must be a valid http/https URL"
+      ),
+    };
+  }
+
+  const minFollowersRaw = clean(body.minFollowers);
+  const maxFollowersRaw = clean(body.maxFollowers);
+
+  let minFollowers = null;
+
+  if (minFollowersRaw) {
+    const n = toInt(body.minFollowers);
+    if (!Number.isFinite(n)) {
+      return {
+        ok: false,
+        resp: failField(
+          res,
+          HttpStatus.BAD_REQUEST,
+          "VALIDATION_ERROR",
+          "minFollowers",
+          requestId,
+          "Min followers must be a number."
+        ),
+      };
+    }
+    if (n < MIN_FOLLOWERS_ALLOWED) {
+      return {
+        ok: false,
+        resp: failField(
+          res,
+          HttpStatus.BAD_REQUEST,
+          "VALIDATION_ERROR",
+          "minFollowers",
+          requestId,
+          `Min followers must be at least ${fmtInt(MIN_FOLLOWERS_ALLOWED)}.`
+        ),
+      };
+    }
+    minFollowers = n;
+  }
+
+  if (maxFollowersRaw) {
+    const n = toInt(body.maxFollowers);
+    if (!Number.isFinite(n)) {
+      return {
+        ok: false,
+        resp: failField(
+          res,
+          HttpStatus.BAD_REQUEST,
+          "VALIDATION_ERROR",
+          "maxFollowers",
+          requestId,
+          "Max followers must be a number."
+        ),
+      };
+    }
+    if (n < MIN_FOLLOWERS_ALLOWED) {
+      return {
+        ok: false,
+        resp: failField(
+          res,
+          HttpStatus.BAD_REQUEST,
+          "VALIDATION_ERROR",
+          "maxFollowers",
+          requestId,
+          `Max followers must be at least ${fmtInt(MIN_FOLLOWERS_ALLOWED)}.`
+        ),
+      };
+    }
+    if (typeof minFollowers === "number" && n < minFollowers) {
+      return {
+        ok: false,
+        resp: failField(
+          res,
+          HttpStatus.BAD_REQUEST,
+          "VALIDATION_ERROR",
+          "maxFollowers",
+          requestId,
+          "Max followers must be greater than or equal to min followers."
+        ),
+      };
+    }
+  }
+
+  const videoLink = clean(body.videoLink);
+  if (videoLink && !isValidHttpUrl(videoLink)) {
+    return {
+      ok: false,
+      resp: failField(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "videoLink",
+        requestId,
+        "videoLink must be a valid http/https URL"
+      ),
+    };
+  }
+
+  const goalsR = requireIdArray(res, requestId, "campaignGoals", body.campaignGoals);
+  if (!goalsR.ok) return { ok: false, resp: goalsR.resp };
+
+  const tiersR = requireIdArray(res, requestId, "influencerTierIds", body.influencerTierIds);
+  if (!tiersR.ok) return { ok: false, resp: tiersR.resp };
+
+  const formatsR = requireIdArray(res, requestId, "contentFormats", body.contentFormats);
+  if (!formatsR.ok) return { ok: false, resp: formatsR.resp };
+
+  const payR = requireString(res, requestId, "paymentType", body.paymentType);
+  if (!payR.ok) return { ok: false, resp: payR.resp };
+
+  const budget = toNumber(body.campaignBudget);
+  if (!Number.isFinite(budget) || budget < 0) {
+    return {
+      ok: false,
+      resp: failField(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "campaignBudget",
+        requestId,
+        "campaignBudget must be >= 0"
+      ),
+    };
+  }
+
+  const ps = toPlatformArray(body.platformSelection);
+  if (!ps.length) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "platformSelection", requestId),
+    };
+  }
+
+  const countriesR = requireIdArray(res, requestId, "targetCountryIds", body.targetCountryIds);
+  if (!countriesR.ok) return { ok: false, resp: countriesR.resp };
+
+  const agesR = requireIdArray(res, requestId, "targetAgeRanges", body.targetAgeRanges);
+  if (!agesR.ok) return { ok: false, resp: agesR.resp };
+
+  if (!hasDateInput(body.startAt)) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "startAt", requestId),
+    };
+  }
+  if (!hasDateInput(body.endAt)) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId),
+    };
+  }
+
+  if (mode === "schedule") {
+    if (!hasDateInput(body.scheduledAt)) {
+      return {
+        ok: false,
+        resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "scheduledAt", requestId),
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    brandId: brandIdR.value,
+    rel,
+    normalized: {
+      platformSelection: toPlatformArray(body.platformSelection),
+      paymentType: normalizePaymentType(body.paymentType),
+    },
+  };
+};
+
+const parseDraftWindowSoft = (body, tz) => {
+  const startAtUtc = toUtcDateFromAny(body.startAt, tz);
+  const endAtUtc = toUtcDateFromAny(body.endAt, tz);
+  if (!startAtUtc || !endAtUtc) return {};
+  if (startAtUtc.getTime() >= endAtUtc.getTime()) return {};
+  return { startAt: startAtUtc, endAt: endAtUtc };
+};
+
+const buildCampaignDoc = (body, geo, status, byAi, timing) => {
+  const isDraft = status === "draft";
+
+  const oid = (v) => {
+    const s = clean(v);
+    return s && isOid(s) ? toObjectId(s) : undefined;
+  };
+
+  const oidArray = (v) =>
+    normalizeObjectIdArray(v)
+      .filter((x) => isOid(x))
+      .map((x) => toObjectId(x));
+
+  const oidArrayOrUndef = (v) => {
+    const arr = oidArray(v);
+    return arr.length ? arr : undefined;
+  };
+
+  const arrOrUndef = (v) => {
+    const arr = toUnknownArray(v);
+    return arr.length ? arr : undefined;
+  };
+
+  const strOrUndef = (v) => {
+    const s = clean(v);
+    return s ? s : undefined;
+  };
+
+  const base = {
+    brandId: toObjectId(body.brandId),
+    byAi,
+    createdLocation: {
+      ip: geo?.ip,
+      timezone: geo?.timezone,
+      country: geo?.country,
+      state: geo?.state,
+      city: geo?.city,
+      latitude: typeof geo?.latitude === "number" ? geo.latitude : undefined,
+      longitude: typeof geo?.longitude === "number" ? geo.longitude : undefined,
+      source: geo?.source,
+    },
+    status,
+    campaignTimezone: clean(body.campaignTimezone) || undefined,
+
+    campaignTitle: clean(body.campaignTitle),
+    description: isDraft ? strOrUndef(body.description) : clean(body.description),
+
+    campaignType: isDraft ? strOrUndef(body.campaignType) : clean(body.campaignType) || "",
+
+    categoryId: oid(body.categoryId),
+    subcategoryIds: isDraft ? oidArrayOrUndef(body.subcategoryIds) : oidArray(body.subcategoryIds),
+
+    productImages: isDraft ? arrOrUndef(body.productImages) : toUnknownArray(body.productImages),
+
+    productLink: strOrUndef(body.productLink),
+    videoLink: strOrUndef(body.videoLink),
+
+    campaignGoals: isDraft ? oidArrayOrUndef(body.campaignGoals) : oidArray(body.campaignGoals),
+    influencerTierIds: isDraft ? oidArrayOrUndef(body.influencerTierIds) : oidArray(body.influencerTierIds),
+    contentFormats: isDraft ? oidArrayOrUndef(body.contentFormats) : oidArray(body.contentFormats),
+
+    contentLanguageIds: oidArrayOrUndef(body.contentLanguageIds),
+    preferredHashtags: oidArrayOrUndef(body.preferredHashtags),
+
+    platformSelection: (() => {
+      const ps = toPlatformArray(body.platformSelection);
+      return isDraft ? (ps.length ? ps : undefined) : ps;
+    })(),
+
+    targetCountryIds: isDraft ? oidArrayOrUndef(body.targetCountryIds) : oidArray(body.targetCountryIds),
+    targetAgeRanges: isDraft ? oidArrayOrUndef(body.targetAgeRanges) : oidArray(body.targetAgeRanges),
+
+    paymentType: clean(body.paymentType) ? normalizePaymentType(body.paymentType) : undefined,
+
+    campaignBudget: Number.isFinite(toNumber(body.campaignBudget)) ? toNumber(body.campaignBudget) : undefined,
+    numberOfInfluencers: Number.isFinite(toInt(body.numberOfInfluencers)) ? toInt(body.numberOfInfluencers) : undefined,
+    minFollowers: Number.isFinite(toInt(body.minFollowers)) ? toInt(body.minFollowers) : undefined,
+    maxFollowers: Number.isFinite(toInt(body.maxFollowers)) ? toInt(body.maxFollowers) : undefined,
+
+    additionalNotes: isDraft ? strOrUndef(body.additionalNotes) : clean(body.additionalNotes) || "",
+  };
+
+  if (timing?.startAt) base.startAt = timing.startAt;
+  if (timing?.endAt) base.endAt = timing.endAt;
+
+  if (status === "active") base.publishedAt = new Date();
+  if (status === "draft") {
+    base.publishedAt = undefined;
+    base.scheduledAt = undefined;
+    base.scheduledLocation = undefined;
+  }
+  if (status === "scheduled") {
+    base.scheduledAt = timing?.scheduledAt;
+    base.scheduledLocation = base.createdLocation;
+    base.publishedAt = undefined;
+  }
+
+  return base;
+};
+
+const parseSchedule = (body, tz, requestId, res) => {
+  const scheduledAtStr = clean(body.scheduledAt);
+  if (!scheduledAtStr) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "scheduledAt", requestId),
+    };
+  }
+
+  const scheduledAtUtc = toUtcFromLocalOrAbsolute(scheduledAtStr, tz);
+  if (!scheduledAtUtc) {
+    return {
+      ok: false,
+      resp: failField(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "scheduledAt",
+        requestId,
+        "Invalid scheduledAt format"
+      ),
+    };
+  }
+
+  const chk = assertNotPastUtc(scheduledAtUtc, tz, "scheduledAt");
+  if (!chk.ok) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "scheduledAt", requestId, chk.message),
+    };
+  }
+
+  const win = parseCampaignWindow(body, tz, requestId, res, true);
+  if (!win.ok) return win;
+
+  const startRaw = clean(body.startAt);
+  const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(startRaw);
+
+  const startLimitUtc = isDateOnly
+    ? DateTime.fromISO(startRaw, { zone: normalizeTimezone(tz) }).endOf("day").toUTC().toJSDate()
+    : win.value.startAt;
+
+  if (scheduledAtUtc.getTime() > startLimitUtc.getTime()) {
+    return {
+      ok: false,
+      resp: failField(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "scheduledAt",
+        requestId,
+        "scheduledAt must be <= startAt"
+      ),
+    };
+  }
+
+  return {
+    ok: true,
+    value: { scheduledAt: scheduledAtUtc, startAt: win.value.startAt, endAt: win.value.endAt },
+  };
+};
+
+// ---------------- AI prompt ----------------
+const buildAIPrompt = (ui) => `
+You are an expert campaign strategist for influencer marketing.
+Your job: infer missing MANUAL form fields from the given Please Fill the Required Fields.
+
+STRICT RULES:
+- Output MUST be ONLY valid JSON (no markdown, no explanations).
+- DO NOT change any source IDs (categoryId, subcategoryIds, targetCountryIds, targetAgeRanges).
+- For fields that require IDs, you MUST pick IDs ONLY from allowedOptions lists.
+- Always include ALL JSON keys listed in "Output JSON keys".
+- If unsure, pick reasonable defaults.
+
+REQUIRED MANUAL FIELDS TO FILL:
+- campaignGoals (>=1)
+- influencerTierIds (>=1)
+- contentFormats (>=1)
+- platformSelection (>=1) only from: youtube, instagram, tiktok
+- paymentType one of: Milestone, Fixed, Gifting
+- campaignBudget >= 0 (integer)
+- numberOfInfluencers >= 1 (integer)
+- startAt / endAt: ISO local datetime WITHOUT timezone offset. Example: "2026-02-04T09:00"
+  Ensure endAt > startAt. Prefer startAt tomorrow 09:00 and endAt 7-14 days later.
+
+OPTIONAL FIELDS (may be empty):
+- minFollowers
+- maxFollowers
+- contentLanguageIds
+- preferredHashtags
+- additionalNotes
+- campaignType
+
+DESCRIPTION ENHANCEMENT:
+- Create an improved, brand-friendly, clear, polished "enhancedDescription" using the source description.
+- Keep it concise, structured, and suitable for influencers.
+
+Output JSON keys (ALL of these must exist, even if empty arrays/blank strings):
+enhancedTitle,
+enhancedDescription,
+campaignGoals,
+influencerTierIds,
+contentFormats,
+contentLanguageIds,
+preferredHashtags,
+platformSelection,
+paymentType,
+campaignBudget,
+numberOfInfluencers,
+minFollowers,
+maxFollowers,
+startAt,
+endAt,
+additionalNotes
+
+INPUT:
+${JSON.stringify(ui, null, 2)}
+`.trim();
+
+// =======================================================
+// POST: Create Campaign
+// =======================================================
+exports.createCampaign = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const geo = await detectGeoFromRequest(req);
+    const campaignTz = getCampaignTimezone(req.body);
+
+    const mode = inferMode(req.body.status, req.body.scheduledAt);
+    const v = await validateForMode(res, requestId, mode, req.body);
+    if (!v.ok) return v.resp;
+
+    const status = mode === "draft" ? "draft" : mode === "schedule" ? "scheduled" : "active";
+
+    let timing = {};
+
+    if (status === "draft") {
+      timing = parseDraftWindowSoft(req.body, campaignTz);
+    } else if (status === "scheduled") {
+      const sch = parseSchedule(req.body, campaignTz, requestId, res);
+      if (!sch.ok) return sch.resp;
+      timing = sch.value;
     } else {
-      const a = await Admin.findOne({ adminId: adminKey }, "adminId").lean();
-      if (a?.adminId) adminKey = String(a.adminId);
+      const win = parseCampaignWindow(req.body, campaignTz, requestId, res, true);
+      if (!win.ok) return win.resp;
+      timing = win.value;
     }
-    return { role: "admin", userId: adminKey };
-  }
 
-  const raw = req.body?.adminId;
-  const adminId = raw == null ? "" : String(raw).trim();
-  if (adminId) {
-    const admin = await Admin.findOne({ adminId }, "adminId").lean();
-    if (admin) return { role: "admin", userId: String(admin.adminId) };
-  }
+    req.body.campaignTimezone = campaignTz;
 
-  return { role: "brand", userId: String(fallbackBrandId || "") };
-}
+    const docToCreate = buildCampaignDoc(req.body, geo, status, 0, timing);
+    const created = await CampaignModel.create(docToCreate);
 
-function mapCampaignForInfluencer(c) {
-  if (!c) return c;
-  const brandBudget = toNum(c.budget, 0);
-  const infBudget = toNum(c.influencerBudget, 0);
-  return {
-    ...c,
-    budget: infBudget > 0 ? infBudget : brandBudget,
-    brandBudget,
-    influencerBudget: infBudget
-  };
-}
-
-// ===============================
-//  Notifications
-// ===============================
-async function notifyBrandDraftReady(campaign) {
-  return createAndEmit({
-    brandId: String(campaign.brandId),
-    type: "campaign.draft_review",
-    title: "Review your new campaign draft",
-    message: `Admin has drafted "${campaign.productOrServiceName}". Please review and confirm.`,
-    entityType: "campaign",
-    entityId: String(campaign.campaignsId),
-    actionPath: { brand: `/brand/review-campaigns/view?id=${campaign.campaignsId}` },
-  });
-}
-
-async function notifyAdminBrandConfirmed(campaign) {
-  const admins = await Admin.find({}, "adminId").lean();
-  const adminIds = admins.map((a) => String(a.adminId || "").trim()).filter(Boolean);
-
-  return createAndEmit({
-    adminIds,
-    type: "campaign.brand_confirmed",
-    title: "Brand confirmed campaign readiness",
-    message: `${campaign.brandName} has reviewed and confirmed "${campaign.productOrServiceName}". It is ready to be published.`,
-    entityType: "campaign",
-    entityId: String(campaign.campaignsId),
-    actionPath: { admin: `/admin/campaigns/view?id=${campaign.campaignsId}` },
-  });
-}
-
-async function notifyAdminsCampaignPending(campaign, patch = null) {
-  const admins = await Admin.find({}, "adminId").lean();
-  const adminIds = (admins || []).map((a) => String(a.adminId || "").trim()).filter(Boolean);
-
-  const changedKeys = patch ? Object.keys(patch) : [];
-  const changedText = changedKeys.length
-    ? ` Changes: ${changedKeys.slice(0, 8).join(", ")}${changedKeys.length > 8 ? "..." : ""}`
-    : "";
-
-  return createAndEmit({
-    adminIds,
-    type: "campaign.pending_update",
-    title: "Campaign updated (needs approval)",
-    message: `${campaign.brandName} updated "${campaign.productOrServiceName}".${changedText}`,
-    entityType: "campaign",
-    entityId: String(campaign.campaignsId),
-    actionPath: { admin: `/admin/campaigns/view?id=${campaign.campaignsId}` },
-  });
-}
-
-async function notifyBrandApproved(campaign) {
-  return createAndEmit({
-    brandId: String(campaign.brandId),
-    type: "campaign.update_approved",
-    title: "Campaign update approved",
-    message: `Admin approved changes for "${campaign.productOrServiceName}".`,
-    entityType: "campaign",
-    entityId: String(campaign.campaignsId),
-    actionPath: { brand: `/brand/edit-review-campaign/view?id=${campaign.campaignsId}` },
-  });
-}
-
-async function notifyBrandRejected(campaign, note) {
-  return createAndEmit({
-    brandId: String(campaign.brandId),
-    type: "campaign.update_rejected",
-    title: "Campaign update rejected",
-    message: `Admin rejected changes for "${campaign.productOrServiceName}". ${note ? `Reason: ${note}` : ""}`,
-    entityType: "campaign",
-    entityId: String(campaign.campaignsId),
-    actionPath: { brand: `/brand/edit-review-campaign/view?id=${campaign.campaignsId}` },
-  });
-}
-
-// ===============================
-//  Multer setup
-// ===============================
-const storage = multer.memoryStorage();
-const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif', 'image/svg+xml']);
-const DOC_MIMES = new Set([
-  'application/pdf',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'text/plain'
-]);
-
-function fileFilter(req, file, cb) {
-  if (file.fieldname === 'image') return cb(null, IMAGE_MIMES.has(file.mimetype));
-  if (file.fieldname === 'creativeBrief') return cb(null, DOC_MIMES.has(file.mimetype));
-  return cb(null, false);
-}
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB per file
-  fileFilter
-}).fields([
-  { name: 'image', maxCount: 10 },
-  { name: 'creativeBrief', maxCount: 10 }
-]);
-
-// ===============================
-//  Subscription & Utils
-// ===============================
-async function ensureBrandQuota(brandId, featureKey, amount = 1) {
-  if (!brandId) throw new Error('brandId is required for quota checks');
-  const brand = await Brand.findOne({ brandId }, 'subscription').lean();
-  if (!brand || !brand.subscription) throw new Error('Brand subscription not configured');
-  const feature = getFeature.getFeature(brand.subscription, featureKey);
-  if (!feature) return { limit: 0, used: 0, remaining: Infinity };
-  const limit = readLimit(feature);
-  const used = Number(feature.used || 0) || 0;
-  if (limit === 0) return { limit: 0, used, remaining: Infinity };
-  if (used + amount > limit) {
-    const remaining = Math.max(limit - used, 0);
-    const err = new Error(`Quota exceeded for feature ${featureKey}`);
-    err.code = 'QUOTA_EXCEEDED';
-    err.meta = { limit, used, requested: amount, remaining };
-    throw err;
-  }
-  await Brand.updateOne({ brandId, 'subscription.features.key': featureKey }, { $inc: { 'subscription.features.$.used': amount } });
-  return { limit, used: used + amount, remaining: limit - (used + amount) };
-}
-
-function readLimit(featureRow) {
-  if (!featureRow) return 0;
-  const raw = featureRow.limit ?? featureRow.value ?? 0;
-  const num = Number(raw);
-  return Number.isFinite(num) ? num : 0;
-}
-
-async function ensureMonthlyWindow(influencerId, featureKey, featureRow) { return featureRow; }
-
-async function countActiveCollaborationsForInfluencer(influencerId) {
-  if (!influencerId) return 0;
-  return Contract.countDocuments({ influencerId: String(influencerId), isRejected: { $ne: 1 }, isAccepted: 1 });
-}
-
-function activeAcceptedFilter() {
-  return {
-    isAccepted: 1,
-    isRejected: { $ne: 1 },
-    status: { $nin: [CONTRACT_STATUS.REJECTED, CONTRACT_STATUS.SUPERSEDED] },
-    $or: [{ supersededBy: { $exists: false } }, { supersededBy: null }, { supersededBy: "" }]
-  };
-}
-
-function activeAcceptedFilter2() {
-  return {
-    isAccepted: 1,
-    isRejected: { $ne: 1 },
-    status: { $in: [CONTRACT_STATUS.CONTRACT_SIGNED, CONTRACT_STATUS.MILESTONES_CREATED], $nin: [CONTRACT_STATUS.REJECTED, CONTRACT_STATUS.SUPERSEDED] },
-    $or: [{ supersededBy: { $exists: false } }, { supersededBy: null }, { supersededBy: "" }],
-  };
-}
-
-function campaignIdFilter(campaignId) {
-  const id = String(campaignId);
-  const or = [{ campaignId: id }, { campaignsId: id }];
-  if (mongoose.Types.ObjectId.isValid(id)) or.push({ campaignId: new mongoose.Types.ObjectId(id) });
-  return { $or: or };
-}
-
-function computeIsActive(timeline) {
-  if (!timeline || !timeline.endDate) return 1;
-  const now = new Date();
-  return timeline.endDate < now ? 0 : 1;
-}
-
-const toStr = (v) => (v == null ? '' : String(v));
-
-async function milestoneSetForInfluencer(influencerId, campaignIds = []) {
-  if (!campaignIds.length) return new Set();
-  const docs = await Milestone.find(
-    { 'milestoneHistory.influencerId': influencerId, 'milestoneHistory.campaignId': { $in: campaignIds } },
-    'milestoneHistory.campaignId milestoneHistory.influencerId'
-  ).lean();
-  const set = new Set();
-  docs.forEach((d) => {
-    d.milestoneHistory.forEach((e) => {
-      if (toStr(e.influencerId) === toStr(influencerId) && campaignIds.includes(toStr(e.campaignId))) {
-        set.add(toStr(e.campaignId));
-      }
-    });
-  });
-  return set;
-}
-
-async function normalizeCategoriesPayload(raw) {
-  if (!raw) return [];
-  let items = raw;
-  if (typeof items === 'string') {
-    try { items = JSON.parse(items); } catch { throw new Error('Invalid JSON in categories.'); }
-  }
-  if (!Array.isArray(items)) throw new Error('categories must be an array.');
-
-  const catNums = [...new Set(items.map(it => Number(it?.categoryId)).filter(n => Number.isFinite(n)))];
-  if (!catNums.length) throw new Error('categories must contain numeric categoryId.');
-
-  const cats = await Category.find({ id: { $in: catNums } }, 'id name subcategories').lean();
-  const byNum = new Map(cats.map(c => [c.id, c]));
-
-  const out = [];
-  for (const it of items) {
-    const catNum = Number(it?.categoryId);
-    const subId = String(it?.subcategoryId || '');
-    if (!Number.isFinite(catNum)) throw new Error(`Invalid categoryId: ${it?.categoryId}`);
-    if (!subId) throw new Error('subcategoryId is required');
-    const catDoc = byNum.get(catNum);
-    if (!catDoc) throw new Error(`Category not found (id: ${catNum})`);
-    const sub = (catDoc.subcategories || []).find(s => String(s.subcategoryId) === subId);
-    if (!sub) throw new Error(`Subcategory ${subId} not under category id ${catNum}`);
-    out.push({ categoryId: catDoc.id, categoryName: catDoc.name, subcategoryId: sub.subcategoryId, subcategoryName: sub.name });
-  }
-  return out;
-}
-
-function buildSearchOr(term) {
-  const or = [
-    { brandName: { $regex: term, $options: 'i' } },
-    { productOrServiceName: { $regex: term, $options: 'i' } },
-    { description: { $regex: term, $options: 'i' } },
-    { 'categories.subcategoryName': { $regex: term, $options: 'i' } },
-    { 'categories.categoryName': { $regex: term, $options: 'i' } }
-  ];
-  const num = Number(term);
-  if (!isNaN(num)) {
-    or.push({ budget: { $lte: num } });
-    or.push({ influencerBudget: { $lte: num } });
-  }
-  return or;
-}
-
-async function buildSubToParentNumMap() {
-  const rows = await Category.find({}, 'id subcategories').lean();
-  const subIdToParentNum = new Map();
-  for (const r of rows) {
-    for (const s of (r.subcategories || [])) {
-      subIdToParentNum.set(String(s.subcategoryId), r.id);
-    }
-  }
-  return subIdToParentNum;
-}
-
-async function findMatchingInfluencers({ subIds = [], catNumIds = [] }) {
-  if (!subIds.length && !catNumIds.length) return [];
-  const or = [];
-  if (subIds.length) {
-    or.push(
-      { 'onboarding.subcategories.subcategoryId': { $in: subIds } },
-      { 'subcategories.subcategoryId': { $in: subIds } },
-      { 'categories.subcategoryId': { $in: subIds } },
-      { 'socialProfiles.categories.subcategoryId': { $in: subIds } },
-      { 'categories': { $in: subIds } }
+    const enriched = (await enrichCampaigns([created]))[0];
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.CREATED,
+      { doc: enriched },
+      requestId
     );
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
   }
-  if (catNumIds.length) {
-    or.push(
-      { 'onboarding.categoryId': { $in: catNumIds } },
-      { 'categories.categoryId': { $in: catNumIds } }
-    );
-  }
-  const filter = or.length ? { $or: or } : {};
-  const influencers = await Influencer.find(filter, 'influencerId name primaryPlatform handle onboarding socialProfiles').lean();
-  return influencers || [];
-}
+};
 
-function addInfluencerOpenStatusGate(filter) {
-  filter.$and = filter.$and || [];
-  filter.$and.push({ $or: [{ campaignStatus: 'open' }, { campaignStatus: { $exists: false } }] });
-  return filter;
-}
+// =======================================================
+// POST: AI Prefill
+// =======================================================
+exports.prefillCampaignWithAI = async (req, res) => {
+  const requestId = getRequestId(req);
 
-const CAMPAIGN_STATUS = Object.freeze({ OPEN: "open", PAUSED: "paused" });
-const ALLOWED_CAMPAIGN_STATUSES = new Set([CAMPAIGN_STATUS.OPEN, CAMPAIGN_STATUS.PAUSED]);
-
-function normalizeStatus(v) {
-  return String(v || "").toLowerCase().trim();
-}
-
-exports.updateCampaignStatus = async (req, res) => {
   try {
-    const { brandId, campaignId, status } = req.body || {};
-    if (!brandId) return res.status(400).json({ message: "brandId is required." });
-    if (!campaignId) return res.status(400).json({ message: "campaignId is required." });
+    const geo = await detectGeoFromRequest(req);
+    const tz = getCampaignTimezone(req.body);
+    const nowLocal = DateTime.now().setZone(tz);
 
-    const next = normalizeStatus(status);
-    if (!ALLOWED_CAMPAIGN_STATUSES.has(next)) return res.status(400).json({ message: "Invalid status. Use: open | paused" });
+    const brandIdR = requireObjectId(res, requestId, "brandId", req.body.brandId);
+    if (!brandIdR.ok) return brandIdR.resp;
 
-    const campaign = await Campaign.findOne({ brandId, ...campaignIdFilter(campaignId) });
-    if (!campaign) return res.status(404).json({ message: "Campaign not found." });
+    const titleR = requireString(res, requestId, "campaignTitle", req.body.campaignTitle);
+    if (!titleR.ok) return titleR.resp;
 
-    const current = normalizeStatus(campaign.campaignStatus || CAMPAIGN_STATUS.OPEN);
-    if (current === "closed") campaign.campaignStatus = CAMPAIGN_STATUS.PAUSED;
+    const descR = requireString(res, requestId, "description", req.body.description);
+    if (!descR.ok) return descR.resp;
 
-    if (next === CAMPAIGN_STATUS.OPEN) {
-      const activeFlag = computeIsActive(campaign.timeline);
-      if (activeFlag === 0) return res.status(400).json({ message: "Campaign timeline ended. Extend endDate to reopen." });
-      campaign.pausedAt = undefined;
+    const catR = requireObjectId(res, requestId, "categoryId", req.body.categoryId);
+    if (!catR.ok) return catR.resp;
+
+    const subR = requireIdArray(res, requestId, "subcategoryIds", req.body.subcategoryIds);
+    if (!subR.ok) return subR.resp;
+
+    const countryR = requireIdArray(res, requestId, "targetCountryIds", req.body.targetCountryIds);
+    if (!countryR.ok) return countryR.resp;
+
+    const ageR = requireIdArray(res, requestId, "targetAgeRanges", req.body.targetAgeRanges);
+    if (!ageR.ok) return ageR.resp;
+
+    const imgs = toUnknownArray(req.body.productImages);
+    if (!imgs.length) {
+      return failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "productImages", requestId);
     }
 
-    campaign.campaignStatus = next;
-    campaign.statusUpdatedAt = new Date();
-    if (next === CAMPAIGN_STATUS.PAUSED) campaign.pausedAt = new Date();
-
-    await campaign.save();
-    return res.json({ message: "Campaign status updated successfully.", campaign });
-  } catch (error) {
-    console.error("Error in updateCampaignStatus:", error);
-    return res.status(500).json({ message: "Internal server error while updating campaign status." });
-  }
-};
-
-
-exports.saveDraftCampaign = (req, res) => {
-  upload(req, res, async (err) => {
-    if (err) return res.status(500).json({ message: "Error uploading files." });
-
-    try {
-      let {
-        _id, brandId, productOrServiceName, description = "",
-        targetAudience, categories, goal, campaignType,
-        creativeBriefText, budget = 0, influencerBudget = 0, timeline, additionalNotes = "",
-      } = req.body;
-
-      if (!brandId) return res.status(400).json({ message: "brandId is required." });
-      if (!productOrServiceName || !goal) return res.status(400).json({ message: "productOrServiceName and goal are required." });
-
-      const brand = await Brand.findOne({ brandId });
-      if (!brand) return res.status(404).json({ message: "Brand not found." });
-
-      // Target Audience
-      let audienceData = { age: { MinAge: 0, MaxAge: 0 }, gender: 2, locations: [] };
-      if (targetAudience) {
-        let ta = typeof targetAudience === "string" ? JSON.parse(targetAudience) : targetAudience;
-        const { age, gender, locations } = ta || {};
-        if (age?.MinAge != null) audienceData.age.MinAge = Number(age.MinAge) || 0;
-        if (age?.MaxAge != null) audienceData.age.MaxAge = Number(age.MaxAge) || 0;
-        if ([0, 1, 2].includes(gender)) audienceData.gender = gender;
-        if (Array.isArray(locations)) {
-          for (const countryId of locations) {
-            const country = await Country.findById(countryId);
-            if (country) audienceData.locations.push({ countryId: country._id, countryName: country.countryName });
-          }
-        }
-      }
-
-      // Categories
-      let categoriesData = [];
-      try { categoriesData = await normalizeCategoriesPayload(categories); } catch (e) { return res.status(400).json({ message: e.message }); }
-
-      // Timeline
-      let tlData = {};
-      if (timeline) {
-        let tl = typeof timeline === "string" ? JSON.parse(timeline) : timeline;
-        if (tl.startDate) tlData.startDate = new Date(tl.startDate);
-        if (tl.endDate) tlData.endDate = new Date(tl.endDate);
-      }
-
-      // Files
-      const imagesUploaded = await uploadToGridFS(req.files?.image || [], { prefix: "campaign_image", metadata: { kind: "campaign_image", brandId }, req });
-      const creativeUploaded = await uploadToGridFS(req.files?.creativeBrief || [], { prefix: "campaign_brief", metadata: { kind: "campaign_brief", brandId }, req });
-
-      const newImages = imagesUploaded.map((f) => f.filename);
-      const newCreativePDFs = creativeUploaded.map((f) => f.filename);
-
-      const actor = await resolveActorFromPayload(req, brandId);
-
-      // ✅ ENFORCE DRAFT STATE
-      const baseData = {
-        brandId,
-        brandName: brand.name,
-        productOrServiceName,
-        description,
-        targetAudience: audienceData,
-        categories: categoriesData,
-        goal,
-        campaignType: campaignType || "",
-        creativeBriefText,
-        budget: toNum(budget),
-        influencerBudget: toNum(influencerBudget),
-        timeline: tlData,
-        additionalNotes,
-        isActive: 0,
-        isDraft: 1,
-        publishStatus: "draft",
-        createdBy: actor,
-        approvalMode: actor.role === "admin" ? "admin_review" : "direct"
-      };
-
-      // 🚨 PREVENT DUPLICATES: Look for an existing draft if _id isn't provided
-      let existingDraft = null;
-      if (_id) {
-        existingDraft = await Campaign.findOne({ _id, isDraft: 1 });
-      }
-      if (!existingDraft) {
-        existingDraft = await Campaign.findOne({ brandId, isDraft: 1 });
-      }
-
-      let campaignDoc;
-      if (existingDraft) {
-        Object.assign(existingDraft, baseData);
-        if (newImages.length) existingDraft.images = [...(existingDraft.images || []), ...newImages];
-        if (newCreativePDFs.length) existingDraft.creativeBrief = [...(existingDraft.creativeBrief || []), ...newCreativePDFs];
-        campaignDoc = await existingDraft.save();
-      } else {
-        const newDraft = new Campaign({
-          ...baseData,
-          images: newImages,
-          creativeBrief: newCreativePDFs
-        });
-        campaignDoc = await newDraft.save();
-
-        if (actor.role === "admin") {
-          await notifyBrandDraftReady(campaignDoc).catch(console.error);
-        }
-        // Initiate notification immediately on first draft creation
-        await notifyBrandDraftReady(campaignDoc).catch(console.error);
-      }
-
-      return res.status(201).json({ message: "Campaign draft saved successfully.", campaign: campaignDoc });
-    } catch (error) {
-      console.error("Error in saveDraftCampaign:", error);
-      return res.status(500).json({ message: "Internal server error while saving draft." });
-    }
-  });
-};
-
-// ==========================================
-//  WORKFLOW: 2. ADMIN SENDS DRAFT TO BRAND
-// ==========================================
-exports.requestBrandReview = async (req, res) => {
-  try {
-    const campaignsId = req.query.id || req.body.campaignsId;
-    if (!isAdminRequest(req)) return res.status(403).json({ message: "Only admins can request brand review." });
-
-    const campaign = await Campaign.findOne({ campaignsId, isDraft: 1 });
-    if (!campaign) return res.status(404).json({ message: "Draft campaign not found." });
-
-    campaign.publishStatus = "pending_brand_review";
-    await campaign.save();
-    await notifyBrandDraftReady(campaign);
-
-    return res.json({ message: "Sent to brand for review.", campaign });
-  } catch (error) {
-    console.error("Error in requestBrandReview:", error);
-    return res.status(500).json({ message: "Internal server error." });
-  }
-};
-
-// ==========================================
-//  WORKFLOW: 3. BRAND UPDATES/REVIEWS DRAFT (Existing update endpoint)
-// ==========================================
-exports.updateCampaign = (req, res) => {
-  upload(req, res, async function (err) {
-    if (err) return res.status(500).json({ message: 'Error uploading files.' });
-
-    try {
-      const campaignsId = req.query.id;
-      if (!campaignsId) return res.status(400).json({ message: 'Query parameter id is required.' });
-
-      const updates = { ...req.body };
-      delete updates.brandId; delete updates.brandName; delete updates.campaignsId;
-      delete updates.createdAt; delete updates.campaignStatus; delete updates.statusUpdatedAt; delete updates.adminId;
-
-      // Handle payload parsing ... [KEEP ALL EXISTING PARSING LOGIC HERE] ...
-      if (updates.targetAudience) {
-        let ta = typeof updates.targetAudience === 'string' ? JSON.parse(updates.targetAudience) : updates.targetAudience;
-        const audienceData = { age: { MinAge: 0, MaxAge: 0 }, gender: 2, locations: [] };
-        if (ta.age?.MinAge) audienceData.age.MinAge = Number(ta.age.MinAge);
-        if (ta.age?.MaxAge) audienceData.age.MaxAge = Number(ta.age.MaxAge);
-        if ([0, 1, 2].includes(Number(ta.gender))) audienceData.gender = Number(ta.gender);
-        const rawLocs = Array.isArray(ta.locations) ? ta.locations : ta.location ? [ta.location] : [];
-        for (const loc of rawLocs) {
-          const cId = typeof loc === 'string' ? loc : loc?.countryId;
-          const country = await Country.findById(cId).lean();
-          if (country) audienceData.locations.push({ countryId: country._id, countryName: country.countryName });
-        }
-        updates.targetAudience = audienceData;
-      }
-      if (updates.categories !== undefined) updates.categories = await normalizeCategoriesPayload(updates.categories);
-      if (updates.timeline) {
-        let tl = typeof updates.timeline === 'string' ? JSON.parse(updates.timeline) : updates.timeline;
-        const timelineData = {};
-        if (tl.startDate) timelineData.startDate = new Date(tl.startDate);
-        if (tl.endDate) timelineData.endDate = new Date(tl.endDate);
-        updates.timeline = timelineData;
-        updates.isActive = computeIsActive(timelineData);
-      }
-      // ✅ FIX: Safely parse and merge existing images with newly uploaded images
-      let finalImages = undefined;
-      if (req.body.existingImages !== undefined) {
-        try { finalImages = JSON.parse(req.body.existingImages); } catch (e) { finalImages = []; }
-      }
-      if (req.files?.['image']?.length) {
-        const upImgs = await uploadToGridFS(req.files['image'], { prefix: 'campaign_image', metadata: { kind: 'campaign_image', campaignsId }, req });
-        finalImages = [...(finalImages || []), ...upImgs.map((f) => f.filename)];
-      }
-      if (finalImages !== undefined) {
-        updates.images = finalImages; // Apply combined list to updates
-      }
-
-      // ✅ FIX: Safely parse and merge existing creative briefs with new ones
-      let finalBriefs = undefined;
-      if (req.body.existingCreativeBrief !== undefined) {
-        try { finalBriefs = JSON.parse(req.body.existingCreativeBrief); } catch (e) { finalBriefs = []; }
-      }
-      if (req.files?.['creativeBrief']?.length) {
-        const upBriefs = await uploadToGridFS(req.files['creativeBrief'], { prefix: 'campaign_brief', metadata: { kind: 'campaign_brief', campaignsId }, req });
-        finalBriefs = [...(finalBriefs || []), ...upBriefs.map((f) => f.filename)];
-      }
-      if (finalBriefs !== undefined) {
-        updates.creativeBrief = finalBriefs; // Apply combined list to updates
-      }
-
-      const campaign = await Campaign.findOne({ campaignsId });
-      if (!campaign) return res.status(404).json({ message: "Campaign not found." });
-
-      const actor = await resolveActorFromPayload(req, campaign.brandId);
-      const actorIsAdmin = actor.role === "admin";
-
-      // ✅ DRAFT WORKFLOW (admin publishes, non-admin keeps as draft)
-      if (campaign.isDraft === 1) {
-        if (actorIsAdmin) {
-          // admin => publish
-          updates.isDraft = 0;
-          updates.isActive = 1;
-        } else {
-          // non-admin => keep draft (vice-versa)
-          updates.isDraft = 1;
-          updates.isActive = 0;
-          updates.publishStatus = "draft";
-        }
-      }
-
-      // Only trigger pending patch review if the campaign is ALREADY LIVE (isDraft === 0)
-      const adminCreated = campaign.approvalMode === "admin_review" || String(campaign.createdBy?.role || "").toLowerCase() === "admin";
-      const requiresAdminReview = !actorIsAdmin && adminCreated && campaign.isDraft === 0;
-
-      const base = normalizeForDiff(campaign.toObject());
-      const incoming = normalizeForDiff(updates);
-      const onlyChanged = diffObject(base, incoming);
-
-      if (!onlyChanged) return res.json({ message: "No changes detected.", campaign: campaign.toObject(), pendingApproval: 0 });
-
-      if (requiresAdminReview) {
-        campaign.pendingUpdate = {
-          status: "pending", patch: onlyChanged, updatedBy: actor, updatedAt: new Date(),
-          reviewedBy: null, reviewedAt: null, reviewNote: "",
-        };
-        await campaign.save();
-        await notifyAdminsCampaignPending(campaign, onlyChanged).catch(console.error);
-
-        return res.json({
-          message: "Campaign updated successfully.",
-          campaign: { ...campaign.toObject(), ...campaign.pendingUpdate.patch, pendingApproval: 1 }
-        });
-      }
-
-      updates.pendingUpdate = { status: "none", patch: null, updatedBy: null, updatedAt: null, reviewedBy: null, reviewedAt: null, reviewNote: "" };
-      const updatedCampaign = await Campaign.findOneAndUpdate({ campaignsId }, updates, { new: true, runValidators: true }).lean();
-
-      return res.json({ message: "Campaign updated successfully.", campaign: updatedCampaign });
-    } catch (error) {
-      console.error('Error in updateCampaign:', error);
-      return res.status(500).json({ message: 'Internal server error while updating campaign.' });
-    }
-  });
-};
-
-// ==========================================
-//  WORKFLOW: 4. BRAND CONFIRMS READINESS
-// ==========================================
-exports.confirmCampaignReadiness = async (req, res) => {
-  try {
-    const campaignsId = req.query.id || req.body.campaignsId;
-
-    const campaign = await Campaign.findOne({ campaignsId, isDraft: 1 });
-    if (!campaign) return res.status(404).json({ message: "Draft campaign not found." });
-
-    campaign.publishStatus = "brand_confirmed";
-    await campaign.save();
-
-    await notifyAdminBrandConfirmed(campaign);
-
-    return res.json({ message: "Campaign marked as ready for publishing.", campaign });
-  } catch (error) {
-    console.error("Error in confirmCampaignReadiness:", error);
-    return res.status(500).json({ message: "Internal server error." });
-  }
-};
-
-// ==========================================
-//  WORKFLOW: 5. ADMIN PUBLISHES LIVE
-// ==========================================
-exports.publishCampaign = async (req, res) => {
-  try {
-    const campaignsId = req.query.id || req.body.campaignsId;
-
-    const campaign = await Campaign.findOne({ campaignsId, isDraft: 1 });
-    if (!campaign) return res.status(404).json({ message: "Draft campaign not found or already published." });
-
-    // ✅ FIX: Consistently resolve the actor to check for Admin status
-    const actor = await resolveActorFromPayload(req, campaign.brandId);
-    const actorIsAdmin = actor.role === "admin" || isAdminRequest(req);
-
-    // ✅ STRICT CHECK: If it's a managed campaign, ONLY Admin can publish it
-    const adminCreated = campaign.approvalMode === "admin_review" || String(campaign.createdBy?.role || "").toLowerCase() === "admin";
-
-    if (adminCreated && !actorIsAdmin) {
-      return res.status(403).json({ message: "Only an admin can publish this managed campaign." });
+    const productLink = clean(req.body.productLink);
+    if (productLink && !isValidHttpUrl(productLink)) {
+      return failField(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "productLink",
+        requestId,
+        "productLink must be a valid http/https URL"
+      );
     }
 
-    const activeFlag = computeIsActive(campaign.timeline);
-    if (activeFlag === 0) {
-      return res.status(400).json({ message: "Campaign timeline has already ended. Extend dates before publishing." });
+    const videoLink = clean(req.body.videoLink);
+    if (videoLink && !isValidHttpUrl(videoLink)) {
+      return failField(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "videoLink",
+        requestId,
+        "videoLink must be a valid http/https URL"
+      );
     }
 
-    // Go Live!
-    campaign.isDraft = 0;
-    campaign.publishStatus = "published";
-    campaign.campaignStatus = "open";
-    campaign.isActive = 1;
-    await campaign.save();
-
-    // Notify Matching Influencers now that it's live
-    try {
-      const subIds = Array.from(new Set((campaign.categories || []).map((c) => String(c.subcategoryId))));
-      const catNumIds = Array.from(new Set((campaign.categories || []).map((c) => Number(c.categoryId)).filter(Number.isFinite)));
-
-      if (subIds.length || catNumIds.length) {
-        const influencers = await findMatchingInfluencers({ subIds, catNumIds });
-        if (Array.isArray(influencers) && influencers.length) {
-          const actionPath = `/influencer/dashboard/view-campaign?id=${campaign.campaignsId}`;
-          await Promise.all(
-            influencers.map((inf) =>
-              createAndEmit({
-                influencerId: String(inf.influencerId),
-                type: "campaign.match",
-                title: "New campaign matches your profile",
-                message: `${campaign.brandName} posted "${campaign.productOrServiceName}".`,
-                entityType: "campaign",
-                entityId: String(campaign.campaignsId),
-                actionPath,
-              }).catch(() => null)
-            )
-          );
-        }
-      }
-    } catch (notifErr) {
-      console.warn("publishCampaign: notification flow failed", notifErr.message);
+    const rel = await resolveCategoryAndSubcategories(catR.value, subR.value);
+    if (rel.error) {
+      return fail(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", rel.error, requestId);
     }
 
-    return res.json({ message: "Campaign published successfully.", campaign });
-  } catch (error) {
-    console.error("Error in publishCampaign:", error);
-    return res.status(500).json({ message: "Internal server error." });
-  }
-};
+    const prefillDetails = {
+      category: rel.cat ? { id: String(rel.cat._id), name: String(rel.cat.name || "") } : null,
+      subcategories: (rel.subs || []).map((s) => ({
+        id: String(s._id),
+        name: String(s.name || ""),
+        tags: s.tags ?? [],
+      })),
+    };
 
+    const [goals, tiers, formats, langs] = await Promise.all([
+      ProductServiceGoalModel.find({ isActive: true }).select("_id goal").lean().limit(120),
+      InfluencerTierModel.find({}).select("_id category value sortOrder").lean().limit(120),
+      ContentFormatModel.find({}).select("_id name title type format").lean().limit(200),
+      ContentLanguageModel.find({ isActive: true }).select("_id code name").lean().limit(200),
+    ]);
 
-// ===============================
-//  STANDARD DIRECT CREATE (For Brands)
-// ===============================
-exports.createCampaign = (req, res) => {
-  upload(req, res, async (err) => {
-    if (err) return res.status(500).json({ message: "Error uploading files." });
+    const prefHashtagsDocs = await PreferredHashtagModel.find({
+      subcategoryId: { $in: subR.value.map((x) => toObjectId(x)) },
+    })
+      .select("_id hashtag tag name")
+      .lean()
+      .limit(300);
 
-    try {
-      let {
-        brandId,
-        productOrServiceName,
-        description = "",
-        targetAudience,
-        categories,
-        goal,
-        campaignType,
-        creativeBriefText,
-        budget = 0,
-        influencerBudget = 0,
-        timeline,
-        additionalNotes = "",
-      } = req.body;
+    const allowed = {
+      campaignGoals: goals.map((g) => ({ id: String(g._id), label: String(g.goal ?? "") })),
+      influencerTiers: tiers.map((t) => ({
+        id: String(t._id),
+        label: [t.category, t.value].filter(Boolean).join(" ").trim(),
+      })),
+      contentFormats: formats.map((f) => ({
+        id: String(f._id),
+        label: String(f.name ?? f.title ?? f.type ?? f.format ?? ""),
+      })),
+      contentLanguages: langs.map((l) => ({
+        id: String(l._id),
+        label: `${l.name ?? ""} ${l.code ? `(${l.code})` : ""}`.trim(),
+      })),
+      preferredHashtags: prefHashtagsDocs.map((h) => ({
+        id: String(h._id),
+        label: String(h.hashtag ?? h.tag ?? h.name ?? ""),
+      })),
+    };
 
-      if (!brandId || !productOrServiceName || !goal) {
-        return res.status(400).json({ message: "Missing required fields." });
-      }
+    const ui = {
+      source: {
+        campaignTitle: titleR.value,
+        description: descR.value,
+        campaignType: clean(req.body.campaignType) || "",
+        categoryId: catR.value,
+        subcategoryIds: subR.value,
+        productLink: productLink || null,
+        videoLink: videoLink || null,
+        targetCountryIds: countryR.value,
+        targetAgeRanges: ageR.value,
+        additionalNotes: clean(req.body.additionalNotes) || "",
+      },
+      allowedOptions: allowed,
+      guidance: {
+        timezone: tz,
+        todayLocal: nowLocal.toFormat("yyyy-LL-dd"),
+        datetimeFormat: "yyyy-MM-dd'T'HH:mm",
+        platformsAllowed: ["youtube", "instagram", "tiktok"],
+        paymentTypesAllowed: ["Milestone", "Fixed", "Gifting"],
+        hints: [
+          "Infer sensible influencer count based on campaign type/category/description and budget.",
+          "Pick formats/goals/tier based on description + category/subcategory.",
+        ],
+      },
+    };
 
-      const brand = await Brand.findOne({ brandId });
-      if (!brand) return res.status(404).json({ message: "Brand not found." });
+    const warnings = [];
 
-      // ✅ Resolve actor (admin OR brand)
-      const actor = await resolveActorFromPayload(req, brandId);
-      const actorIsAdmin = actor.role === "admin" || isAdminRequest(req);
+    const defaultStartEnd = () => {
+      const start = DateTime.now()
+        .setZone(tz)
+        .plus({ days: 1 })
+        .set({ hour: 9, minute: 0, second: 0, millisecond: 0 });
+      const end = start.plus({ days: 10 });
+      const fmt = (d) =>
+        d.toISO({ suppressSeconds: true, suppressMilliseconds: true, includeOffset: false });
+      return { startAt: fmt(start), endAt: fmt(end) };
+    };
 
-      // ✅ Optional but recommended security:
-      // If not admin, ensure brand can only create for itself
-      if (!actorIsAdmin) {
-        const authBrandId = String(req.user?.brandId || "").trim();
-        if (authBrandId && authBrandId !== String(brandId)) {
-          return res.status(403).json({ message: "Forbidden: brandId mismatch." });
-        }
-      }
+    const normalizeIsoLocal = (s) => {
+      const v = clean(s);
+      if (!v) return "";
+      const dt = DateTime.fromISO(v, { zone: tz });
+      if (!dt.isValid) return "";
+      return dt.toISO({ suppressSeconds: true, suppressMilliseconds: true, includeOffset: false });
+    };
 
-      // Target Audience
-      let audienceData = { age: { MinAge: 0, MaxAge: 0 }, gender: 2, locations: [] };
-      if (targetAudience) {
-        let ta = typeof targetAudience === "string" ? JSON.parse(targetAudience) : targetAudience;
+    const pickIds = (value, allowedIds, min = 0) => {
+      const set = new Set(allowedIds);
+      const picked = normalizeObjectIdArray(value).filter((id) => set.has(id));
+      if (picked.length >= min) return picked;
+      return allowedIds.slice(0, Math.min(min, allowedIds.length));
+    };
 
-        if (ta.age?.MinAge != null) audienceData.age.MinAge = Number(ta.age.MinAge) || 0;
-        if (ta.age?.MaxAge != null) audienceData.age.MaxAge = Number(ta.age.MaxAge) || 0;
+    const clampInt = (v, def, min, max) => {
+      const n = toInt(v);
+      if (!Number.isFinite(n)) return def;
+      return Math.max(min, Math.min(max, n));
+    };
 
-        if ([0, 1, 2].includes(Number(ta.gender))) audienceData.gender = Number(ta.gender);
+    const normalizePayment = (v) => {
+      const s = clean(v);
+      const x = normalizePaymentType(s || "Milestone");
+      if (["Milestone", "Fixed", "Gifting"].includes(x)) return x;
+      return "Milestone";
+    };
 
-        const rawLocs = Array.isArray(ta.locations) ? ta.locations : ta.location ? [ta.location] : [];
-        for (const loc of rawLocs) {
-          const cId = typeof loc === "string" ? loc : loc?.countryId;
-          const country = await Country.findById(cId).lean();
-          if (country) {
-            audienceData.locations.push({ countryId: country._id, countryName: country.countryName });
-          }
-        }
-      }
+    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+    let aiJson = {};
 
-      // Categories
-      let categoriesData = [];
+    if (!process.env.OPENAI_API_KEY) {
+      warnings.push("OPENAI_API_KEY missing: returned fallback prefill (no AI enrichment).");
+    } else {
       try {
-        categoriesData = await normalizeCategoriesPayload(categories);
+        const prompt = buildAIPrompt(ui);
+
+        const aiResp = await openai.responses.create({
+          model,
+          input: [
+            { role: "system", content: "Return JSON only. No markdown." },
+            { role: "user", content: prompt },
+          ],
+          text: { format: { type: "json_object" } },
+          temperature: 0.35,
+          max_output_tokens: 1200,
+        });
+
+        try {
+          aiJson = JSON.parse(aiResp.output_text || "{}");
+        } catch {
+          warnings.push("AI returned invalid JSON: returned fallback values where needed.");
+          aiJson = {};
+        }
       } catch (e) {
-        return res.status(400).json({ message: e.message });
+        warnings.push(`AI call failed: ${String(e?.message || "unknown error")}. Returned fallback values.`);
+        aiJson = {};
       }
-
-      // Timeline
-      let tlData = {};
-      if (timeline) {
-        let tl = typeof timeline === "string" ? JSON.parse(timeline) : timeline;
-        if (tl.startDate) tlData.startDate = new Date(tl.startDate);
-        if (tl.endDate) tlData.endDate = new Date(tl.endDate);
-      }
-
-      // Files (✅ avoid crashes if req.files missing)
-      const imagesUploaded = await uploadToGridFS(req.files?.image || [], {
-        prefix: "campaign_image",
-        metadata: { kind: "campaign_image", brandId },
-        req,
-      });
-
-      const creativeUploaded = await uploadToGridFS(req.files?.creativeBrief || [], {
-        prefix: "campaign_brief",
-        metadata: { kind: "campaign_brief", brandId },
-        req,
-      });
-
-      // ✅ Direct publish (Admin or Brand)
-      const baseData = {
-        brandId,
-        brandName: brand.name,
-        productOrServiceName,
-        description,
-        targetAudience: audienceData,
-        categories: categoriesData,
-        goal,
-        campaignType: campaignType || "",
-        creativeBriefText,
-        budget: toNum(budget),
-        influencerBudget: toNum(influencerBudget),
-        timeline: tlData,
-        additionalNotes,
-
-        isActive: computeIsActive(tlData),
-        isDraft: 0,
-        publishStatus: "published",
-        campaignStatus: "open",
-        statusUpdatedAt: new Date(),
-
-        // ✅ this is the key part you asked for (admin role stored)
-        createdBy: actor,
-        approvalMode: actorIsAdmin ? "admin_review" : "direct",
-      };
-
-      const newCampaign = new Campaign({
-        ...baseData,
-        images: imagesUploaded.map((f) => f.filename),
-        creativeBrief: creativeUploaded.map((f) => f.filename),
-      });
-
-      const campaignDoc = await newCampaign.save();
-
-      // ✅ Notify matching influencers (same as before)
-      try {
-        const subIds = Array.from(new Set(categoriesData.map((c) => String(c.subcategoryId))));
-        const catNumIds = Array.from(new Set(categoriesData.map((c) => Number(c.categoryId)).filter(Number.isFinite)));
-
-        if (subIds.length || catNumIds.length) {
-          const influencers = await findMatchingInfluencers({ subIds, catNumIds });
-          if (Array.isArray(influencers) && influencers.length) {
-            await Promise.all(
-              influencers.map((inf) =>
-                createAndEmit({
-                  influencerId: String(inf.influencerId),
-                  type: "campaign.match",
-                  title: "New campaign matches your profile",
-                  message: `${campaignDoc.brandName} posted "${campaignDoc.productOrServiceName}".`,
-                  entityType: "campaign",
-                  entityId: String(campaignDoc.campaignsId),
-                  actionPath: `/influencer/dashboard/view-campaign?id=${campaignDoc.campaignsId}`,
-                }).catch(() => null)
-              )
-            );
-          }
-        }
-      } catch (e) {}
-
-      return res.status(201).json({ message: "Campaign created successfully.", campaign: campaignDoc });
-    } catch (error) {
-      console.error("Error in createCampaign:", error);
-      return res.status(500).json({ message: "Internal server error while creating campaign." });
     }
-  });
+
+    const allowedGoalIds = allowed.campaignGoals.map((x) => x.id);
+    const allowedTierIds = allowed.influencerTiers.map((x) => x.id);
+    const allowedFormatIds = allowed.contentFormats.map((x) => x.id);
+    const allowedLangIds = allowed.contentLanguages.map((x) => x.id);
+    const allowedHashIds = allowed.preferredHashtags.map((x) => x.id);
+
+    const goalsPick = pickIds(aiJson.campaignGoals, allowedGoalIds, 1);
+    const tiersPick = pickIds(aiJson.influencerTierIds, allowedTierIds, 1);
+    const formatsPick = pickIds(aiJson.contentFormats, allowedFormatIds, 1);
+
+    const langsPick = pickIds(aiJson.contentLanguageIds, allowedLangIds, 0);
+    const hashtagsPick = pickIds(aiJson.preferredHashtags, allowedHashIds, 0);
+
+    const platformsPick = (() => {
+      const ps = toPlatformArray(aiJson.platformSelection);
+      return ps.length ? ps : ["instagram"];
+    })();
+
+    const paymentPick = normalizePayment(aiJson.paymentType);
+    const budgetPick = Math.max(0, Math.trunc(toNumber(aiJson.campaignBudget) || 0));
+    const numInfluencersPick = clampInt(aiJson.numberOfInfluencers, 1, 1, 100000);
+
+    const minFollowersRaw = toInt(aiJson.minFollowers);
+    const maxFollowersRaw = toInt(aiJson.maxFollowers);
+
+    let minFollowersPick = Number.isFinite(minFollowersRaw) ? Math.max(0, minFollowersRaw) : undefined;
+    let maxFollowersPick = Number.isFinite(maxFollowersRaw) ? Math.max(0, maxFollowersRaw) : undefined;
+
+    if (typeof minFollowersPick === "number" && minFollowersPick > 0 && minFollowersPick < MIN_FOLLOWERS_ALLOWED) {
+      warnings.push(`AI suggested minFollowers below ${MIN_FOLLOWERS_ALLOWED}; removed.`);
+      minFollowersPick = undefined;
+    }
+    if (typeof maxFollowersPick === "number" && maxFollowersPick > 0 && maxFollowersPick < MIN_FOLLOWERS_ALLOWED) {
+      warnings.push(`AI suggested maxFollowers below ${MIN_FOLLOWERS_ALLOWED}; removed.`);
+      maxFollowersPick = undefined;
+    }
+
+    let startAtPick = normalizeIsoLocal(aiJson.startAt);
+    let endAtPick = normalizeIsoLocal(aiJson.endAt);
+    if (!startAtPick || !endAtPick) {
+      const d = defaultStartEnd();
+      startAtPick = startAtPick || d.startAt;
+      endAtPick = endAtPick || d.endAt;
+    }
+
+    const st = DateTime.fromISO(startAtPick, { zone: tz });
+    const en = DateTime.fromISO(endAtPick, { zone: tz });
+    if (!st.isValid || !en.isValid || en <= st) {
+      const d = defaultStartEnd();
+      startAtPick = d.startAt;
+      endAtPick = d.endAt;
+      warnings.push("Invalid AI startAt/endAt: replaced with safe default window.");
+    }
+
+    const enhancedDescription = clean(aiJson.enhancedDescription) || descR.value;
+    const enhancedTitle = clean(aiJson.enhancedTitle) || titleR.value;
+
+    const prefill = {
+      brandId: brandIdR.value,
+      categoryId: catR.value,
+      subcategoryIds: subR.value,
+      targetCountryIds: countryR.value,
+      targetAgeRanges: ageR.value,
+      campaignTitle: enhancedTitle,
+      description: enhancedDescription,
+      campaignType: clean(req.body.campaignType) || "",
+      productImages: imgs,
+      productLink: productLink || undefined,
+      videoLink: videoLink || undefined,
+      campaignGoals: goalsPick,
+      influencerTierIds: tiersPick,
+      contentFormats: formatsPick,
+      contentLanguageIds: langsPick,
+      preferredHashtags: hashtagsPick,
+      platformSelection: platformsPick,
+      paymentType: paymentPick,
+      campaignBudget: budgetPick,
+      numberOfInfluencers: numInfluencersPick,
+      minFollowers: minFollowersPick,
+      maxFollowers: maxFollowersPick,
+      startAt: startAtPick,
+      endAt: endAtPick,
+      additionalNotes: clean(req.body.additionalNotes) || clean(aiJson.additionalNotes) || "",
+    };
+
+    if (req.body.saveDraft === true) {
+      const win = parseCampaignWindow(prefill, tz, requestId, res, false);
+      if (!win.ok) return win.resp;
+
+      const docToCreate = buildCampaignDoc(
+        { ...prefill, status: "draft", campaignTimezone: tz },
+        geo,
+        "draft",
+        1,
+        win.value
+      );
+      const savedDoc = await CampaignModel.create(docToCreate);
+      const enrichedSaved = (await enrichCampaigns([savedDoc]))[0];
+
+      return ApiResponse.sendOk(
+        res,
+        HttpStatus.OK,
+        {
+          prefill,
+          prefillDetails,
+          savedDraft: enrichedSaved,
+          meta: {
+            aiUsed: !!process.env.OPENAI_API_KEY,
+            warnings,
+            originalSource: {
+              campaignTitle: titleR.value,
+              description: descR.value,
+            },
+          },
+        },
+        requestId
+      );
+    }
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.OK,
+      {
+        prefill,
+        prefillDetails,
+        meta: {
+          aiUsed: !!process.env.OPENAI_API_KEY,
+          warnings,
+          originalSource: {
+            campaignTitle: titleR.value,
+            description: descR.value,
+          },
+        },
+      },
+      requestId
+    );
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
+  }
 };
 
 // ===============================
