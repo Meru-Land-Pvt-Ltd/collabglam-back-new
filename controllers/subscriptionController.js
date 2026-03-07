@@ -3,7 +3,7 @@
 const SubscriptionPlan = require("../models/subscription");
 const Brand = require("../models/brand");
 const Influencer = require("../models/influencer");
-const { computeExpiry } = require("../utils/subscriptionHelper");
+const subscriptionHelper = require("../utils/subscriptionHelper");
 
 // Helper: normalize feature value into a numeric limit for usage tracking snapshot
 // - number => that number
@@ -242,6 +242,7 @@ exports.deletePlan = async (req, res) => {
 exports.assignPlan = async (req, res) => {
   try {
     const { userType, userId, planId } = req.body || {};
+
     if (!userType || !userId || !planId) {
       return res
         .status(400)
@@ -259,37 +260,49 @@ exports.assignPlan = async (req, res) => {
       role: userType,
       status: "active",
     }).lean();
-    if (!plan) return res.status(404).json({ message: "Plan not found" });
+
+    if (!plan) {
+      return res.status(404).json({ message: "Plan not found" });
+    }
 
     const now = new Date();
-    const { billingCycle, durationDays, durationMinutes, durationMins, expiresAt } = req.body || {};
+    const {
+      billingCycle,
+      durationDays,
+      durationMinutes,
+      durationMins,
+      expiresAt,
+    } = req.body || {};
 
     const expire = subscriptionHelper.computeExpiry(plan, {
       billingCycle: billingCycle || "monthly",
       durationDays,
       durationMinutes,
       durationMins,
-      expiresAt
+      expiresAt,
     });
 
-    // Snapshot for usage tracking:
     const featureSnapshot = (plan.features || []).map((f) => ({
       key: f.key,
       limit: featureValueToLimit(f.value),
       used: 0,
     }));
 
-    const update = {
-      "subscription.planId": plan.planId,
-      "subscription.planName": plan.name,
-      "subscription.startedAt": now,
-      "subscription.expiresAt": expire,
-      "subscription.features": featureSnapshot,
-      subscriptionExpired: false,
-    };
-
     const query =
-      userType === "Brand" ? { brandId: userId } : { influencerId: userId };
+      userType === "Brand"
+        ? { _id: userId }
+        : { influencerId: userId };
+
+    const update = {
+      $set: {
+        "subscription.planId": plan.planId,
+        "subscription.planName": plan.name,
+        "subscription.startedAt": now,
+        "subscription.expiresAt": expire,
+        "subscription.features": featureSnapshot,
+        subscriptionExpired: false,
+      },
+    };
 
     const updated = await Model.findOneAndUpdate(query, update, {
       new: true,
@@ -319,6 +332,7 @@ exports.assignPlan = async (req, res) => {
 exports.renewPlan = async (req, res) => {
   try {
     const { userType, userId } = req.body || {};
+
     if (!userType || !userId) {
       return res.status(400).json({ message: "userType & userId required" });
     }
@@ -330,7 +344,9 @@ exports.renewPlan = async (req, res) => {
     const Model = userType === "Brand" ? Brand : Influencer;
 
     const user = await Model.findOne(
-      userType === "Brand" ? { brandId: userId } : { influencerId: userId }
+      userType === "Brand"
+        ? { _id: userId }
+        : { _id: userId }
     );
 
     if (!user) {
@@ -348,10 +364,10 @@ exports.renewPlan = async (req, res) => {
     if (!plan) return res.status(404).json({ message: "Plan not found" });
 
     const now = new Date();
-    const newExpires = subscriptionHelper.computeExpiry(
-      plan,
-      user.subscription.expiresAt
-    );
+    const newExpires = subscriptionHelper.computeExpiry(plan, {
+      billingCycle: "monthly",
+      expiresAt: user.subscription.expiresAt,
+    });
 
     user.subscription.startedAt = now;
     user.subscription.expiresAt = newExpires;
@@ -390,7 +406,7 @@ exports.getMyPlan = async (req, res) => {
     const Model = userType === "Brand" ? Brand : Influencer;
 
     const user = await Model.findOne(
-      userType === "Brand" ? { brandId: userId } : { influencerId: userId }
+      userType === "Brand" ? { brandId: userId } : { _id: userId }
     ).lean();
 
     if (!user) return res.status(404).json({ message: `${userType} not found` });
@@ -432,22 +448,24 @@ function normalizedMonthlyCost(plan) {
 
 exports.checkBrandPlanChange = async (req, res) => {
   try {
-    const { brandId, planId } = req.body || {};
+    const { brandId, userId, planId } = req.body || {};
+    const targetBrandId = brandId || userId;
 
-    if (!brandId || !planId) {
-      return res.status(400).json({ message: "brandId & planId are required" });
+    if (!targetBrandId || !planId) {
+      return res.status(400).json({ message: "brandId/userId & planId are required" });
     }
 
-    const brand = await Brand.findOne({ brandId }).lean();
+    const brand = await Brand.findOne({ _id: targetBrandId }).lean();
     if (!brand) return res.status(404).json({ message: "Brand not found" });
 
     const requestedPlan = await SubscriptionPlan.findOne({ planId }).lean();
-    if (!requestedPlan) return res.status(404).json({ message: "Requested plan not found" });
+    if (!requestedPlan) {
+      return res.status(404).json({ message: "Requested plan not found" });
+    }
 
     const sub = brand.subscription || {};
     const currentPlanId = sub.planId;
 
-    // No subscription at all
     if (!currentPlanId) {
       return res.status(200).json({
         status: "can_subscribe",
@@ -459,7 +477,6 @@ exports.checkBrandPlanChange = async (req, res) => {
       });
     }
 
-    // Expired subscription -> treat as can subscribe
     const now = new Date();
     const isExpired =
       brand.subscriptionExpired === true ||
@@ -476,7 +493,6 @@ exports.checkBrandPlanChange = async (req, res) => {
       });
     }
 
-    // Same plan
     if (currentPlanId === requestedPlan.planId) {
       return res.status(200).json({
         status: "same_plan",
@@ -487,10 +503,8 @@ exports.checkBrandPlanChange = async (req, res) => {
       });
     }
 
-    // Load current plan doc
     const currentPlan = await SubscriptionPlan.findOne({ planId: currentPlanId }).lean();
 
-    // If current plan doc missing in DB, allow subscribe (fallback)
     if (!currentPlan) {
       return res.status(200).json({
         status: "can_subscribe",
@@ -505,7 +519,6 @@ exports.checkBrandPlanChange = async (req, res) => {
     const currentRank = normalizedMonthlyCost(currentPlan);
     const requestedRank = normalizedMonthlyCost(requestedPlan);
 
-    // Requested is lower (downgrade attempt)
     if (requestedRank < currentRank) {
       return res.status(200).json({
         status: "already_higher",
@@ -518,7 +531,6 @@ exports.checkBrandPlanChange = async (req, res) => {
       });
     }
 
-    // Requested is higher (upgrade)
     if (requestedRank > currentRank) {
       return res.status(200).json({
         status: "can_upgrade",
@@ -531,7 +543,6 @@ exports.checkBrandPlanChange = async (req, res) => {
       });
     }
 
-    // Same "rank" (same price), but different planId (rare)
     return res.status(200).json({
       status: "same_tier_different_plan",
       canProceed: true,
@@ -546,7 +557,6 @@ exports.checkBrandPlanChange = async (req, res) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 };
-
 exports.getCurrentBrandPlanLite = async (req, res) => {
   try {
     const brandId = req.query?.brandId;
@@ -555,7 +565,7 @@ exports.getCurrentBrandPlanLite = async (req, res) => {
       return res.status(400).json({ message: "brandId is required in query" });
     }
 
-    const brand = await Brand.findOne({ brandId }).lean();
+    const brand = await Brand.findOne({ _id: brandId }).lean();
     if (!brand) {
       return res.status(404).json({ message: "Brand not found" });
     }
@@ -567,7 +577,6 @@ exports.getCurrentBrandPlanLite = async (req, res) => {
       brand.subscriptionExpired === true ||
       (sub.expiresAt && new Date(sub.expiresAt).getTime() < now.getTime());
 
-    // ✅ expired OR no plan => free
     if (isExpired || !sub.planId) {
       return res.status(200).json({
         brandPlanId: null,
@@ -578,7 +587,6 @@ exports.getCurrentBrandPlanLite = async (req, res) => {
     let brandPlanId = sub.planId || null;
     let brandPlanName = sub.planName || null;
 
-    // fallback if planName missing
     if (brandPlanId && !brandPlanName) {
       const plan = await SubscriptionPlan.findOne({ planId: brandPlanId })
         .select("name")

@@ -17,7 +17,7 @@ const {
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-const clientUrl = (process.env.CAMPAIGN_BASE_URL || "https://collabglam.com").replace(/\/$/, "");
+const clientUrl = (process.env.CAMPAIGN_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
 const brandSuccessPath = process.env.STRIPE_BRAND_SUCCESS_PATH || "/brand/subscriptions";
 const influencerSuccessPath = process.env.STRIPE_INFLUENCER_SUCCESS_PATH || "/influencer/subscriptions";
 const milestoneSuccessPath =
@@ -85,7 +85,7 @@ async function computeServicePeriod({ role, planId, paidAt }) {
 
     if (days > 0) return { start: paidAt, end: addDays(paidAt, days) };
     if (months > 0) return { start: paidAt, end: addMonths(paidAt, months) };
-  } catch {}
+  } catch { }
 
   return { start: paidAt, end: addDays(paidAt, 30) };
 }
@@ -116,7 +116,7 @@ exports.createOrder = async (req, res) => {
     }
 
     let user;
-    if (role === "Brand") user = await Brand.findOne({ brandId: userId });
+    if (role === "Brand") user = await Brand.findOne({ _id: userId });
     else user = await Influencer.findOne({ influencerId: userId });
 
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
@@ -289,8 +289,8 @@ exports.verifyPayment = async (req, res) => {
       const r = session.metadata?.role;
       const uid = session.metadata?.userId;
       const u = await (r === "Brand"
-        ? Brand.findOne({ brandId: uid }).lean()
-        : Influencer.findOne({ influencerId: uid }).lean());
+        ? Brand.findOne({ _id: uid }).lean()
+        : Influencer.findOne({ _id: uid }).lean());
 
       customerLegalName = customerLegalName || (u?.name || u?.brandName || u?.influencerName || "Customer");
       customerEmail = customerEmail || (u?.email || "");

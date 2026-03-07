@@ -2,6 +2,7 @@
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const mongoose = require("mongoose");
 
 // ---- tolerant imports (works if module.exports = Model OR exports.BrandModel = ...) ----
 const BrandModelImport = require("../models/brand");
@@ -777,6 +778,43 @@ async function updatePasswordBrand(req, res, next) {
   }
 }
 
+async function getBrandById(req, res, next) {
+  const requestId = req.requestId || "";
+
+  try {
+    const id = req.query.id || req.query.brandId || req.params.id;
+
+    if (!id) {
+      return res.status(400).json({
+        message: "Query parameter id (or brandId) is required.",
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid brand id." });
+    }
+
+    const brandDoc = await BrandModel.findById(id)
+      .select("-password -__v")
+      .lean()
+      .exec();
+
+    if (!brandDoc) {
+      return res.status(404).json({ message: "Brand not found." });
+    }
+
+    return res.status(200).json({
+      ...brandDoc,
+      brandId: String(brandDoc._id),
+    });
+  } catch (error) {
+    console.error("Error in getBrandById:", error);
+    return res.status(500).json({
+      message: "Internal server error while fetching brand.",
+    });
+  }
+}
+
 module.exports = {
   sendSignupOtp,
   verifyOtpSignUp,
@@ -785,4 +823,5 @@ module.exports = {
   sendOtpForgotBrand,
   verifyOtpForgotBrand,
   updatePasswordBrand,
+  getBrandById,
 };
