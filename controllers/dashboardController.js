@@ -11,12 +11,14 @@ const Influencer = require("../models/influencer");
 const Milestone = require("../models/milestone");
 const Contract = require("../models/contract");
 const ApplyCampaign = require("../models/applyCampaign");
+const { ProductServiceGoalModel } = require("../models/productServiceGoal");
 
 const { CONTRACT_STATUS } = require("../constants/contract");
 
 /**
  * Generic JWT verifier — populates req.user with the decoded token.
  */
+
 exports.verifyToken = (req, res, next) => {
   const authHeader = req.headers["authorization"] || "";
   if (!authHeader.startsWith("Bearer ")) {
@@ -219,34 +221,69 @@ exports.getDashboardInf = async (req, res) => {
   }
 };
 
-/**
- * Brand dashboard home
- * brandId = Brand._id (ObjectId string)
- */
 exports.getBrandDashboardHome = async (req, res) => {
   try {
     const brandIdRaw = req.body?.brandId || req.user?.brandId;
-    if (!brandIdRaw) return res.status(400).json({ error: "brandId is required" });
+    if (!brandIdRaw) {
+      return res.status(400).json({ error: "brandId is required" });
+    }
 
     const brandObjectId = toObjectIdStrict(brandIdRaw, "brandId");
 
     // 1) Brand
     const brand = await Brand.findById(brandObjectId, "name brandName").lean();
-    if (!brand) return res.status(404).json({ error: "Brand not found" });
+    if (!brand) {
+      return res.status(404).json({ error: "Brand not found" });
+    }
 
-    // 2) All campaigns (non-draft)
+    // 2) All campaigns (non-draft) - updated fields from new schema
     const allCampaigns = await Campaign.find(
       { ...brandFilter("brandId", brandObjectId), isDraft: { $ne: 1 } },
-      "campaignsId productOrServiceName goal budget isActive createdAt"
+      `
+        campaignsId
+        campaignTitle
+        campaignGoals
+        campaignBudget
+        budget
+        status
+        publishStatus
+        campaignStatus
+        isActive
+        createdAt
+        numberOfInfluencers
+        platformSelection
+      `
     )
       .sort({ createdAt: -1 })
       .lean();
 
     const totalCreatedCampaigns = allCampaigns.length;
 
-    const campaignIds = allCampaigns.map((c) => String(c.campaignsId || "")).filter(Boolean);
+    const campaignIds = allCampaigns
+      .map((c) => String(c.campaignsId || ""))
+      .filter(Boolean);
 
-    // 3) Accepted contracts → latest per campaign (exclude rejected/superseded)
+    // 2.1) Resolve campaign goal names
+    const goalIds = [
+      ...new Set(
+        allCampaigns
+          .flatMap((c) => (Array.isArray(c.campaignGoals) ? c.campaignGoals : []))
+          .map((id) => String(id))
+          .filter(Boolean)
+      ),
+    ];
+
+    let goalMap = new Map();
+    if (goalIds.length) {
+      const goals = await ProductServiceGoalModel.find(
+        { _id: { $in: goalIds.map((id) => new mongoose.Types.ObjectId(id)) } },
+        "_id goal"
+      ).lean();
+
+      goalMap = new Map(goals.map((g) => [String(g._id), g.goal]));
+    }
+
+    // 3) Accepted contracts -> latest per campaign (exclude rejected/superseded)
     const acceptedContracts = await Contract.find(
       acceptedContractFilter({ ...brandFilter("brandId", brandObjectId) }),
       "campaignId contractId influencerId lastActionAt createdAt"
@@ -258,6 +295,7 @@ exports.getBrandDashboardHome = async (req, res) => {
     for (const c of acceptedContracts) {
       const key = String(c.campaignId || "");
       if (!key) continue;
+
       if (!contractByCampaign.has(key)) {
         contractByCampaign.set(key, {
           contractId: c.contractId || null,
@@ -277,12 +315,31 @@ exports.getBrandDashboardHome = async (req, res) => {
       const agg = await ApplyCampaign.aggregate([
         { $match: { campaignId: { $in: campaignIds } } },
         { $unwind: "$applicants" },
-        { $group: { _id: { campaignId: "$campaignId", influencerId: "$applicants.influencerId" } } },
-        { $group: { _id: "$_id.campaignId", appliedInfluencersCount: { $sum: 1 } } },
+        {
+          $group: {
+            _id: {
+              campaignId: "$campaignId",
+              influencerId: "$applicants.influencerId",
+            },
+          },
+        },
+        {
+          $group: {
+            _id: "$_id.campaignId",
+            appliedInfluencersCount: { $sum: 1 },
+          },
+        },
         {
           $facet: {
             perCampaign: [{ $project: { _id: 1, appliedInfluencersCount: 1 } }],
-            total: [{ $group: { _id: null, totalAppliedInfluencers: { $sum: "$appliedInfluencersCount" } } }],
+            total: [
+              {
+                $group: {
+                  _id: null,
+                  totalAppliedInfluencers: { $sum: "$appliedInfluencersCount" },
+                },
+              },
+            ],
           },
         },
       ]);
@@ -291,7 +348,9 @@ exports.getBrandDashboardHome = async (req, res) => {
       const total = agg?.[0]?.total?.[0]?.totalAppliedInfluencers || 0;
 
       totalAppliedInfluencers = Number(total) || 0;
-      perCampaign.forEach((row) => appliedCountMap.set(String(row._id), Number(row.appliedInfluencersCount || 0)));
+      perCampaign.forEach((row) => {
+        appliedCountMap.set(String(row._id), Number(row.appliedInfluencersCount || 0));
+      });
     }
 
     // 5) Show list rule
@@ -303,19 +362,40 @@ exports.getBrandDashboardHome = async (req, res) => {
     const showAll = acceptedCount === 0 || anyUnaccepted;
     const campaignsMode = showAll ? "all" : "accepted";
 
-    const baseList = showAll ? allCampaigns : allCampaigns.filter((c) => acceptedCampaignIds.has(String(c.campaignsId || "")));
+    const baseList = showAll
+      ? allCampaigns
+      : allCampaigns.filter((c) => acceptedCampaignIds.has(String(c.campaignsId || "")));
 
     const campaigns = baseList.map((c) => {
       const id = String(c.campaignsId || "");
       const meta = contractByCampaign.get(id) || {};
+
+      const goalNames = (Array.isArray(c.campaignGoals) ? c.campaignGoals : [])
+        .map((gid) => goalMap.get(String(gid)))
+        .filter(Boolean);
+
       return {
         id,
         campaignsId: id,
-        productOrServiceName: c.productOrServiceName || "",
-        goal: c.goal || "",
-        budget: Number(c.budget || 0),
+
+        campaignTitle: c.campaignTitle || "",
+        productOrServiceName: c.campaignTitle || "",
+
+        goals: goalNames,
+        goal: goalNames[0] || "",
+
+        campaignBudget: Number(c.campaignBudget || 0),
+        budget: Number(c.campaignBudget || c.budget || 0),
+
+        status: c.status || "",
+        publishStatus: c.publishStatus || "",
+        campaignStatus: c.campaignStatus || "",
+
         isActive: Number(c.isActive || 0),
         createdAt: c.createdAt || null,
+
+        numberOfInfluencers: Number(c.numberOfInfluencers || 0),
+        platformSelection: Array.isArray(c.platformSelection) ? c.platformSelection : [],
 
         hasAcceptedInfluencer: acceptedCampaignIds.has(id),
         influencerId: meta.influencerId ?? null,
@@ -325,9 +405,14 @@ exports.getBrandDashboardHome = async (req, res) => {
       };
     });
 
-    // 6) Total hired influencers (distinct) from ACTIVE campaigns only
+    // 6) Total hired influencers from ACTIVE campaigns only
     const activeCampaignIds = allCampaigns
-      .filter((c) => Number(c.isActive) === 1)
+      .filter(
+        (c) =>
+          Number(c.isActive) === 1 &&
+          c.status !== "draft" &&
+          c.status !== "archived"
+      )
       .map((c) => String(c.campaignsId || ""))
       .filter(Boolean);
 
@@ -343,15 +428,20 @@ exports.getBrandDashboardHome = async (req, res) => {
         { $group: { _id: "$influencerId" } },
         { $count: "total" },
       ]);
+
       totalHiredInfluencers = hiredAgg?.[0]?.total || 0;
     }
 
     // 7) Budget remaining
-    const milestone = await Milestone.findOne(brandFilter("brandId", brandObjectId), "walletBalance").lean();
+    const milestone = await Milestone.findOne(
+      brandFilter("brandId", brandObjectId),
+      "walletBalance"
+    ).lean();
+
     const budgetRemaining = Number(milestone?.walletBalance ?? 0);
 
     return res.status(200).json({
-      brandId: brand._id.toString(),
+      brandId: String(brand._id),
       brandName: brand.brandName || brand.name || "",
       totalCreatedCampaigns,
       totalHiredInfluencers,
@@ -362,6 +452,8 @@ exports.getBrandDashboardHome = async (req, res) => {
     });
   } catch (err) {
     console.error("getBrandDashboardHome error:", err);
-    return res.status(err?.status || 500).json({ error: err?.message || "Server error" });
+    return res
+      .status(err?.status || 500)
+      .json({ error: err?.message || "Server error" });
   }
 };

@@ -79,8 +79,6 @@ router.get('/campaignSummary', brandAuth, campaignController.getCampaignSummary)
 // router.post('/save-draft', brandAuth, campaignController.saveDraftCampaign);
 router.get('/draft', brandAuth, campaignController.getDraftCampaignByBrand);
 
-// router.post("/status", campaignController.updateCampaignStatus);
-
 router.post("/history-list", campaignController.listApplicants);
 
 router.post("/update-pending", campaignController.approveCampaignPendingUpdate);
@@ -97,5 +95,6 @@ router.get('/subcategory', brandAuth, campaignController.getSubcategories);
 router.post("/view-campaign-brand", brandAuth, campaignController.viewCampaignByIdForBrand);
 
 router.post("/recommended-influencers", brandAuth, campaignController.getRecommendedInfluencersByCampaignId);
+router.post("/update-status",brandAuth, campaignController.updateStatus);
 
 module.exports = router;

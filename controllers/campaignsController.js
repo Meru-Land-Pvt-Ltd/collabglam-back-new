@@ -10,7 +10,7 @@ const Campaign = require("../models/campaign");
 const Brand = require("../models/brand");
 const { CategoryModel } = require("../models/categories");
 const ApplyCampaign = require("../models/applyCampaign");
-const {InfluencerModel:Influencer} = require("../models/influencer");
+const { InfluencerModel: Influencer } = require("../models/influencer");
 const Contract = require("../models/contract");
 const Country = require("../models/country");
 const Modash = require("../models/modash");
@@ -822,8 +822,20 @@ const findBrandDocByAnyId = async (brandId) => {
 const getCampaignDisplayName = (campaign) =>
   String(campaign?.campaignTitle || campaign?.productOrServiceName || "Campaign").trim();
 
-const getCampaignEntityId = (campaign) =>
-  String(campaign?.campaignsId || campaign?._id || "");
+function campaignIdFilter(campaignId) {
+  const oid = toCampaignObjectId(campaignId);
+  return oid ? { campaignId: String(oid) } : { campaignId: null };
+}
+
+const getCampaignEntityId = (campaign) => String(campaign?._id || "");
+
+const toCampaignObjectId = (campaignId) => {
+  const id = clean(campaignId);
+  return isOid(id) ? toObjectId(id) : null;
+};
+
+const toCampaignObjectIds = (ids = []) =>
+  ids.map((id) => clean(String(id))).filter(isOid).map(toObjectId);
 
 const buildCampaignDoc = (body, geo, status, byAi, timing, extra = {}) => {
   const isDraft = status === "draft";
@@ -1920,10 +1932,12 @@ exports.getAllCampaigns = async (req, res) => {
 // =======================================
 exports.getCampaignById = async (req, res) => {
   try {
-    const campaignsId = req.query.id;
-    if (!campaignsId) return res.status(400).json({ message: 'Query parameter id is required.' });
+    const campaignId = clean(req.query.id);
+    if (!campaignId || !isOid(campaignId)) {
+      return res.status(400).json({ message: 'Valid campaign id is required.' });
+    }
 
-    const campaign = await Campaign.findOne({ campaignsId }).lean();
+    const campaign = await Campaign.findById(campaignId).lean();
     if (!campaign) return res.status(404).json({ message: 'Campaign not found.' });
 
     const actorIsAdmin = isAdminRequest(req);
@@ -1945,10 +1959,12 @@ exports.getCampaignById = async (req, res) => {
 // ================================
 exports.deleteCampaign = async (req, res) => {
   try {
-    const campaignsId = req.query.id;
-    if (!campaignsId) return res.status(400).json({ message: 'Query parameter id is required.' });
+    const campaignId = clean(req.query.id);
+    if (!campaignId || !isOid(campaignId)) {
+      return res.status(400).json({ message: 'Valid campaign id is required.' });
+    }
 
-    const deleted = await Campaign.findOneAndDelete({ campaignsId });
+    const deleted = await Campaign.findByIdAndDelete(campaignId);
     if (!deleted) return res.status(404).json({ message: 'Campaign not found.' });
     return res.json({ message: 'Campaign deleted successfully.' });
   } catch (error) {
@@ -1984,7 +2000,7 @@ exports.getActiveCampaignsByBrand = async (req, res) => {
     ]);
 
     return res.json({
-      data: campaigns.map((c) => ({ ...c, influencerWorking: acceptedSet.has(String(c.campaignsId)) })),
+      data: campaigns.map((c) => ({ ...c, influencerWorking: acceptedSet.has(String(c._id)) })),
       pagination: { total: totalCount, page: pageNum, limit: perPage, totalPages: Math.ceil(totalCount / perPage) }
     });
   } catch (error) {
@@ -2037,7 +2053,11 @@ exports.checkApplied = async (req, res) => {
   const { campaignId, influencerId } = req.body;
   if (!campaignId || !influencerId) return res.status(400).json({ message: 'Missing fields' });
   try {
-    const campaign = await Campaign.findOne({ campaignsId: campaignId }).lean();
+    if (!isOid(campaignId)) {
+      return res.status(400).json({ message: 'Invalid campaignId' });
+    }
+
+    const campaign = await Campaign.findById(campaignId).lean();
     if (!campaign) return res.status(404).json({ message: 'Not found.' });
     campaign.hasApplied = await ApplyCampaign.exists({ campaignId, 'applicants.influencerId': influencerId }) ? 1 : 0;
     return res.json(campaign);
@@ -2122,7 +2142,7 @@ exports.getApprovedCampaignsByInfluencer = async (req, res) => {
       }
     });
 
-    const filter = { campaignsId: { $in: campaignIds }, isActive: 1 };
+    const filter = { _id: { $in: toCampaignObjectIds(campaignIds) }, isActive: 1 };
     if (search?.trim()) filter.$or = buildSearchOr(search.trim());
 
     const skip = (Math.max(1, parseInt(page, 10)) - 1) * Math.max(1, parseInt(limit, 10));
@@ -2133,7 +2153,7 @@ exports.getApprovedCampaignsByInfluencer = async (req, res) => {
 
     return res.json({
       meta: { total, page: Math.max(1, parseInt(page, 10)), limit: Math.max(1, parseInt(limit, 10)), totalPages: Math.ceil(total / Math.max(1, parseInt(limit, 10))) },
-      campaigns: raw.map((c) => ({ ...c, hasApplied: 1, isContracted: 1, isAccepted: acceptedMap.get(toStr(c.campaignsId)) || 0, hasMilestone: 1, contractId: contractIdMap.get(toStr(c.campaignsId)) || null, feeAmount: feeMap.get(toStr(c.campaignsId)) || 0, contractStatus: statusMap.get(toStr(c.campaignsId)) || null, milestonesCreatedAt: milestonesCreatedAtMap.get(toStr(c.campaignsId)) || null }))
+      campaigns: raw.map((c) => ({ ...c, hasApplied: 1, isContracted: 1, isAccepted: acceptedMap.get(toStr(String(c._id))) || 0, hasMilestone: 1, contractId: contractIdMap.get(toStr(String(c._id))) || null, feeAmount: feeMap.get(toStr(String(c._id))) || 0, contractStatus: statusMap.get(toStr(String(c._id))) || null, milestonesCreatedAt: milestonesCreatedAtMap.get(toStr(String(c._id))) || null }))
     });
   } catch (err) {
     return res.status(500).json({ message: 'Internal server error' });
@@ -2153,7 +2173,7 @@ exports.getAppliedCampaignsByInfluencer = async (req, res) => {
     campaignIds = campaignIds.filter((id) => !excludedIds.has(id));
     if (!campaignIds.length) return res.status(200).json({ meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 }, campaigns: [] });
 
-    const filter = { campaignsId: { $in: campaignIds } };
+    const filter = { _id: { $in: toCampaignObjectIds(campaignIds) } };
     if (search?.trim()) filter.$or = buildSearchOr(search.trim());
 
     const skip = (Math.max(1, parseInt(page, 10)) - 1) * Math.max(1, parseInt(limit, 10));
@@ -2331,8 +2351,8 @@ exports.getContractedCampaignsByInfluencer = async (req, res) => {
     return res.json({
       meta: { total, page: Math.max(1, parseInt(page, 10)), limit: Math.max(1, parseInt(limit, 10)), totalPages: Math.ceil(total / Math.max(1, parseInt(limit, 10))) },
       campaigns: rawCampaigns.map((c) => {
-        const details = contractByCampaignId.get(String(c.campaignsId || "")) || contractByCampaignId.get(String(c._id || "")) || {};
-        return { ...c, hasApplied: 1, isContracted: 1, isAccepted: details.isAccepted || 0, hasMilestone: (milestoneCampaignSet.has(String(c.campaignsId || "")) || milestoneCampaignSet.has(String(c._id || ""))) ? 1 : 0, contractId: details.contractId ?? null, feeAmount: details.feeAmount ?? 0, contractStatus: details.status ?? null };
+        const details = contractByCampaignId.get(String(String(c._id) || "")) || contractByCampaignId.get(String(c._id || "")) || {};
+        return { ...c, hasApplied: 1, isContracted: 1, isAccepted: details.isAccepted || 0, hasMilestone: (milestoneCampaignSet.has(String(String(c._id) || "")) || milestoneCampaignSet.has(String(c._id || ""))) ? 1 : 0, contractId: details.contractId ?? null, feeAmount: details.feeAmount ?? 0, contractStatus: details.status ?? null };
       }),
     });
   } catch (err) {
@@ -2446,7 +2466,11 @@ exports.getCampaignSummary = async (req, res) => {
   try {
     const campaignsId = req.query.id || req.params?.id;
     if (!campaignsId) return res.status(400).json({ message: 'Query parameter id is required.' });
-    const campaign = await Campaign.findOne({ campaignsId }, 'productOrServiceName budget timeline').lean();
+    if (!isOid(campaignsId)) {
+      return res.status(400).json({ message: 'Valid campaign id is required.' });
+    }
+
+    const campaign = await Campaign.findById(campaignsId, 'productOrServiceName budget timeline').lean();
     if (!campaign) return res.status(404).json({ message: 'Campaign not found.' });
     return res.json({ campaignName: campaign.productOrServiceName, budget: campaign.budget ?? 0, timeline: campaign.timeline || {} });
   } catch (error) {
@@ -2504,14 +2528,14 @@ exports.getCampaignHistoryByBrand = async (req, res) => {
       Campaign.countDocuments(filter),
     ]);
 
-    const workingIds = await Contract.distinct("campaignId", { brandId, campaignId: { $in: rows.map((c) => String(c.campaignsId || c._id)) }, ...activeAcceptedFilter() });
+    const workingIds = await Contract.distinct("campaignId", { brandId, campaignId: { $in: rows.map((c) => String(String(c._id) || c._id)) }, ...activeAcceptedFilter() });
     const workingSet = new Set(workingIds.map(String));
 
     return res.json({
       data: rows.map((c) => {
         const tl = c.timeline || {};
         const state = (!tl.startDate && !tl.endDate) ? "none" : (tl.endDate && new Date(tl.endDate) < startOfTodayUTC) ? "expired" : "running";
-        return { ...c, computedIsActive: computeIsActive(c.timeline), timelineState: state, hasTimeline: state !== "none", influencerWorking: workingSet.has(String(c.campaignsId || "")) || workingSet.has(String(c._id || "")) };
+        return { ...c, computedIsActive: computeIsActive(c.timeline), timelineState: state, hasTimeline: state !== "none", influencerWorking: workingSet.has(String(String(c._id) || "")) || workingSet.has(String(c._id || "")) };
       }),
       pagination: { total, page: Math.max(parseInt(page, 10) || 1, 1), limit: Math.max(parseInt(limit, 10) || 10, 1), totalPages: Math.ceil(total / Math.max(parseInt(limit, 10) || 10, 1)) },
     });
@@ -2585,7 +2609,12 @@ exports.approveCampaignPendingUpdate = async (req, res) => {
     const actor = await resolveActorFromPayload(req);
     if (actor.role !== "admin") return res.status(403).json({ message: "Forbidden" });
 
-    const campaign = await Campaign.findOne({ campaignsId: req.query.id });
+    const campaignId = clean(req.query.id);
+    if (!campaignId || !isOid(campaignId)) {
+      return res.status(400).json({ message: "Valid campaign id is required." });
+    }
+
+    const campaign = await Campaign.findById(campaignId);
     if (!campaign) return res.status(404).json({ message: "Campaign not found." });
 
     if (campaign.pendingUpdate?.status !== "pending" || !campaign.pendingUpdate?.patch) {
@@ -2608,7 +2637,12 @@ exports.rejectCampaignPendingUpdate = async (req, res) => {
     if (!isAdminRequest(req)) return res.status(403).json({ message: "Forbidden" });
 
     const note = String(req.body?.note || "Rejected");
-    const campaign = await Campaign.findOne({ campaignsId: req.query.id });
+    const campaignId = clean(req.query.id);
+    if (!campaignId || !isOid(campaignId)) {
+      return res.status(400).json({ message: "Valid campaign id is required." });
+    }
+
+    const campaign = await Campaign.findById(campaignId);
     if (!campaign) return res.status(404).json({ message: "Campaign not found." });
 
     if (campaign.pendingUpdate?.status !== "pending") return res.status(400).json({ message: "No pending update to reject." });
@@ -2835,8 +2869,12 @@ exports.viewCampaignByIdForBrand = async (req, res) => {
       );
     }
 
+    if (!isOid(campaignId)) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
+    }
+
     const campaign = await Campaign.findOne({
-      campaignsId: campaignId,
+      _id: toObjectId(campaignId),
       brandId: toObjectId(tokenBrandId),
     });
 
@@ -2871,8 +2909,12 @@ exports.getRecommendedInfluencersByCampaignId = async (req, res) => {
     const limit = clampInt(req.body.limit, 20, 1, 100);
     const skip = (page - 1) * limit;
 
+    if (!isOid(campaignId)) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
+    }
+
     const campaign = await Campaign.findOne({
-      campaignsId: campaignId,
+      _id: new Types.ObjectId(campaignId),
       brandId: new Types.ObjectId(brandId),
     })
       .select("_id campaignsId brandId categoryId status")
@@ -2931,6 +2973,131 @@ exports.getRecommendedInfluencersByCampaignId = async (req, res) => {
           totalPages: Math.max(1, Math.ceil(total / limit)),
         },
       },
+      requestId
+    );
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
+  }
+};
+
+exports.updateStatus = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const brandId = clean(req.body.brandId);
+    const campaignId = clean(req.body.campaignId);
+    const statusRaw = clean(req.body.status);
+
+    if (!brandId || !isOid(brandId)) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid brandId is required", requestId);
+    }
+
+    if (!campaignId || !isOid(campaignId)) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
+    }
+
+    const allowedStatuses = ["draft", "active", "paused", "completed", "archived"];
+
+    if (!statusRaw || !allowedStatuses.includes(statusRaw)) {
+      return fail(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        `status must be one of: ${allowedStatuses.join(", ")}`,
+        requestId
+      );
+    }
+
+    const existing = await Campaign.findById(campaignId).select(
+      "_id status brandId publishedAt endedAt isActive isDraft publishStatus campaignStatus statusUpdatedAt"
+    );
+
+    if (!existing) {
+      return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
+    }
+
+    if (String(existing.brandId) !== String(brandId)) {
+      return fail(res, 404, "NOT_FOUND", "Campaign does not belong to this brand", requestId);
+    }
+
+    const currentStatus = existing.status;
+    const newStatus = statusRaw;
+
+    if (currentStatus === newStatus) {
+      return fail(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        `Campaign is already in '${newStatus}' status`,
+        requestId
+      );
+    }
+
+    if (currentStatus === "completed") {
+      return fail(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        "Completed campaign status cannot be changed",
+        requestId
+      );
+    }
+
+    if (currentStatus === "archived") {
+      return fail(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        "Archived campaign status cannot be changed",
+        requestId
+      );
+    }
+
+    existing.status = newStatus;
+    existing.statusUpdatedAt = new Date();
+
+    existing.isDraft = newStatus === "draft" ? 1 : 0;
+    existing.isActive = newStatus === "active" ? 1 : 0;
+
+    if (newStatus === "draft") {
+      existing.publishStatus = "draft";
+      existing.campaignStatus = "paused";
+      existing.publishedAt = undefined;
+      existing.endedAt = undefined;
+    }
+
+    if (newStatus === "active") {
+      existing.publishStatus = "published";
+      existing.campaignStatus = "open";
+      existing.publishedAt = existing.publishedAt || new Date();
+      existing.endedAt = undefined;
+    }
+
+    if (newStatus === "paused") {
+      existing.publishStatus = "published";
+      existing.campaignStatus = "paused";
+    }
+
+    if (newStatus === "completed") {
+      existing.publishStatus = "published";
+      existing.campaignStatus = "paused";
+      existing.isActive = 0;
+      existing.endedAt = existing.endedAt || new Date();
+    }
+
+    if (newStatus === "archived") {
+      existing.publishStatus = "archived";
+      existing.campaignStatus = "paused";
+      existing.isActive = 0;
+      existing.endedAt = existing.endedAt || new Date();
+    }
+
+    await existing.save();
+
+    return ApiResponse.sendOk(
+      res,
+      200,
+      { message: "Status updated successfully" },
       requestId
     );
   } catch (err) {

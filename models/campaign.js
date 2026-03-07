@@ -61,13 +61,6 @@ const categoryPairSchema = new Schema(
 
 const CampaignSchema = new Schema(
   {
-    campaignsId: {
-      type: String,
-      default: () => new mongoose.Types.ObjectId().toString(),
-      unique: true,
-      index: true,
-    },
-
     brandId: { type: Schema.Types.ObjectId, ref: "Brand", required: true, index: true },
     brandName: { type: String, trim: true, default: "" },
 
@@ -123,11 +116,9 @@ const CampaignSchema = new Schema(
     campaignTimezone: { type: String, trim: true, default: "UTC" },
     startAt: { type: Date, default: null },
     endAt: { type: Date, default: null },
-    scheduledAt: { type: Date, default: null },
     publishedAt: { type: Date, default: null },
 
     createdLocation: { type: locationSchema, default: null },
-    scheduledLocation: { type: locationSchema, default: null },
 
     timeline: { type: timelineSchema, default: () => ({}) },
     categories: { type: [categoryPairSchema], default: [] },
@@ -136,14 +127,14 @@ const CampaignSchema = new Schema(
 
     status: {
       type: String,
-      enum: ["draft", "scheduled", "active", "paused", "completed", "archived"],
+      enum: ["draft", "active", "paused", "completed", "archived"],
       default: "draft",
       index: true,
     },
 
     publishStatus: {
       type: String,
-      enum: ["draft", "scheduled", "published"],
+      enum: ["draft","published"],
       default: "draft",
       index: true,
     },
@@ -185,7 +176,7 @@ CampaignSchema.index({ brandId: 1, status: 1 });
 CampaignSchema.index({ brandId: 1, isDraft: 1, isActive: 1, createdAt: -1 });
 CampaignSchema.index({ "pendingUpdate.status": 1, updatedAt: -1 });
 CampaignSchema.index({ categoryId: 1, subcategoryIds: 1 });
-CampaignSchema.index({ publishStatus: 1, scheduledAt: 1 });
+CampaignSchema.index({ publishStatus: 1});
 CampaignSchema.index({ campaignStatus: 1, isDraft: 1, isActive: 1 });
 
 module.exports =
