@@ -3130,17 +3130,18 @@ exports.viewCampaignByIdForBrand = async (req, res) => {
     return sendControllerError(res, requestId, err);
   }
 };
+
 exports.getRecommendedInfluencersByCampaignId = async (req, res) => {
   const requestId = getRequestId(req);
 
   try {
-    const brandId = clean(req.body.brandId);
-    if (!brandId || !Types.ObjectId.isValid(brandId)) {
+    const brandIdRaw = clean(req.body.brandId);
+    if (!brandIdRaw || !Types.ObjectId.isValid(brandIdRaw)) {
       return fail(res, 400, "VALIDATION_ERROR", "Valid brandId is required", requestId);
     }
 
-    const campaignId = clean(req.body.campaignId);
-    if (!campaignId) {
+    const campaignIdRaw = clean(req.body.campaignId);
+    if (!campaignIdRaw) {
       return fail(res, 400, "VALIDATION_ERROR", "campaignId is required", requestId);
     }
 
@@ -3148,13 +3149,28 @@ exports.getRecommendedInfluencersByCampaignId = async (req, res) => {
     const limit = clampInt(req.body.limit, 20, 1, 100);
     const skip = (page - 1) * limit;
 
-    if (!isOid(campaignId)) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
+    const brandObjectId = new Types.ObjectId(brandIdRaw);
+
+    const campaignOr = [];
+
+    // support Mongo _id
+    if (Types.ObjectId.isValid(campaignIdRaw)) {
+      campaignOr.push({ _id: new Types.ObjectId(campaignIdRaw) });
     }
 
+    // support legacy campaignsId
+    campaignOr.push({ campaignsId: campaignIdRaw });
+
     const campaign = await Campaign.findOne({
-      _id: new Types.ObjectId(campaignId),
-      brandId: new Types.ObjectId(brandId),
+      $and: [
+        { $or: campaignOr },
+        {
+          $or: [
+            { brandId: brandObjectId },   // if stored as ObjectId
+            { brandId: brandIdRaw },      // if stored as string
+          ],
+        },
+      ],
     })
       .select("_id campaignsId brandId categoryId status")
       .lean();
@@ -3204,6 +3220,7 @@ exports.getRecommendedInfluencersByCampaignId = async (req, res) => {
       res,
       200,
       {
+        campaignId: String(campaign._id),
         items: out,
         meta: {
           total,

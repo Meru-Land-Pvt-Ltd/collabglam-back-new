@@ -13,8 +13,6 @@ const NamedRefSchema = new Schema(
 
 const InfluencerSchema = new Schema(
   {
-    // ✅ influencerId (UUID v4)
-    influencerId: { type: String, required: true, unique: true, default: uuidv4 },
 
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     name: { type: String, trim: true },
