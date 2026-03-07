@@ -4,8 +4,6 @@ const multer = require("multer");
 const OpenAI = require("openai");
 const { DateTime } = require("luxon");
 
-const { uploadToGridFS } = require("../utils/gridfs");
-
 const Campaign = require("../models/campaign");
 const Brand = require("../models/brand");
 const { CategoryModel } = require("../models/categories");
@@ -450,6 +448,194 @@ const enrichCampaigns = async (itemsRaw) => {
   });
 };
 
+const buildCampaignLookupFilter = (campaignId, brandObjectId) => {
+  const raw = clean(campaignId);
+  const or = [{ campaignsId: raw }];
+
+  if (mongoose.Types.ObjectId.isValid(raw)) {
+    or.push({ _id: toObjectId(raw) });
+  }
+
+  const filter = { $or: or };
+  if (brandObjectId) filter.brandId = brandObjectId;
+  return filter;
+};
+
+const parseCampaignWindowForUpdate = (body, tz, requestId, res, opts = {}) => {
+  const startAtUtc = toUtcDateFromAny(body.startAt, tz);
+  const endAtUtc = toUtcDateFromAny(body.endAt, tz);
+
+  if (!startAtUtc) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "startAt", requestId),
+    };
+  }
+
+  if (!endAtUtc) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId),
+    };
+  }
+
+  if (startAtUtc.getTime() >= endAtUtc.getTime()) {
+    return {
+      ok: false,
+      resp: failField(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "endAt",
+        requestId,
+        "startAt must be < endAt"
+      ),
+    };
+  }
+
+  if (!opts.allowPastStart) {
+    const c1 = assertNotPastUtc(startAtUtc, tz, "startAt");
+    if (!c1.ok) {
+      return {
+        ok: false,
+        resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "startAt", requestId, c1.message),
+      };
+    }
+  }
+
+  const c2 = assertNotPastUtc(endAtUtc, tz, "endAt");
+  if (!c2.ok) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId, c2.message),
+    };
+  }
+
+  return { ok: true, value: { startAt: startAtUtc, endAt: endAtUtc } };
+};
+
+const buildCampaignUpdatePatch = (body, existing, status, timing, extra = {}) => {
+  const budget = toNumber(body.campaignBudget);
+  const numInfluencers = toInt(body.numberOfInfluencers);
+  const minFollowers = toInt(body.minFollowers);
+  const maxFollowers = toInt(body.maxFollowers);
+
+  const toOidOrFallback = (value, fallback) => {
+    const s = clean(value);
+    return s && isOid(s) ? toObjectId(s) : fallback;
+  };
+
+  const toOidArrayOrFallback = (value, fallback = []) => {
+    const arr = normalizeObjectIdArray(value).map((x) => toObjectId(x));
+    return arr.length ? arr : fallback;
+  };
+
+  const patch = {
+    campaignTitle: clean(body.campaignTitle) || existing.campaignTitle,
+    productOrServiceName: clean(body.campaignTitle) || existing.productOrServiceName,
+
+    description: clean(body.description) || existing.description,
+    campaignType: clean(body.campaignType) || existing.campaignType || "",
+
+    categoryId: toOidOrFallback(body.categoryId, existing.categoryId),
+    subcategoryIds: toOidArrayOrFallback(body.subcategoryIds, existing.subcategoryIds || []),
+
+    productImages: toUnknownArray(body.productImages).length
+      ? toUnknownArray(body.productImages)
+      : toUnknownArray(existing.productImages || existing.images),
+
+    images: toUnknownArray(body.productImages).length
+      ? toUnknownArray(body.productImages)
+      : toUnknownArray(existing.images || existing.productImages),
+
+    productLink: clean(body.productLink),
+    videoLink: clean(body.videoLink),
+
+    campaignGoals: toOidArrayOrFallback(body.campaignGoals, existing.campaignGoals || []),
+    influencerTierIds: toOidArrayOrFallback(body.influencerTierIds, existing.influencerTierIds || []),
+    contentFormats: toOidArrayOrFallback(body.contentFormats, existing.contentFormats || []),
+    contentLanguageIds: toOidArrayOrFallback(body.contentLanguageIds, existing.contentLanguageIds || []),
+    preferredHashtags: toOidArrayOrFallback(body.preferredHashtags, existing.preferredHashtags || []),
+
+    platformSelection: toPlatformArray(body.platformSelection),
+    targetCountryIds: toOidArrayOrFallback(body.targetCountryIds, existing.targetCountryIds || []),
+    targetAgeRanges: toOidArrayOrFallback(body.targetAgeRanges, existing.targetAgeRanges || []),
+
+    paymentType: clean(body.paymentType)
+      ? normalizePaymentType(body.paymentType)
+      : existing.paymentType,
+
+    campaignBudget: Number.isFinite(budget) ? budget : existing.campaignBudget,
+    budget: Number.isFinite(budget) ? budget : existing.budget,
+
+    numberOfInfluencers: Number.isFinite(numInfluencers)
+      ? numInfluencers
+      : existing.numberOfInfluencers,
+
+    minFollowers:
+      Number.isFinite(minFollowers) && minFollowers > 0
+        ? minFollowers
+        : existing.minFollowers,
+
+    maxFollowers:
+      Number.isFinite(maxFollowers) && maxFollowers > 0
+        ? maxFollowers
+        : existing.maxFollowers,
+
+    additionalNotes: clean(body.additionalNotes),
+
+    status,
+    campaignTimezone: clean(body.campaignTimezone) || existing.campaignTimezone || DEFAULT_CAMPAIGN_TZ,
+
+    isDraft: status === "draft" ? 1 : 0,
+    isActive: status === "active" ? 1 : 0,
+    publishStatus: status === "draft" ? "draft" : status === "scheduled" ? "scheduled" : "published",
+    campaignStatus: status === "active" ? "open" : existing.campaignStatus || "paused",
+    statusUpdatedAt: new Date(),
+  };
+
+  if (extra.categoryName) {
+    patch.campaignCategory = extra.categoryName;
+  }
+
+  if (Array.isArray(extra.subcategoryNames) && extra.subcategoryNames.length) {
+    patch.campaignSubcategory = extra.subcategoryNames.join(", ");
+    patch.categories = extra.subcategoryNames.map((subName, idx) => ({
+      categoryId: String(body.categoryId || existing.categoryId || ""),
+      categoryName: extra.categoryName || "",
+      subcategoryId: String(normalizeObjectIdArray(body.subcategoryIds)[idx] || ""),
+      subcategoryName: subName,
+    }));
+  }
+
+  if (timing?.startAt) patch.startAt = timing.startAt;
+  if (timing?.endAt) patch.endAt = timing.endAt;
+
+  patch.timeline = {
+    startDate: timing?.startAt || existing.startAt || existing.timeline?.startDate,
+    endDate: timing?.endAt || existing.endAt || existing.timeline?.endDate,
+  };
+
+  if (status === "active") {
+    patch.publishedAt = existing.publishedAt || new Date();
+    patch.scheduledAt = undefined;
+    patch.scheduledLocation = undefined;
+  }
+
+  if (status === "draft") {
+    patch.publishedAt = undefined;
+    patch.scheduledAt = undefined;
+    patch.scheduledLocation = undefined;
+  }
+
+  if (status === "scheduled") {
+    patch.scheduledAt = timing?.scheduledAt;
+    patch.scheduledLocation = existing.createdLocation;
+  }
+
+  return patch;
+};
+
 const toUtcDateFromAny = (v, tz) => {
   if (!v) return null;
   if (v instanceof Date) return Number.isFinite(v.getTime()) ? v : null;
@@ -508,7 +694,7 @@ const inferMode = (statusRaw, scheduledAt) => {
   return "publish";
 };
 
-const validateForMode = async (res, requestId, mode, body) => {
+const validateForMode = async (res, requestId, mode, body, opts = {}) => {
   const brandIdR = requireObjectId(res, requestId, "brandId", body.brandId);
   if (!brandIdR.ok) return { ok: false, resp: brandIdR.resp };
 
@@ -546,8 +732,15 @@ const validateForMode = async (res, requestId, mode, body) => {
     };
   }
 
-  const imgsR = requireArray(res, requestId, "productImages", body.productImages);
-  if (!imgsR.ok) return { ok: false, resp: imgsR.resp };
+const existingProductImages = toUnknownArray(opts.existingProductImages);
+const incomingProductImages = toUnknownArray(body.productImages);
+
+if (mode !== "draft" && !incomingProductImages.length && !existingProductImages.length) {
+  return {
+    ok: false,
+    resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "productImages", requestId),
+  };
+}
 
   const link = clean(body.productLink);
   if (link && !isValidHttpUrl(link)) {
@@ -2825,58 +3018,45 @@ exports.viewCampaignByIdForBrand = async (req, res) => {
   try {
     const user = req.user || {};
 
-    const tokenBrandId = String(
+    const tokenBrandRaw = String(
       user.brandId ?? user.id ?? user._id ?? user.userId ?? ""
     ).trim();
 
-    if (!tokenBrandId || !Types.ObjectId.isValid(tokenBrandId)) {
-      return fail(res, 401, "UNAUTHORIZED", "Invalid brand token", requestId, {
-        hasUser: !!req.user,
-        tokenKeys: Object.keys(user || {}),
-      });
+    if (!tokenBrandRaw) {
+      return fail(res, 401, "UNAUTHORIZED", "Invalid brand token", requestId);
+    }
+
+    const tokenBrandDoc = await findBrandDocByAnyId(tokenBrandRaw);
+    if (!tokenBrandDoc) {
+      return fail(res, 401, "UNAUTHORIZED", "Brand not found from token", requestId);
     }
 
     const bodyBrandId = clean(req.body.brandId);
-    if (!bodyBrandId || !Types.ObjectId.isValid(bodyBrandId)) {
-      return fail(
-        res,
-        400,
-        "VALIDATION_ERROR",
-        "Valid brandId is required",
-        requestId
-      );
+    if (!bodyBrandId) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid brandId is required", requestId);
     }
 
-    if (bodyBrandId !== tokenBrandId) {
-      return fail(
-        res,
-        403,
-        "FORBIDDEN",
-        "brandId does not match token",
-        requestId
-      );
+    const bodyBrandDoc = await findBrandDocByAnyId(bodyBrandId);
+    if (!bodyBrandDoc) {
+      return fail(res, 404, "NOT_FOUND", "Brand not found", requestId);
+    }
+
+    if (String(tokenBrandDoc._id) !== String(bodyBrandDoc._id)) {
+      return fail(res, 403, "FORBIDDEN", "brandId does not match token", requestId);
     }
 
     const campaignId = clean(req.body.campaignId);
-
     if (!campaignId) {
-      return fail(
-        res,
-        400,
-        "VALIDATION_ERROR",
-        "campaignId is required",
-        requestId
-      );
+      return fail(res, 400, "VALIDATION_ERROR", "campaignId is required", requestId);
     }
 
     if (!isOid(campaignId)) {
       return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
     }
 
-    const campaign = await Campaign.findOne({
-      _id: toObjectId(campaignId),
-      brandId: toObjectId(tokenBrandId),
-    });
+    const campaign = await Campaign.findOne(
+      buildCampaignLookupFilter(campaignId, bodyBrandDoc._id)
+    );
 
     if (!campaign) {
       return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
@@ -2889,8 +3069,6 @@ exports.viewCampaignByIdForBrand = async (req, res) => {
     return sendControllerError(res, requestId, err);
   }
 };
-
-
 exports.getRecommendedInfluencersByCampaignId = async (req, res) => {
   const requestId = getRequestId(req);
 
@@ -3104,3 +3282,113 @@ exports.updateStatus = async (req, res) => {
     return sendControllerError(res, requestId, err);
   }
 };
+
+exports.updateManualCampaign = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const bodyBrandId = clean(req.body.brandId);
+    if (!bodyBrandId) {
+      return failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "brandId", requestId);
+    }
+
+    const brandDoc = await findBrandDocByAnyId(bodyBrandId);
+    if (!brandDoc) {
+      return fail(res, HttpStatus.NOT_FOUND, "NOT_FOUND", "Brand not found", requestId);
+    }
+
+    const campaignId = clean(req.body.campaignId);
+    if (!campaignId) {
+      return failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "campaignId", requestId);
+    }
+
+    const existingCampaign = await Campaign.findOne(
+      buildCampaignLookupFilter(campaignId, brandDoc._id)
+    );
+
+    if (!existingCampaign) {
+      return fail(res, HttpStatus.NOT_FOUND, "NOT_FOUND", "Campaign not found", requestId);
+    }
+
+    const campaignTz = getCampaignTimezone(req.body, existingCampaign.campaignTimezone);
+    req.body.campaignTimezone = campaignTz;
+
+    const status = pickStatus(req.body.status || existingCampaign.status || "active");
+    const mode = status === "scheduled" ? "schedule" : status === "draft" ? "draft" : "publish";
+
+    const v = await validateForMode(res, requestId, mode, req.body, {
+      existingProductImages: existingCampaign.productImages || existingCampaign.images || [],
+    });
+    if (!v.ok) return v.resp;
+
+    let timing = {};
+
+    if (status === "draft") {
+      timing = parseDraftWindowSoft(req.body, campaignTz);
+    } else if (status === "scheduled") {
+      const sch = parseSchedule(req.body, campaignTz, requestId, res);
+      if (!sch.ok) return sch.resp;
+      timing = sch.value;
+    } else {
+      const win = parseCampaignWindowForUpdate(req.body, campaignTz, requestId, res, {
+        allowPastStart: true,
+      });
+      if (!win.ok) return win.resp;
+      timing = win.value;
+    }
+
+    const rel = await resolveCategoryAndSubcategories(
+      clean(req.body.categoryId),
+      normalizeObjectIdArray(req.body.subcategoryIds)
+    );
+
+    if (rel.error) {
+      return failField(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "subcategoryIds",
+        requestId,
+        rel.error
+      );
+    }
+
+    const mergedBody = {
+      ...req.body,
+      productImages: toUnknownArray(req.body.productImages).length
+        ? req.body.productImages
+        : existingCampaign.productImages || existingCampaign.images || [],
+    };
+
+    const patch = buildCampaignUpdatePatch(
+      mergedBody,
+      existingCampaign,
+      status,
+      timing,
+      {
+        categoryName: rel?.cat?.name || "",
+        subcategoryNames: Array.isArray(rel?.subs)
+          ? rel.subs.map((s) => String(s.name || ""))
+          : [],
+      }
+    );
+
+    Object.assign(existingCampaign, patch);
+    await existingCampaign.save();
+
+    const enriched = (await enrichCampaigns([existingCampaign]))[0];
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.OK,
+      {
+        message: "Campaign updated successfully.",
+        doc: enriched,
+      },
+      requestId
+    );
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
+  }
+};
+
