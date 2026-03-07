@@ -236,11 +236,11 @@ exports.getBrandDashboardHome = async (req, res) => {
       return res.status(404).json({ error: "Brand not found" });
     }
 
-    // 2) All campaigns (non-draft) - updated fields from new schema
+    // 2) All campaigns (non-draft)
     const allCampaigns = await Campaign.find(
       { ...brandFilter("brandId", brandObjectId), isDraft: { $ne: 1 } },
       `
-        campaignsId
+        _id
         campaignTitle
         campaignGoals
         campaignBudget
@@ -260,7 +260,7 @@ exports.getBrandDashboardHome = async (req, res) => {
     const totalCreatedCampaigns = allCampaigns.length;
 
     const campaignIds = allCampaigns
-      .map((c) => String(c.campaignsId || ""))
+      .map((c) => String(c._id || ""))
       .filter(Boolean);
 
     // 2.1) Resolve campaign goal names
@@ -283,7 +283,7 @@ exports.getBrandDashboardHome = async (req, res) => {
       goalMap = new Map(goals.map((g) => [String(g._id), g.goal]));
     }
 
-    // 3) Accepted contracts -> latest per campaign (exclude rejected/superseded)
+    // 3) Accepted contracts -> latest per campaign
     const acceptedContracts = await Contract.find(
       acceptedContractFilter({ ...brandFilter("brandId", brandObjectId) }),
       "campaignId contractId influencerId lastActionAt createdAt"
@@ -355,7 +355,7 @@ exports.getBrandDashboardHome = async (req, res) => {
 
     // 5) Show list rule
     const anyUnaccepted = allCampaigns.some((camp) => {
-      const id = String(camp.campaignsId || "");
+      const id = String(camp._id || "");
       return id && !acceptedCampaignIds.has(id);
     });
 
@@ -364,10 +364,10 @@ exports.getBrandDashboardHome = async (req, res) => {
 
     const baseList = showAll
       ? allCampaigns
-      : allCampaigns.filter((c) => acceptedCampaignIds.has(String(c.campaignsId || "")));
+      : allCampaigns.filter((c) => acceptedCampaignIds.has(String(c._id || "")));
 
     const campaigns = baseList.map((c) => {
-      const id = String(c.campaignsId || "");
+      const id = String(c._id || "");
       const meta = contractByCampaign.get(id) || {};
 
       const goalNames = (Array.isArray(c.campaignGoals) ? c.campaignGoals : [])
@@ -375,8 +375,8 @@ exports.getBrandDashboardHome = async (req, res) => {
         .filter(Boolean);
 
       return {
-        id,
-        campaignsId: id,
+        // campaignId: id,
+        id, // optional
 
         campaignTitle: c.campaignTitle || "",
         productOrServiceName: c.campaignTitle || "",
@@ -413,7 +413,7 @@ exports.getBrandDashboardHome = async (req, res) => {
           c.status !== "draft" &&
           c.status !== "archived"
       )
-      .map((c) => String(c.campaignsId || ""))
+      .map((c) => String(c._id || ""))
       .filter(Boolean);
 
     let totalHiredInfluencers = 0;

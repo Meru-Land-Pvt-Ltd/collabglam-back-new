@@ -732,15 +732,15 @@ const validateForMode = async (res, requestId, mode, body, opts = {}) => {
     };
   }
 
-const existingProductImages = toUnknownArray(opts.existingProductImages);
-const incomingProductImages = toUnknownArray(body.productImages);
+  const existingProductImages = toUnknownArray(opts.existingProductImages);
+  const incomingProductImages = toUnknownArray(body.productImages);
 
-if (mode !== "draft" && !incomingProductImages.length && !existingProductImages.length) {
-  return {
-    ok: false,
-    resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "productImages", requestId),
-  };
-}
+  if (mode !== "draft" && !incomingProductImages.length && !existingProductImages.length) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "productImages", requestId),
+    };
+  }
 
   const link = clean(body.productLink);
   if (link && !isValidHttpUrl(link)) {
@@ -2150,18 +2150,78 @@ exports.getCampaignById = async (req, res) => {
 // ================================
 //  DELETE CAMPAIGN BY campaignsId
 // ================================
-exports.deleteCampaign = async (req, res) => {
+exports.deleteCampaignByCampaignId = async (req, res) => {
+  const requestId = getRequestId(req);
+
   try {
-    const campaignId = clean(req.query.id);
-    if (!campaignId || !isOid(campaignId)) {
-      return res.status(400).json({ message: 'Valid campaign id is required.' });
+    const brandId = clean(req.body.brandId);
+    const campaignId = clean(req.body.campaignId);
+
+    if (!brandId || !isOid(brandId)) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid brandId is required", requestId);
     }
 
-    const deleted = await Campaign.findByIdAndDelete(campaignId);
-    if (!deleted) return res.status(404).json({ message: 'Campaign not found.' });
-    return res.json({ message: 'Campaign deleted successfully.' });
-  } catch (error) {
-    return res.status(500).json({ message: 'Internal server error.' });
+    if (!campaignId || !isOid(campaignId)) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
+    }
+
+    const campaign = await Campaign.findOne({
+      _id: toObjectId(campaignId),
+      brandId: toObjectId(brandId),
+    }).select("_id status campaignTitle");
+
+    if (!campaign) {
+      return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
+    }
+
+    const contractDoc = await Contract.findOne({
+      campaignId: toObjectId(campaignId),
+      brandId: toObjectId(brandId),
+    })
+      .select("_id contracts")
+      .lean();
+
+    const hasAnyContract = !!(
+      contractDoc?.contracts?.length && contractDoc.contracts.length > 0
+    );
+
+    if (hasAnyContract && campaign.status !== "completed") {
+      return fail(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        "Contract is sent; delete only after campaign is completed.",
+        requestId
+      );
+    }
+
+    await Promise.all([
+      Campaign.deleteOne({
+        _id: campaign._id,
+        brandId: toObjectId(brandId),
+      }),
+      Contract.deleteOne({
+        campaignId: toObjectId(campaignId),
+        brandId: toObjectId(brandId),
+      }),
+    ]);
+
+    return ApiResponse.sendOk(
+      res,
+      200,
+      {
+        message: "Campaign deleted successfully",
+        deleted: {
+          campaignId: String(campaign._id),
+          campaignTitle: campaign.campaignTitle,
+          status: campaign.status,
+          hadContracts: hasAnyContract,
+        },
+      },
+      requestId
+    );
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
   }
 };
 

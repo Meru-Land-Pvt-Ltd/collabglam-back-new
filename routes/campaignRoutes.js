@@ -21,7 +21,7 @@ router.get("/getAll", brandAuth, campaignController.getAllCampaigns);
 router.get("/id", brandAuth, campaignController.getCampaignById);
 
 // 5. Delete a campaign by its campaignsId
-router.post("/delete", brandAuth, campaignController.deleteCampaign);
+router.post("/delete", brandAuth, campaignController.deleteCampaignByCampaignId);
 
 router.get("/active", brandAuth, campaignController.getActiveCampaignsByBrand);
 router.get("/previous", brandAuth, campaignController.getPreviousCampaigns);
