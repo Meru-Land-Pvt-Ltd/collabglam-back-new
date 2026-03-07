@@ -1,5 +1,5 @@
 // controllers/category.controller.js
-const Category = require('../models/categories');
+const {CategoryModel:Category} = require('../models/categories');
 
 // GET /categories
 // Returns every category with its subcategories (id, name, subcategoryId, subcategory name)
