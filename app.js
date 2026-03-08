@@ -61,7 +61,7 @@ app.set('broadcastToRoom', sockets.legacyBroadcastToRoom);
 
 // ====== Express middleware ======
 app.use(cors({
-  origin: process.env.FRONTEND_ORIGIN || ['https://collabglam.com', 'http://localhost:3000', 'http://localhost:3001', 'https://mhd.sharemitra.com'],
+  origin: process.env.FRONTEND_ORIGIN || ['https://collabglam.cloud', 'http://localhost:3000', 'http://localhost:3001', 'https://mhd.sharemitra.com'],
   credentials: true
 }));
 
@@ -118,7 +118,7 @@ app.use((err, req, res, next) => {
 });
 
 /* Mongo & start */
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 8000;
 startReminderCron();
 
 mongoose.connect(process.env.MONGODB_URI)
