@@ -1,10 +1,7 @@
-// src/model/category.js
-
 const mongoose = require("mongoose");
 const { Schema, model } = mongoose;
 
 const SubcategorySchema = new Schema({
-  // ✅ mongoose will auto-generate _id for each subcategory item
   name: { type: String, required: true, trim: true },
   tags: { type: [String], default: [] },
 });
@@ -18,13 +15,11 @@ const CategorySchema = new Schema(
   { timestamps: true }
 );
 
-// Unique category name (case-insensitive via collation)
 CategorySchema.index(
   { name: 1 },
   { unique: true, collation: { locale: "en", strength: 2 } }
 );
 
-// Full-text search index
 CategorySchema.index(
   {
     name: "text",
@@ -44,7 +39,6 @@ CategorySchema.pre("validate", function () {
   doc.name = norm(doc.name);
   if (!doc.name) throw new Error("Category name cannot be empty");
 
-  // globalTags unique + normalized
   {
     const seen = new Set();
     doc.globalTags = (doc.globalTags ?? [])
@@ -57,7 +51,6 @@ CategorySchema.pre("validate", function () {
       });
   }
 
-  // subcategories unique + tags unique inside each subcategory
   {
     const seenSubs = new Set();
     doc.subcategories = (doc.subcategories ?? []).map((s) => {
@@ -78,12 +71,11 @@ CategorySchema.pre("validate", function () {
           return true;
         });
 
-      // ✅ preserve mongoose _id if exists
-      return { ...s.toObject?.() ?? s, name, tags };
+      return { ...(s.toObject?.() ?? s), name, tags };
     });
   }
 });
 
-const CategoryModel = model("Category", CategorySchema);
+const Category = model("Category", CategorySchema);
 
-module.exports = { CategoryModel };
+module.exports = { Category };

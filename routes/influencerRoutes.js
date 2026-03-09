@@ -34,7 +34,7 @@ const {
 router.post('/request-otp', sendSignupOtpInfluencer);
 router.post('/verify-otp', verifyOtpSignUpInfluencer);
 router.post('/register', uploadProfileImage, registerInfluencer);
-router.post('/onboarding', verifyToken,saveQuickOnboarding);
+router.post('/save-influencer-onboarding',saveQuickOnboarding);
 
 
 router.post('/login', signInInfluencer);

@@ -20,8 +20,9 @@ const influencerExport = require("../models/influencer");
 const InfluencerModel =
   influencerExport.InfluencerModel || influencerExport.default || influencerExport;
 
-console.log("DEBUG InfluencerModel.findOne type:", typeof InfluencerModel.findOne);const Category = require('../models/categories');
+// console.log("DEBUG InfluencerModel.findOne type:", typeof InfluencerModel.findOne);const Category = require('../models/categories');
 const Country = require('../models/country');
+const { Category } = require("../models/categories");
 const Language = require('../models/language');
 const VerifyOtpModel = require('../models/verifyEmail');
 const ApplyCampaign = require('../models/applyCampaign');
@@ -422,10 +423,7 @@ exports.uploadProfileImage = upload.single('profileImage');
 
 exports.sendSignupOtpInfluencer = async (req, res) => {
   try {
-    const { email, name, password, countryId, languageIds, categoryIds } = req.body;
-    console.log("InfluencerModel.findOne:", typeof InfluencerModel.findOne);
-    console.log("VerifyOtpModel.findOne:", typeof VerifyOtpModel.findOne);
-    // ✅ email validation back ON (recommended)
+    const { email, name, password, countryId, languageIds, categoryIds } = req.body;    // ✅ email validation back ON (recommended)
     if (!email || !isValidEmail(email)) {
       return res.status(400).json({ message: "Valid email is required" });
     }
@@ -561,34 +559,33 @@ console.log("Determined countryName:", countryName);
 exports.verifyOtpSignUpInfluencer = async (req, res) => {
   let otpDoc = null;
   let createdInfluencer = null;
+  let otpClaimed = false;
 
   try {
     const { email, otp, location } = req.body;
 
-    // ✅ Pre-check JWT before ANY create happens
     const secret = process.env.JWT_SECRET;
     if (!secret) {
       return res.status(500).json({ message: "JWT_SECRET is missing in env" });
     }
+
     const expiresIn = process.env.JWT_EXPIRES_IN || "7d";
 
-    // ✅ validations
     if (!email || !isValidEmail(email)) {
       return res.status(400).json({ message: "Valid email is required" });
     }
+
     if (!otp || !/^\d{6}$/.test(String(otp))) {
       return res.status(400).json({ message: "Valid 6-digit OTP is required" });
     }
 
-    const normalizedEmail = String(email).toLowerCase().trim();
+    const normalizedEmail = String(email).trim().toLowerCase();
 
-    // ✅ already registered?
     const existing = await InfluencerModel.exists({ email: normalizedEmail });
     if (existing) {
       return res.status(409).json({ message: "Email already registered. Please Login." });
     }
 
-    // ✅ get latest OTP doc
     otpDoc = await VerifyOtpModel.findOne({
       email: normalizedEmail,
       role: "influencer",
@@ -603,19 +600,16 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
       return res.status(400).json({ message: "OTP not requested" });
     }
 
-    // ✅ TTL check
     const ageMs = Date.now() - new Date(otpDoc.createdAt).getTime();
     if (ageMs > OTP_TTL_MIN * 60 * 1000) {
       return res.status(400).json({ message: "OTP expired. Please resend otp." });
     }
 
-    // ✅ OTP hash check
-    const incomingHash = hashOtp(normalizedEmail, String(otp));
+    const incomingHash = hashOtp(normalizedEmail, String(otp).trim());
     if (incomingHash !== otpDoc.otp) {
       return res.status(400).json({ message: "Invalid OTP" });
     }
 
-    // ✅ CLAIM OTP (prevents double-use/race). status 2 = processing
     const claim = await VerifyOtpModel.updateOne(
       { _id: otpDoc._id, status: 0 },
       { $set: { status: 2 } }
@@ -625,20 +619,36 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
       return res.status(409).json({ message: "OTP already used or being processed" });
     }
 
-    // ✅ payload validations
+    otpClaimed = true;
+
     const payload = otpDoc.signupPayload || {};
     const countryName = payload?.country?.name;
 
+    if (!payload?.name || !String(payload.name).trim()) {
+      await VerifyOtpModel.updateOne(
+        { _id: otpDoc._id, status: 2 },
+        { $set: { status: 0 } }
+      );
+      return res.status(400).json({
+        message: "Signup details missing (name). Please request OTP again.",
+      });
+    }
+
     if (!countryName) {
-      // revert claim
-      await VerifyOtpModel.updateOne({ _id: otpDoc._id, status: 2 }, { $set: { status: 0 } });
+      await VerifyOtpModel.updateOne(
+        { _id: otpDoc._id, status: 2 },
+        { $set: { status: 0 } }
+      );
       return res.status(400).json({
         message: "Signup details missing (country). Please request OTP again.",
       });
     }
 
     if (!payload?.password) {
-      await VerifyOtpModel.updateOne({ _id: otpDoc._id, status: 2 }, { $set: { status: 0 } });
+      await VerifyOtpModel.updateOne(
+        { _id: otpDoc._id, status: 2 },
+        { $set: { status: 0 } }
+      );
       return res.status(400).json({
         message: "Signup details missing (password). Please request OTP again.",
       });
@@ -647,34 +657,44 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
     const cleanLanguages = Array.isArray(payload?.languages)
       ? payload.languages
           .filter((l) => l && typeof l.name === "string" && l.name.trim().length > 0)
-          .map((l) => ({ _id: l._id || undefined, name: String(l.name).trim() }))
+          .map((l) => ({
+            _id: l._id || undefined,
+            name: String(l.name).trim(),
+          }))
       : [];
 
     const cleanCategories = Array.isArray(payload?.categories)
       ? payload.categories
           .filter((c) => c && typeof c.name === "string" && c.name.trim().length > 0)
-          .map((c) => ({ _id: c._id || undefined, name: String(c.name).trim() }))
+          .map((c) => ({
+            _id: c._id || undefined,
+            name: String(c.name).trim(),
+          }))
       : [];
 
-    // ✅ create influencer
     createdInfluencer = await InfluencerModel.create({
       email: normalizedEmail,
-      name: payload?.name,
+      name: String(payload.name).trim(),
       location: location || "",
       countryId: payload?.country?._id || undefined,
       countryName: String(countryName).trim(),
       languages: cleanLanguages,
       categories: cleanCategories,
-      password: payload.password, // already hashed in signupPayload
+      password: payload.password,
     });
 
-    // ✅ mark OTP used (status 1)
     await VerifyOtpModel.updateOne(
       { _id: otpDoc._id, status: 2 },
-      { $set: { status: 1, userId: createdInfluencer._id } }
+      {
+        $set: {
+          status: 1,
+          userId: createdInfluencer._id,
+        },
+      }
     );
 
-    // ✅ token
+    otpClaimed = false;
+
     const token = jwt.sign(
       {
         influencerId: createdInfluencer._id.toString(),
@@ -685,7 +705,6 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
       { expiresIn }
     );
 
-    // ✅ route (safe fallback)
     const routeInfo =
       typeof computeInfluencerNextRoute === "function"
         ? computeInfluencerNextRoute(createdInfluencer)
@@ -705,7 +724,6 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
   } catch (err) {
     console.error("verifyOtpSignUpInfluencer error:", err);
 
-    // ✅ ROLLBACK if influencer got created but something later failed
     if (createdInfluencer?._id) {
       try {
         await InfluencerModel.deleteOne({ _id: createdInfluencer._id });
@@ -714,18 +732,23 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
       }
     }
 
-    // ✅ Revert OTP claim (status 2 -> 0) if we had claimed it
-    if (otpDoc?._id) {
+    if (otpClaimed && otpDoc?._id) {
       try {
-        await VerifyOtpModel.updateOne({ _id: otpDoc._id, status: 2 }, { $set: { status: 0 } });
+        await VerifyOtpModel.updateOne(
+          { _id: otpDoc._id, status: 2 },
+          { $set: { status: 0 } }
+        );
       } catch (e) {
         console.error("Rollback otp revert failed:", e);
       }
     }
 
-    // duplicate key safety (email unique)
-    if (err && err.code === 11000) {
-      return res.status(409).json({ message: "Email already registered. Please Login." });
+    if (err?.code === 11000) {
+      if (err?.keyPattern?.email) {
+        return res.status(409).json({ message: "Email already registered. Please Login." });
+      }
+
+      return res.status(409).json({ message: "Duplicate data found. Please try again." });
     }
 
     return res.status(500).json({ message: "Internal server error" });
