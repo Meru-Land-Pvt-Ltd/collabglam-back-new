@@ -338,7 +338,6 @@ async function sendSignupOtp(req, res, next) {
     const { brandName, name, email, companySize, industry, password } = req.body || {};
 
     if (!brandName || !String(brandName).trim()) throw new ValidationError("Brand Name is required");
-    if (!name || !String(name).trim()) throw new ValidationError("Name is required");
     if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
     if (!industry || !String(industry).trim()) throw new ValidationError("Industry is required");
     if (!password || !String(password).trim()) throw new ValidationError("Password is required");

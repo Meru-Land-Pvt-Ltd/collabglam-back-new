@@ -74,7 +74,7 @@ const brandSchema = new Schema(
     },
 
     brandName: { type: String, required: true, trim: true },
-    name: { type: String, required: true, trim: true },
+    name: { type: String, trim: true },
 
     // optional (choose enum or plain string)
     companySize: { type: String, required: false, trim: true },
