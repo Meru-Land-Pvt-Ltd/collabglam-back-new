@@ -234,7 +234,7 @@ const toPlatformArray = (v) => {
 };
 
 const resolveCategoryAndSubcategories = async (categoryId, subIds) => {
-  const cat = await CategoryModel.findById(categoryId)
+  const cat = await Category.findById(categoryId)
     .select("_id name subcategories")
     .lean();
 
@@ -331,7 +331,7 @@ const enrichCampaigns = async (itemsRaw) => {
 
   const [cats, goals, tiers, formats, langs, countries, ages, prefHashtags] = await Promise.all([
     categoryIds.size
-      ? CategoryModel.find({ _id: { $in: [...categoryIds].map((id) => toObjectId(id)) } })
+      ? Category.find({ _id: { $in: [...categoryIds].map((id) => toObjectId(id)) } })
         .select("_id name subcategories")
         .lean()
       : Promise.resolve([]),
@@ -1572,7 +1572,7 @@ async function normalizeCategoriesPayload(raw) {
   const catNums = [...new Set(items.map(it => Number(it?.categoryId)).filter(n => Number.isFinite(n)))];
   if (!catNums.length) throw new Error('categories must contain numeric categoryId.');
 
-  const cats = await CategoryModel.find({ id: { $in: catNums } }, 'id name subcategories').lean();
+  const cats = await Category.find({ id: { $in: catNums } }, 'id name subcategories').lean();
   const byNum = new Map(cats.map(c => [c.id, c]));
 
   const out = [];
@@ -1607,7 +1607,7 @@ function buildSearchOr(term) {
 }
 
 async function buildSubToParentNumMap() {
-  const rows = await CategoryModel.find({}, "_id subcategories").lean();
+  const rows = await Category.find({}, "_id subcategories").lean();
   const subIdToParentNum = new Map();
 
   for (const r of rows) {
@@ -1877,7 +1877,7 @@ exports.prefillCampaignWithAI = async (req, res) => {
         paymentTypesAllowed: ["Milestone", "Fixed", "Gifting"],
         hints: [
           "Infer sensible influencer count based on campaign type/category/description and budget.",
-          "Pick formats/goals/tier based on description + category/CategoryModel.",
+          "Pick formats/goals/tier based on description + category/Category.",
         ],
       },
     };
@@ -2745,58 +2745,427 @@ exports.getDraftCampaignByBrand = async (req, res) => {
 
 exports.getCampaignHistoryByBrand = async (req, res) => {
   try {
-    const { brandId, page = 1, limit = 10, search = "", sortBy = "createdAt", sortOrder = "desc", includeDescription = 1, campaignStatus, timelineState, goal, minBudget, maxBudget } = req.body || {};
-    if (!brandId) return res.status(400).json({ message: "brandId is required." });
+    const {
+      brandId,
+      page = 1,
+      limit = 10,
+      search = "",
+      sortBy = "createdAt",
+      sortOrder = "desc",
+      includeDescription = 1,
 
-    const filter = { brandId, isDraft: { $ne: 1 } }; // NEVER show drafts in standard history
-    if (search && String(search).trim()) filter.$or = buildSearchOr(String(search).trim());
-    if (campaignStatus && ["open", "paused"].includes(String(campaignStatus).toLowerCase().trim())) filter.campaignStatus = String(campaignStatus).toLowerCase().trim();
-    if (goal) filter.goal = String(goal);
+      campaignStatus,
+      timelineState,
+      goal,
+      minBudget,
+      maxBudget,
+
+      campaignType,
+      creatorStatus,
+      categoryIds,
+      aiCreated,
+
+      quickFilter,
+      allDatesOption,
+      startDate,
+      endDate,
+    } = req.body || {};
+
+    if (!brandId) {
+      return res.status(400).json({ message: "brandId is required." });
+    }
+
+    const filter = {
+      brandId,
+      isDraft: { $ne: 1 },
+    };
+
+    const andClauses = [];
+
+    if (search && String(search).trim()) {
+      andClauses.push({
+        $or: buildSearchOr(String(search).trim()),
+      });
+    }
+
+    if (
+      campaignStatus &&
+      ["open", "paused"].includes(String(campaignStatus).toLowerCase().trim())
+    ) {
+      filter.campaignStatus = String(campaignStatus).toLowerCase().trim();
+    }
+
+    if (goal) {
+      filter.goal = String(goal);
+    }
+
+    if (campaignType && String(campaignType).trim() && String(campaignType) !== "all") {
+      andClauses.push({
+        $or: [
+          { campaignType: String(campaignType).trim() },
+          { type: String(campaignType).trim() },
+        ],
+      });
+    }
+
+    if (Array.isArray(categoryIds) && categoryIds.length > 0) {
+      const cleanCategoryIds = categoryIds.map(String).filter(Boolean);
+
+      andClauses.push({
+        $or: [
+          { categoryId: { $in: cleanCategoryIds } },
+          { campaignCategoryId: { $in: cleanCategoryIds } },
+          { "categories.categoryId": { $in: cleanCategoryIds } },
+          { "categories._id": { $in: cleanCategoryIds } },
+        ],
+      });
+    }
+
+    if (aiCreated === true || aiCreated === 1 || aiCreated === "true") {
+      andClauses.push({
+        $or: [
+          { aiCreated: true },
+          { isAiCreated: true },
+          { createdByAI: true },
+        ],
+      });
+    }
 
     if (minBudget !== undefined || maxBudget !== undefined) {
       filter.budget = {};
-      if (minBudget !== undefined && minBudget !== null && String(minBudget).trim() !== "" && Number.isFinite(Number(minBudget))) filter.budget.$gte = Number(minBudget);
-      if (maxBudget !== undefined && maxBudget !== null && String(maxBudget).trim() !== "" && Number.isFinite(Number(maxBudget))) filter.budget.$lte = Number(maxBudget);
-      if (!Object.keys(filter.budget).length) delete filter.budget;
-    }
 
-    const startOfTodayUTC = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()));
-    if (timelineState) {
-      const state = String(timelineState).toLowerCase().trim();
-      filter.$and = filter.$and || [];
-      if (state === "none") {
-        filter.$and.push({ $and: [{ $or: [{ "timeline.startDate": { $exists: false } }, { "timeline.startDate": null }] }, { $or: [{ "timeline.endDate": { $exists: false } }, { "timeline.endDate": null }] }] });
-      } else if (state === "expired") {
-        filter.$and.push({ "timeline.endDate": { $exists: true, $ne: null, $lt: startOfTodayUTC } });
-      } else if (state === "running") {
-        filter.$and.push({ $and: [{ $or: [{ "timeline.startDate": { $exists: true, $ne: null } }, { "timeline.endDate": { $exists: true, $ne: null } }] }, { $or: [{ "timeline.endDate": { $exists: false } }, { "timeline.endDate": null }, { "timeline.endDate": { $gte: startOfTodayUTC } }] }] });
+      if (
+        minBudget !== undefined &&
+        minBudget !== null &&
+        String(minBudget).trim() !== "" &&
+        Number.isFinite(Number(minBudget))
+      ) {
+        filter.budget.$gte = Number(minBudget);
+      }
+
+      if (
+        maxBudget !== undefined &&
+        maxBudget !== null &&
+        String(maxBudget).trim() !== "" &&
+        Number.isFinite(Number(maxBudget))
+      ) {
+        filter.budget.$lte = Number(maxBudget);
+      }
+
+      if (!Object.keys(filter.budget).length) {
+        delete filter.budget;
       }
     }
 
-    const sortObj = { [{ createdAt: "createdAt", budget: "budget", campaignStatus: "campaignStatus", statusUpdatedAt: "statusUpdatedAt", productOrServiceName: "productOrServiceName", isActive: "isActive" }[sortBy] || "createdAt"]: String(sortOrder).toLowerCase() === "asc" ? 1 : -1 };
-    const skip = (Math.max(parseInt(page, 10) || 1, 1) - 1) * Math.max(parseInt(limit, 10) || 10, 1);
+    const now = new Date();
+
+    function startOfDayUTC(date) {
+      return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+    }
+
+    function endOfDayUTC(date) {
+      return new Date(
+        Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 23, 59, 59, 999)
+      );
+    }
+
+    function addDaysUTC(date, days) {
+      const d = new Date(date);
+      d.setUTCDate(d.getUTCDate() + days);
+      return d;
+    }
+
+    function startOfWeekUTC(date) {
+      const d = startOfDayUTC(date);
+      const day = d.getUTCDay();
+      const diff = day === 0 ? -6 : 1 - day;
+      return addDaysUTC(d, diff);
+    }
+
+    function endOfWeekUTC(date) {
+      return endOfDayUTC(addDaysUTC(startOfWeekUTC(date), 6));
+    }
+
+    function startOfMonthUTC(date) {
+      return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+    }
+
+    function endOfMonthUTC(date) {
+      return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0, 23, 59, 59, 999));
+    }
+
+    function parseDateInput(v, endOfDay = false) {
+      if (!v) return null;
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) return null;
+      return endOfDay ? endOfDayUTC(d) : startOfDayUTC(d);
+    }
+
+    const startOfToday = startOfDayUTC(now);
+
+    if (timelineState) {
+      const state = String(timelineState).toLowerCase().trim();
+
+      if (state === "none") {
+        andClauses.push({
+          $and: [
+            {
+              $or: [
+                { "timeline.startDate": { $exists: false } },
+                { "timeline.startDate": null },
+              ],
+            },
+            {
+              $or: [
+                { "timeline.endDate": { $exists: false } },
+                { "timeline.endDate": null },
+              ],
+            },
+          ],
+        });
+      } else if (state === "expired") {
+        andClauses.push({
+          "timeline.endDate": { $exists: true, $ne: null, $lt: startOfToday },
+        });
+      } else if (state === "running") {
+        andClauses.push({
+          $and: [
+            {
+              $or: [
+                { "timeline.startDate": { $exists: true, $ne: null } },
+                { "timeline.endDate": { $exists: true, $ne: null } },
+              ],
+            },
+            {
+              $or: [
+                { "timeline.endDate": { $exists: false } },
+                { "timeline.endDate": null },
+                { "timeline.endDate": { $gte: startOfToday } },
+              ],
+            },
+          ],
+        });
+      }
+    }
+
+    if (quickFilter) {
+      const qf = String(quickFilter).trim();
+
+      if (qf === "recently_edited") {
+        andClauses.push({
+          updatedAt: { $gte: addDaysUTC(startOfToday, -7) },
+        });
+      } else if (qf === "launching_soon") {
+        andClauses.push({
+          "timeline.startDate": {
+            $gte: startOfToday,
+            $lte: endOfDayUTC(addDaysUTC(startOfToday, 14)),
+          },
+        });
+      } else if (qf === "today") {
+        andClauses.push({
+          createdAt: {
+            $gte: startOfToday,
+            $lte: endOfDayUTC(startOfToday),
+          },
+        });
+      } else if (qf === "this_week") {
+        andClauses.push({
+          createdAt: {
+            $gte: startOfWeekUTC(now),
+            $lte: endOfWeekUTC(now),
+          },
+        });
+      } else if (qf === "this_month") {
+        andClauses.push({
+          createdAt: {
+            $gte: startOfMonthUTC(now),
+            $lte: endOfMonthUTC(now),
+          },
+        });
+      }
+    } else if (allDatesOption && String(allDatesOption) !== "all") {
+      let rangeStart = null;
+      let rangeEnd = endOfDayUTC(now);
+      const opt = String(allDatesOption).trim();
+
+      if (opt === "last_7") rangeStart = addDaysUTC(startOfToday, -7);
+      if (opt === "last_15") rangeStart = addDaysUTC(startOfToday, -15);
+      if (opt === "last_30") rangeStart = addDaysUTC(startOfToday, -30);
+      if (opt === "last_90") rangeStart = addDaysUTC(startOfToday, -90);
+      if (opt === "last_365") rangeStart = addDaysUTC(startOfToday, -365);
+
+      if (opt === "last_month") {
+        const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+        rangeStart = startOfMonthUTC(d);
+        rangeEnd = endOfMonthUTC(d);
+      }
+
+      if (opt === "last_quarter") {
+        const currentQuarter = Math.floor(now.getUTCMonth() / 3);
+        const lastQuarterEndMonth = currentQuarter * 3 - 1;
+        const year = lastQuarterEndMonth < 0 ? now.getUTCFullYear() - 1 : now.getUTCFullYear();
+        const normalizedEndMonth = lastQuarterEndMonth < 0 ? 11 : lastQuarterEndMonth;
+        const startMonth = normalizedEndMonth - 2;
+
+        rangeStart = new Date(Date.UTC(year, startMonth, 1));
+        rangeEnd = new Date(Date.UTC(year, normalizedEndMonth + 1, 0, 23, 59, 59, 999));
+      }
+
+      if (rangeStart && rangeEnd) {
+        andClauses.push({
+          createdAt: {
+            $gte: rangeStart,
+            $lte: rangeEnd,
+          },
+        });
+      }
+    } else if (startDate || endDate) {
+      const range = {};
+      const parsedStart = parseDateInput(startDate, false);
+      const parsedEnd = parseDateInput(endDate, true);
+
+      if (parsedStart) range.$gte = parsedStart;
+      if (parsedEnd) range.$lte = parsedEnd;
+
+      if (Object.keys(range).length) {
+        andClauses.push({
+          createdAt: range,
+        });
+      }
+    }
+
+    if (creatorStatus && String(creatorStatus).trim() && String(creatorStatus) !== "all") {
+      const cs = String(creatorStatus).trim().toLowerCase();
+
+      let contractFilter = { brandId };
+
+      if (cs === "invited") {
+        contractFilter = {
+          ...contractFilter,
+          $or: [
+            { status: "invited" },
+            { creatorStatus: "invited" },
+            { applicationStatus: "invited" },
+          ],
+        };
+      } else if (cs === "applied") {
+        contractFilter = {
+          ...contractFilter,
+          $or: [
+            { status: "applied" },
+            { creatorStatus: "applied" },
+            { applicationStatus: "applied" },
+          ],
+        };
+      } else if (cs === "approved") {
+        contractFilter = {
+          ...contractFilter,
+          $or: [
+            { status: "approved" },
+            { status: "accepted" },
+            { creatorStatus: "approved" },
+            { applicationStatus: "approved" },
+            activeAcceptedFilter(),
+          ],
+        };
+      }
+
+      const matchedCampaignIds = await Contract.distinct("campaignId", contractFilter);
+      const cleanMatchedCampaignIds = matchedCampaignIds.map(String).filter(Boolean);
+
+      if (!cleanMatchedCampaignIds.length) {
+        return res.json({
+          data: [],
+          pagination: {
+            total: 0,
+            page: Math.max(parseInt(page, 10) || 1, 1),
+            limit: Math.max(parseInt(limit, 10) || 10, 1),
+            totalPages: 0,
+          },
+        });
+      }
+
+      filter.$expr = {
+        $in: [{ $toString: "$_id" }, cleanMatchedCampaignIds],
+      };
+    }
+
+    if (andClauses.length) {
+      filter.$and = andClauses;
+    }
+
+    const sortFieldMap = {
+      createdAt: "createdAt",
+      budget: "budget",
+      applicantCount: "applicantCount",
+      campaignStatus: "campaignStatus",
+      statusUpdatedAt: "statusUpdatedAt",
+      productOrServiceName: "productOrServiceName",
+      isActive: "isActive",
+    };
+
+    const sortObj = {
+      [sortFieldMap[sortBy] || "createdAt"]:
+        String(sortOrder).toLowerCase() === "asc" ? 1 : -1,
+    };
+
+    const safePage = Math.max(parseInt(page, 10) || 1, 1);
+    const safeLimit = Math.max(parseInt(limit, 10) || 10, 1);
+    const skip = (safePage - 1) * safeLimit;
 
     const [rows, total] = await Promise.all([
-      Campaign.find(filter, Number(includeDescription) === 1 ? undefined : "-description").sort(sortObj).skip(skip).limit(Math.max(parseInt(limit, 10) || 10, 1)).lean(),
+      Campaign.find(
+        filter,
+        Number(includeDescription) === 1 ? undefined : "-description"
+      )
+        .sort(sortObj)
+        .skip(skip)
+        .limit(safeLimit)
+        .lean(),
+
       Campaign.countDocuments(filter),
     ]);
 
-    const workingIds = await Contract.distinct("campaignId", { brandId, campaignId: { $in: rows.map((c) => String(String(c._id) || c._id)) }, ...activeAcceptedFilter() });
+    const workingIds = await Contract.distinct("campaignId", {
+      brandId,
+      campaignId: { $in: rows.map((c) => String(c._id)) },
+      ...activeAcceptedFilter(),
+    });
+
     const workingSet = new Set(workingIds.map(String));
 
     return res.json({
       data: rows.map((c) => {
         const tl = c.timeline || {};
-        const state = (!tl.startDate && !tl.endDate) ? "none" : (tl.endDate && new Date(tl.endDate) < startOfTodayUTC) ? "expired" : "running";
-        return { ...c, computedIsActive: computeIsActive(c.timeline), timelineState: state, hasTimeline: state !== "none", influencerWorking: workingSet.has(String(String(c._id) || "")) || workingSet.has(String(c._id || "")) };
+        const state =
+          !tl.startDate && !tl.endDate
+            ? "none"
+            : tl.endDate && new Date(tl.endDate) < startOfToday
+            ? "expired"
+            : "running";
+
+        return {
+          ...c,
+          computedIsActive: computeIsActive(c.timeline),
+          timelineState: state,
+          hasTimeline: state !== "none",
+          influencerWorking:
+            workingSet.has(String(c._id)) || workingSet.has(String(String(c._id) || "")),
+        };
       }),
-      pagination: { total, page: Math.max(parseInt(page, 10) || 1, 1), limit: Math.max(parseInt(limit, 10) || 10, 1), totalPages: Math.ceil(total / Math.max(parseInt(limit, 10) || 10, 1)) },
+      pagination: {
+        total,
+        page: safePage,
+        limit: safeLimit,
+        totalPages: Math.ceil(total / safeLimit),
+      },
     });
   } catch (error) {
+    console.error("getCampaignHistoryByBrand error:", error);
     return res.status(500).json({ message: "Internal server error" });
   }
 };
-
 exports.listApplicants = async (req, res) => {
   const { campaignId, page = 1, limit = 10, search = "", sortField = "createdAt", sortOrder = 1, audienceBucket = "all" } = req.body || {};
   if (!campaignId) return res.status(400).json({ message: "campaignId is required" });
@@ -3063,7 +3432,7 @@ exports.getSubcategories = async (req, res) => {
       { $limit: 1000 }
     );
 
-    const data = await CategoryModel.aggregate(pipeline);
+    const data = await Category.aggregate(pipeline);
     return ApiResponse.sendOk(res, HttpStatus.OK, data, requestId);
   } catch (err) {
     return sendControllerError(res, requestId, err);
