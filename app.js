@@ -42,7 +42,9 @@ const Invitationsroutes = require('./routes/Invitationsroutes');
 const unseenMessageNotifier = require('./jobs/unseenMessageNotifier');
 const youtubeRoutes = require('./routes/youtubeRoutes');
 const campaignInvitationRoutes = require('./routes/campaignInvitationRoutes');
- const delieverableRoutes = require('./routes/delieverableRoute')
+const delieverableRoutes = require('./routes/delieverableRoute')
+const listRoutes = require('./routes/listRoutes');
+const brandWalletRoutes = require('./routes/brandWalletRoutes');
 // sockets (Socket.IO + native WS)
 const sockets = require('./sockets');
 
@@ -59,7 +61,7 @@ app.set('broadcastToRoom', sockets.legacyBroadcastToRoom);
 
 // ====== Express middleware ======
 app.use(cors({
-  origin: process.env.FRONTEND_ORIGIN || ['https://collabglam.com','http://localhost:3000','http://localhost:3001','https://mhd.sharemitra.com'],
+  origin: process.env.FRONTEND_ORIGIN || ['https://collabglam.cloud', 'http://localhost:3000', 'http://localhost:3001', 'https://mhd.sharemitra.com'],
   credentials: true
 }));
 
@@ -104,6 +106,8 @@ app.use('/newinvitations', Invitationsroutes);
 app.use('/youtube', youtubeRoutes);
 app.use('/admin-invitations', campaignInvitationRoutes);
 app.use('/deliverable', delieverableRoutes);
+app.use('/list', listRoutes);
+app.use('/wallet', brandWalletRoutes);
 
 // Friendly 413 response (must be after body parsers)
 app.use((err, req, res, next) => {
@@ -114,7 +118,7 @@ app.use((err, req, res, next) => {
 });
 
 /* Mongo & start */
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 8000;
 startReminderCron();
 
 mongoose.connect(process.env.MONGODB_URI)

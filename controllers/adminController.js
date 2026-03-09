@@ -269,7 +269,7 @@ exports.getAllBrands = async (req, res) => {
 
     // 5) Fetch the page with dynamic sort
     const brands = await Brand.find(filter)
-      .select('-password -_id -__v')
+      .select('-password -__v')
       .sort(sortObj)
       .skip((page - 1) * limit)
       .limit(limit)

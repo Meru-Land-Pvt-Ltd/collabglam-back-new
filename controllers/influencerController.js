@@ -20,15 +20,16 @@ const influencerExport = require("../models/influencer");
 const InfluencerModel =
   influencerExport.InfluencerModel || influencerExport.default || influencerExport;
 
-console.log("DEBUG InfluencerModel.findOne type:", typeof InfluencerModel.findOne);const Category = require('../models/categories');
+// console.log("DEBUG InfluencerModel.findOne type:", typeof InfluencerModel.findOne);const Category = require('../models/categories');
 const Country = require('../models/country');
+const { Category } = require("../models/categories");
 const Language = require('../models/language');
 const VerifyOtpModel = require('../models/verifyEmail');
 const ApplyCampaign = require('../models/applyCampaign');
 const Campaign = require('../models/campaign');
 // These two are referenced later in updateProfile; include them if you use them
 const Audience = require('../models/audience');            // ensure this path exists
-const AudienceRange = require('../models/audienceRange');  // ensure this path exists
+const AudienceRange = require('../models/ageRange');  // ensure this path exists
 const Modash = require('../models/modash');
 const { linkConversationsForInfluencer } = require('../services/emailLinking');
 const { attachExternalEmailToInfluencer } = require('../utils/emailAliases');
@@ -422,10 +423,7 @@ exports.uploadProfileImage = upload.single('profileImage');
 
 exports.sendSignupOtpInfluencer = async (req, res) => {
   try {
-    const { email, name, password, countryId, languageIds, categoryIds } = req.body;
-    console.log("InfluencerModel.findOne:", typeof InfluencerModel.findOne);
-    console.log("VerifyOtpModel.findOne:", typeof VerifyOtpModel.findOne);
-    // ✅ email validation back ON (recommended)
+    const { email, name, password, countryId, languageIds, categoryIds } = req.body;    // ✅ email validation back ON (recommended)
     if (!email || !isValidEmail(email)) {
       return res.status(400).json({ message: "Valid email is required" });
     }
