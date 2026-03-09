@@ -1,8 +1,7 @@
 // controllers/category.controller.js
-const {CategoryModel:Category} = require('../models/categories');
+const { Category } = require('../models/categories');
 
-// GET /categories
-// Returns every category with its subcategories (id, name, subcategoryId, subcategory name)
+
 exports.getAllCategoriesWithSubcategories = async (req, res) => {
   try {
     const categories = await Category.find(
@@ -22,11 +21,11 @@ exports.getAllCategoriesWithSubcategories = async (req, res) => {
   }
 };
 
-// GET /categories/:id/subcategories
-// Returns only the subcategories for the chosen category (by numeric id)
+// POST /categories/subcategories
 exports.postSubcategoriesByCategoryId = async (req, res) => {
   try {
     const catId = Number(req.body?.id ?? req.body?.categoryId);
+
     if (Number.isNaN(catId)) {
       return res.status(400).json({ message: 'Category id must be a number' });
     }
@@ -51,12 +50,11 @@ exports.postSubcategoriesByCategoryId = async (req, res) => {
   }
 };
 
-
 // POST /categories/get
-// Returns category details for the chosen category (by numeric id)
 exports.postCategoryById = async (req, res) => {
   try {
     const catId = Number(req.body?.id ?? req.body?.categoryId);
+
     if (Number.isNaN(catId)) {
       return res.status(400).json({ message: 'Category id must be a number' });
     }
