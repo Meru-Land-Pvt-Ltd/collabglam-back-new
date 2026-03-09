@@ -1412,21 +1412,32 @@ function computeInfluencerNextRoute(influencer) {
 
   return { route, page1Done, page2Done, page3Done };
 }
-exports.signInInfluencer = async (req, res, next) => {
+exports.signInInfluencer = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
-    if (!password) throw new ValidationError("Valid password is required");
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({ message: "Valid email is required" });
+    }
+
+    if (!password) {
+      return res.status(400).json({ message: "Valid password is required" });
+    }
 
     const normalizedEmail = String(email).toLowerCase().trim();
 
     const influencer = await InfluencerModel.findOne({ email: normalizedEmail }).exec();
-    if (!influencer || !influencer.password) throw new ValidationError("Invalid email or password");
+
+    if (!influencer || !influencer.password) {
+      return res.status(400).json({ message: "Invalid email or password" });
+    }
 
     const bcrypt = require("bcryptjs");
     const ok = await bcrypt.compare(String(password), String(influencer.password));
-    if (!ok) throw new ValidationError("Invalid email or password");
+
+    if (!ok) {
+      return res.status(400).json({ message: "Invalid email or password" });
+    }
 
     const token = signJwt({
       influencerId: influencer._id.toString(),
@@ -1434,18 +1445,23 @@ exports.signInInfluencer = async (req, res, next) => {
       email: influencer.email,
     });
 
-    const { route, page1Done, page2Done, page3Done } = computeInfluencerNextRoute(influencer);
+    const { route, page1Done, page2Done, page3Done } =
+      computeInfluencerNextRoute(influencer);
 
-    return ApiResponse.sendOk(res, HttpStatus.OK, {
+    return res.status(200).json({
       message: "Influencer sign in successful",
       influencerId: influencer._id.toString(),
       token,
       route,
-      onboarding: { page1Done, page2Done, page3Done },
+      onboarding: {
+        page1Done,
+        page2Done,
+        page3Done,
+      },
     });
   } catch (err) {
-    if (err instanceof ApiError) return next(err);
-    return next(new InternalError("Internal server error", undefined, err));
+    console.error("signInInfluencer error:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
