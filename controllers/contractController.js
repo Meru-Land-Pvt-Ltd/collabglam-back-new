@@ -18,7 +18,8 @@ const path = require("path");
 // Models & template
 const Campaign = require("../models/campaign");
 const Brand = require("../models/brand");
-const Influencer = require("../models/influencer");
+const { InfluencerModel: Influencer } = require("../models/influencer");
+
 const Contract = require("../models/contract");
 const MASTER_TEMPLATE = require("../template/ContractTemplate");
 
@@ -478,9 +479,9 @@ function createDefaultContent({
   const effectiveDate =
     requestedEffectiveDate
       ? buildRequestedEffectiveDate(
-          requestedEffectiveDate,
-          requestedEffectiveDateTimezone || admin?.timezone || DEFAULT_TZ
-        )
+        requestedEffectiveDate,
+        requestedEffectiveDateTimezone || admin?.timezone || DEFAULT_TZ
+      )
       : undefined;
 
   const base = {
@@ -526,15 +527,15 @@ function createDefaultContent({
       deliverables: Array.isArray(contentInput?.scheduleA?.deliverables)
         ? contentInput.scheduleA.deliverables
         : [
-            {
-              srNo: 1,
-              platformHandle: "",
-              deliverableFormat: "",
-              qty: 1,
-              draftDue: "",
-              liveDate: "",
-            },
-          ],
+          {
+            srNo: 1,
+            platformHandle: "",
+            deliverableFormat: "",
+            qty: 1,
+            draftDue: "",
+            liveDate: "",
+          },
+        ],
 
       minimumVideoSpecs: contentInput?.scheduleA?.minimumVideoSpecs || "",
       preShootScriptRequired: Boolean(contentInput?.scheduleA?.preShootScriptRequired),
@@ -611,13 +612,13 @@ function createDefaultContent({
         rows: Array.isArray(contentInput?.scheduleA?.usageRights?.rows)
           ? contentInput.scheduleA.usageRights.rows
           : [
-              { usageRight: "Organic repost on Brand-owned social channels", selected: false, duration: "", territoryNotes: "" },
-              { usageRight: "Brand website / blog / PDP / retailer listing", selected: false, duration: "", territoryNotes: "" },
-              { usageRight: "Email / CRM / deck / internal presentation use", selected: false, duration: "", territoryNotes: "" },
-              { usageRight: "Paid social / boosting / ads", selected: false, duration: "", territoryNotes: "" },
-              { usageRight: "Whitelisting / Spark Ads / dark posting / creator handle", selected: false, duration: "", territoryNotes: "" },
-              { usageRight: "Perpetual rights / buyout / work-made-for-hire", selected: false, duration: "", territoryNotes: "" },
-            ],
+            { usageRight: "Organic repost on Brand-owned social channels", selected: false, duration: "", territoryNotes: "" },
+            { usageRight: "Brand website / blog / PDP / retailer listing", selected: false, duration: "", territoryNotes: "" },
+            { usageRight: "Email / CRM / deck / internal presentation use", selected: false, duration: "", territoryNotes: "" },
+            { usageRight: "Paid social / boosting / ads", selected: false, duration: "", territoryNotes: "" },
+            { usageRight: "Whitelisting / Spark Ads / dark posting / creator handle", selected: false, duration: "", territoryNotes: "" },
+            { usageRight: "Perpetual rights / buyout / work-made-for-hire", selected: false, duration: "", territoryNotes: "" },
+          ],
         attributionRequirement:
           contentInput?.scheduleA?.usageRights?.attributionRequirement ||
           "No attribution required",
@@ -696,9 +697,8 @@ function buildTokenMap(contract) {
     null;
 
   const preShootText = c?.scheduleA?.preShootScriptRequired
-    ? `Yes — due by ${c?.scheduleA?.preShootScriptDue || "N/A"} and subject to review within ${
-        c?.scheduleA?.preShootScriptReviewBusinessDays || 2
-      } business days`
+    ? `Yes — due by ${c?.scheduleA?.preShootScriptDue || "N/A"} and subject to review within ${c?.scheduleA?.preShootScriptReviewBusinessDays || 2
+    } business days`
     : "No";
 
   return {
@@ -805,14 +805,14 @@ function buildTokenMap(contract) {
     "SOW.UsageRightsTableHTML": `
       ${renderUsageRightsTable(usageRights?.rows || [])}
       ${renderKeyValueTable([
-        ["Attribution Requirement", usageRights?.attributionRequirement || ""],
-        ["Attribution Text", usageRights?.attributionText || ""],
-        ["Editing Rights", usageRights?.editingRights || ""],
-        [
-          "Music / Stock Asset Responsibility",
-          usageRights?.musicStockAssetResponsibility || "",
-        ],
-      ])}
+      ["Attribution Requirement", usageRights?.attributionRequirement || ""],
+      ["Attribution Text", usageRights?.attributionText || ""],
+      ["Editing Rights", usageRights?.editingRights || ""],
+      [
+        "Music / Stock Asset Responsibility",
+        usageRights?.musicStockAssetResponsibility || "",
+      ],
+    ])}
     `,
 
     "SOW.ExclusivityTableHTML": renderKeyValueTable([
@@ -1563,7 +1563,7 @@ function getNameForRole({ contract, role, brandDoc, influencerDoc }) {
 
 // ============================ Campaign helper ============================
 function campaignQuery(campaignId) {
-  return { $or: [{ campaignId }, { campaignsId: campaignId }] };
+  return { _id: campaignId };
 }
 
 // ============================ Signature validation ============================
@@ -1733,16 +1733,27 @@ exports.initiate = async (req, res) => {
 
     assertRequired(req.body, ["brandId", "influencerId", "campaignId"]);
 
+    const mongoose = require("mongoose");
+
+    if (!mongoose.Types.ObjectId.isValid(campaignId)) {
+      return respondError(res, "Invalid campaignId", 400);
+    }
+    if (!mongoose.Types.ObjectId.isValid(brandId)) {
+      return respondError(res, "Invalid brandId", 400);
+    }
+    if (!mongoose.Types.ObjectId.isValid(influencerId)) {
+      return respondError(res, "Invalid influencerId", 400);
+    }
+
     const [campaign, brandDoc, influencerDoc] = await Promise.all([
-      Campaign.findOne(campaignQuery(campaignId)),
-      Brand.findOne({ brandId }),
-      Influencer.findOne({ influencerId }),
+      Campaign.findById(campaignId),
+      Brand.findById(brandId),
+      Influencer.findById(influencerId),
     ]);
 
     if (!campaign) return respondError(res, "Campaign not found", 404);
     if (!brandDoc) return respondError(res, "Brand not found", 404);
     if (!influencerDoc) return respondError(res, "Influencer not found", 404);
-
     const other = {
       brandProfile: {
         legalName: brandDoc.legalName || brandDoc.name || "",
@@ -1786,9 +1797,9 @@ exports.initiate = async (req, res) => {
 
     const requestedDateBuilt = requestedEffectiveDate
       ? buildRequestedEffectiveDate(
-          requestedEffectiveDate,
-          requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ
-        )
+        requestedEffectiveDate,
+        requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ
+      )
       : undefined;
 
     const content = createDefaultContent({
@@ -2177,9 +2188,8 @@ exports.brandConfirm = async (req, res) => {
       influencerId: String(contract.influencerId),
       type: "contract.confirm.brand",
       title: "Brand accepted",
-      message: `${contract.brandName || "Brand"} accepted the contract. ${
-        contract.status === CONTRACT_STATUS.READY_TO_SIGN ? "Both parties can sign now." : "Awaiting next step."
-      }`,
+      message: `${contract.brandName || "Brand"} accepted the contract. ${contract.status === CONTRACT_STATUS.READY_TO_SIGN ? "Both parties can sign now." : "Awaiting next step."
+        }`,
       entityType: "contract",
       entityId: String(contract.contractId),
       actionPath: `/influencer/my-campaign`,
@@ -2403,9 +2413,9 @@ exports.viewContractPdf = async (req, res) => {
       contract.lockedAt && contract.renderedTextSnapshot
         ? contract.renderedTextSnapshot
         : renderTemplate(
-            contract.admin?.legalTemplateText || MASTER_TEMPLATE,
-            buildTokenMap(contract)
-          );
+          contract.admin?.legalTemplateText || MASTER_TEMPLATE,
+          buildTokenMap(contract)
+        );
 
     const html = renderContractHTML({ contract, templateText: text });
     const tokens = buildTokenMap(contract);
@@ -2547,18 +2557,18 @@ exports.sign = async (req, res) => {
     const opp =
       signerRole === "brand"
         ? {
-            recipientType: "influencer",
-            influencerId: String(contract.influencerId),
-            type: "contract.signed.brand",
-            path: `/influencer/my-campaign`,
-          }
+          recipientType: "influencer",
+          influencerId: String(contract.influencerId),
+          type: "contract.signed.brand",
+          path: `/influencer/my-campaign`,
+        }
         : signerRole === "influencer"
           ? {
-              recipientType: "brand",
-              brandId: String(contract.brandId),
-              type: "contract.signed.influencer",
-              path: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`,
-            }
+            recipientType: "brand",
+            brandId: String(contract.brandId),
+            type: "contract.signed.influencer",
+            path: `/brand/created-campaign/applied-inf?id=${contract.campaignId}`,
+          }
           : null;
 
     if (opp) {
@@ -2568,11 +2578,10 @@ exports.sign = async (req, res) => {
         influencerId: opp.influencerId,
         type: opp.type,
         title: `${signerRole === "brand" ? "Brand" : "Influencer"} signed`,
-        message: `${
-          signerRole === "brand"
+        message: `${signerRole === "brand"
             ? contract.brandName || "Brand"
             : contract.influencerName || "Influencer"
-        } added a signature.`,
+          } added a signature.`,
         entityType: "contract",
         entityId: String(contract.contractId),
         actionPath: opp.path,
