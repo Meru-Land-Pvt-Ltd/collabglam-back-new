@@ -6,7 +6,7 @@ const { DateTime } = require("luxon");
 
 const Campaign = require("../models/campaign");
 const Brand = require("../models/brand");
-const { CategoryModel } = require("../models/categories");
+const { Category } = require("../models/categories");
 const ApplyCampaign = require("../models/applyCampaign");
 const { InfluencerModel: Influencer } = require("../models/influencer");
 const Contract = require("../models/contract");
@@ -2976,7 +2976,7 @@ exports.getCategories = async (req, res) => {
       ];
     }
 
-    const data = await CategoryModel.find(filter).sort({ name: 1 }).lean();
+    const data = await Category.find(filter).sort({ name: 1 }).lean();
 
     return ApiResponse.sendOk(res, HttpStatus.OK, data, requestId);
   } catch (err) {
@@ -3015,7 +3015,7 @@ exports.getSubcategories = async (req, res) => {
         );
       }
 
-      const cat = await CategoryModel.findById(categoryId)
+      const cat = await Category.findById(categoryId)
         .select("_id name subcategories globalTags tags")
         .lean();
 
