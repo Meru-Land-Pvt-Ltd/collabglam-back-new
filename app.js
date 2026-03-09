@@ -118,7 +118,7 @@ app.use((err, req, res, next) => {
 });
 
 /* Mongo & start */
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 8000;
 startReminderCron();
 
 mongoose.connect(process.env.MONGODB_URI)
