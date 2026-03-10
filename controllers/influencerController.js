@@ -11,14 +11,14 @@ const fs = require('fs');
 // Models
 const Brand = require('../models/brand');
 // influencerController.js
-const influencerExport = require("../models/influencer");
+const Influencer = require("../models/influencer");
 
 // handles all cases:
 // 1) module.exports = InfluencerModel
 // 2) module.exports = { InfluencerModel }
 // 3) module.exports.default = InfluencerModel (ESM transpile)
 const InfluencerModel =
-  influencerExport.InfluencerModel || influencerExport.default || influencerExport;
+  Influencer.InfluencerModel || Influencer.default || Influencer;
 
 // console.log("DEBUG InfluencerModel.findOne type:", typeof InfluencerModel.findOne);const Category = require('../models/categories');
 const Country = require('../models/country');
@@ -35,7 +35,7 @@ const { linkConversationsForInfluencer } = require('../services/emailLinking');
 const { attachExternalEmailToInfluencer } = require('../utils/emailAliases');
 const { getFreePlan, computeExpiry } = require("../utils/subscriptionHelper");
 const { escapeRegExp } = require('../utils/searchTokens');
-const {buildOtpEmailTemplate}=require('../template/buildOtpEmailTemplate')
+const { buildOtpEmailTemplate } = require('../template/buildOtpEmailTemplate')
 const UUIDv4Regex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const BASE_API_URL = 'https://api.collabglam.com';
@@ -469,12 +469,12 @@ exports.sendSignupOtpInfluencer = async (req, res) => {
     if (!country) {
       return res.status(400).json({ message: "Invalid countryId" });
     }
- console.log("Fetched country:", country);
+    console.log("Fetched country:", country);
     const countryName = String(country.countryName ?? country.name ?? "").trim();
     if (!countryName) {
       return res.status(400).json({ message: "Country name missing for this countryId" });
     }
-console.log("Determined countryName:", countryName);
+    console.log("Determined countryName:", countryName);
     const langIds = uniqueValidObjectIds(languageIds);
     const catIds = uniqueValidObjectIds(categoryIds);
 
@@ -656,20 +656,20 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
 
     const cleanLanguages = Array.isArray(payload?.languages)
       ? payload.languages
-          .filter((l) => l && typeof l.name === "string" && l.name.trim().length > 0)
-          .map((l) => ({
-            _id: l._id || undefined,
-            name: String(l.name).trim(),
-          }))
+        .filter((l) => l && typeof l.name === "string" && l.name.trim().length > 0)
+        .map((l) => ({
+          _id: l._id || undefined,
+          name: String(l.name).trim(),
+        }))
       : [];
 
     const cleanCategories = Array.isArray(payload?.categories)
       ? payload.categories
-          .filter((c) => c && typeof c.name === "string" && c.name.trim().length > 0)
-          .map((c) => ({
-            _id: c._id || undefined,
-            name: String(c.name).trim(),
-          }))
+        .filter((c) => c && typeof c.name === "string" && c.name.trim().length > 0)
+        .map((c) => ({
+          _id: c._id || undefined,
+          name: String(c.name).trim(),
+        }))
       : [];
 
     createdInfluencer = await InfluencerModel.create({
@@ -1189,7 +1189,7 @@ exports.registerInfluencer = async (req, res) => {
         planId: freePlan.planId,
         planName: freePlan.name,
         startedAt: new Date(),
-        expiresAt:computeExpiry(freePlan),
+        expiresAt: computeExpiry(freePlan),
         features: freePlan.features.map(f => ({
           key: f.key,
           limit: typeof f.value === 'number' ? f.value : 0,
@@ -1536,8 +1536,8 @@ exports.getCampaignsByInfluencer = async (req, res) => {
     }
 
     // 🔹 Get influencer (for name, etc.)
-    const influencer = await Influencer.findOne(
-      { influencerId },
+    const influencer = await InfluencerModel.findOne(
+      { _id: influencerId },
       'name email influencerId'
     ).lean();
 
