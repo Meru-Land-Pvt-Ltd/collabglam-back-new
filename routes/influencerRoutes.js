@@ -29,12 +29,12 @@ const {
   getInfluencerOnboarding,
   markInfluencerTourSeen,
 } = require('../controllers/influencerController');
-
+const { influencerAuth } = require("../middlewares/influencerAuth")
 // Public endpoints:
 router.post('/request-otp', sendSignupOtpInfluencer);
 router.post('/verify-otp', verifyOtpSignUpInfluencer);
 router.post('/register', uploadProfileImage, registerInfluencer);
-router.post('/save-influencer-onboarding',saveQuickOnboarding);
+router.post('/save-influencer-onboarding',influencerAuth,saveQuickOnboarding);
 
 
 router.post('/login', signInInfluencer);
