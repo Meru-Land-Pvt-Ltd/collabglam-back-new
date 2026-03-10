@@ -1,27 +1,19 @@
-// models/brand.js
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 
 const { Schema } = mongoose;
 
-// ---- helpers / enums (optional) ----
-const emailRegex = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-
+const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DEFAULT_FREE_PLAN_ID = "dcd11cf7-50ca-4891-ae15-5045080f72fe";
 
-// ---------------- Subscription sub-schemas ----------------
 const subscriptionFeatureSchema = new Schema(
   {
-    key: { type: String, required: true },
-
+    key: { type: String, required: true, trim: true },
     value: { type: Schema.Types.Mixed, default: null },
-
-    limit: { type: Number, required: true },
-
+    limit: { type: Number, required: true, default: 0 },
     used: { type: Number, default: 0 },
-
-    note: { type: String, default: null },
-    resetsEvery: { type: String, default: null },
+    note: { type: String, default: null, trim: true },
+    resetsEvery: { type: String, default: null, trim: true },
     resetsAt: { type: Date, default: null },
   },
   { _id: false }
@@ -41,50 +33,90 @@ const subscriptionSchema = new Schema(
     planName: { type: String, required: true, default: "free" },
     role: { type: String, enum: ["Brand", "Influencer"], default: "Brand" },
 
-    planRef: { type: Schema.Types.ObjectId, ref: "SubscriptionPlan", default: null },
+    planRef: {
+      type: Schema.Types.ObjectId,
+      ref: "SubscriptionPlan",
+      default: null,
+    },
 
     monthlyCost: { type: Number, default: 0 },
     annualCost: { type: Number, default: 0 },
-    billingCycle: { type: String, enum: ["monthly", "annual"], default: "monthly" },
+    billingCycle: {
+      type: String,
+      enum: ["monthly", "annual"],
+      default: "monthly",
+    },
 
     autoRenew: { type: Boolean, default: false },
     status: { type: String, enum: ["active", "archived"], default: "active" },
 
-    durationMins: { type: Number, default: 43200 }, // 30 days
+    durationMins: { type: Number, default: 43200 },
     startedAt: { type: Date, default: Date.now },
     expiresAt: { type: Date, default: null },
 
     features: { type: [subscriptionFeatureSchema], default: [] },
-
     internalCredits: { type: internalCreditsSchema, default: () => ({}) },
   },
   { _id: false }
 );
 
-// ---------------- Brand Schema (NEW FIELDS + subscription) ----------------
 const brandSchema = new Schema(
   {
     email: {
       type: String,
-      required: true,
+      required: [true, "Email is required"],
       unique: true,
       lowercase: true,
       trim: true,
       match: [emailRegex, "Invalid email"],
+      index: true,
     },
 
-    brandName: { type: String, required: true, trim: true },
-    name: { type: String, trim: true },
+    brandName: {
+      type: String,
+      required: [true, "Brand name is required"],
+      trim: true,
+    },
 
-    // optional (choose enum or plain string)
-    companySize: { type: String, required: false, trim: true },
+    name: {
+      type: String,
+      default: "",
+      trim: true,
+    },
 
-    industry: { type: String, required: true, trim: true },
+    companySize: {
+      type: String,
+      default: "",
+      trim: true,
+    },
 
-    password: { type: String, required: true, minlength: 8 },
+    industry: {
+      type: String,
+      required: [true, "Industry is required"],
+      trim: true,
+    },
 
-    proxyEmail: { type: String, trim: true },
-    profilePic: { type: String, trim: true },
+    password: {
+      type: String,
+      required: [true, "Password is required"],
+      minlength: 8,
+      select: false,
+    },
+
+    proxyEmail: {
+      type: String,
+      default: "",
+      trim: true,
+      lowercase: true,
+      validate: {
+        validator(value) {
+          return !value || emailRegex.test(value);
+        },
+        message: "Invalid proxy email",
+      },
+    },
+
+    profilePic: { type: String, default: "", trim: true },
 
     page1: { type: [Schema.Types.Mixed], default: [] },
     page2: { type: [Schema.Types.Mixed], default: [] },
@@ -101,29 +133,48 @@ const brandSchema = new Schema(
     failedLoginAttempts: { type: Number, default: 0 },
     lockUntil: { type: Date, default: null },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    versionKey: false,
+    toJSON: {
+      transform(_doc, ret) {
+        delete ret.password;
+        ret.brandId = String(ret._id);
+        return ret;
+      },
+    },
+    toObject: {
+      transform(_doc, ret) {
+        delete ret.password;
+        ret.brandId = String(ret._id);
+        return ret;
+      },
+    },
+  }
 );
 
-brandSchema.pre("save", async function (next) {
+brandSchema.index({ email: 1 }, { unique: true });
+
+brandSchema.pre("save", async function preSave(next) {
   try {
     if (!this.isModified("password")) return next();
 
-    // ✅ if already bcrypt hashed, don't hash again
     const pwd = String(this.password || "");
-    const looksHashed = /^\$2[aby]\$\d{2}\$/.test(pwd) && pwd.length === 60;
-    if (looksHashed) return next();
+    const alreadyHashed = /^\$2[aby]\$\d{2}\$/.test(pwd) && pwd.length === 60;
+
+    if (alreadyHashed) return next();
 
     const salt = await bcrypt.genSalt(12);
     this.password = await bcrypt.hash(pwd, salt);
-    next();
-  } catch (err) {
-    next(err);
+    return next();
+  } catch (error) {
+    return next(error);
   }
 });
 
-// Compare password helper
-brandSchema.methods.comparePassword = function (candidate) {
-  return bcrypt.compare(candidate, this.password);
+brandSchema.methods.comparePassword = function comparePassword(candidate) {
+  if (!this.password) return Promise.resolve(false);
+  return bcrypt.compare(String(candidate || ""), String(this.password));
 };
 
 module.exports = mongoose.models.Brand || mongoose.model("Brand", brandSchema);
