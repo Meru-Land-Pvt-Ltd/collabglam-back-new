@@ -10,6 +10,12 @@ const STATUS_ENUM = Object.freeze(Array.from(new Set([...CANONICAL_STATUS, ...LE
 
 const WORKFLOW_SIGNERS = Object.freeze(["brand", "influencer"]);
 
+const CAMPAIGN_TYPES = Object.freeze({
+  FIXED_PAYMENT: "fixed_payment",
+  MILESTONE_BASED: "milestone_based",
+  PRODUCT_GIFTING: "product_gifting",
+});
+
 function normalizeStatus(status) {
   if (!status) return CONTRACT_STATUS.DRAFT;
   if (CANONICAL_STATUS.includes(status)) return status;
@@ -114,6 +120,11 @@ const ContentCampaignSchema = new mongoose.Schema(
     territoryTargetCountry: { type: String, default: "Worldwide" },
     effectiveDate: { type: Date, default: null },
     campaignTitleOrId: { type: String, default: "" },
+    campaignType: {
+      type: String,
+      enum: Object.values(CAMPAIGN_TYPES),
+      default: CAMPAIGN_TYPES.FIXED_PAYMENT,
+    },
   },
   { _id: false }
 );
@@ -122,7 +133,7 @@ const ReviewSchema = new mongoose.Schema(
   {
     includedRevisionRounds: { type: Number, default: 1 },
     additionalRevisionFee: { type: String, default: "" },
-    reshootObligation: { type: String, default: "No reshoot required except for material failure to follow approved brief" },
+    reshootObligation: { type: String, default: "" },
     reshootFee: { type: String, default: "" },
     minimumLivePeriod: { type: String, default: "" },
   },
@@ -133,7 +144,7 @@ const CommercialSchema = new mongoose.Schema(
   {
     totalCampaignFee: { type: Number, default: 0 },
     currency: { type: String, default: "USD" },
-    platformMilestonePaymentStructure: { type: String, default: "50% advance / 50% balance" },
+    platformMilestonePaymentStructure: { type: String, default: "" },
     customSplit: { type: String, default: "" },
     advancePaymentTrigger: { type: String, default: "" },
     remainingPaymentTrigger: { type: String, default: "" },
@@ -150,7 +161,7 @@ const CommercialSchema = new mongoose.Schema(
 
 const RawFilesSchema = new mongoose.Schema(
   {
-    rawSourceFileDelivery: { type: String, default: "Not included" },
+    rawSourceFileDelivery: { type: String, default: "" },
     deliveryDue: { type: String, default: "" },
     format: { type: String, default: "" },
     analyticsReportingDeadline: { type: String, default: "" },
@@ -166,7 +177,7 @@ const ShippingSchema = new mongoose.Schema(
     shipToAddress: { type: String, default: "" },
     shipToPhone: { type: String, default: "" },
     productReceiptConfirmationDeadline: { type: String, default: "" },
-    productReturnable: { type: String, default: "Gift / keep product" },
+    productReturnable: { type: String, default: "" },
     returnWindowMethod: { type: String, default: "" },
     riskOfLossNotes: { type: String, default: "" },
   },
@@ -186,13 +197,10 @@ const UsageRightsSchema = new mongoose.Schema(
         { usageRight: "Perpetual rights / buyout / work-made-for-hire", selected: false, duration: "", territoryNotes: "" },
       ],
     },
-    attributionRequirement: { type: String, default: "No attribution required" },
+    attributionRequirement: { type: String, default: "" },
     attributionText: { type: String, default: "" },
-    editingRights: { type: String, default: "Cropping / resizing only" },
-    musicStockAssetResponsibility: {
-      type: String,
-      default: "Brand responsible for separate commercial licensing",
-    },
+    editingRights: { type: String, default: "" },
+    musicStockAssetResponsibility: { type: String, default: "" },
   },
   { _id: false }
 );
@@ -210,18 +218,15 @@ const ExclusivitySchema = new mongoose.Schema(
     competitorBlackout: { type: String, default: "None" },
     categoryCompetitorList: { type: String, default: "" },
     blackoutPeriod: { type: String, default: "" },
-    optionalMoralsClause: { type: String, default: "Not included" },
+    optionalMoralsClause: { type: String, default: "" },
   },
   { _id: false }
 );
 
 const CancellationSchema = new mongoose.Schema(
   {
-    killFeeOrProrata: { type: String, default: "None" },
-    refundOfUnearnedAdvance: {
-      type: String,
-      default: "Yes — on material non-performance / uncured breach",
-    },
+    killFeeOrProrata: { type: String, default: "" },
+    refundOfUnearnedAdvance: { type: String, default: "" },
   },
   { _id: false }
 );
@@ -229,10 +234,10 @@ const CancellationSchema = new mongoose.Schema(
 const DisputeSchema = new mongoose.Schema(
   {
     governingLaw: { type: String, default: "Nevada, USA" },
-    disputeResolutionMethod: { type: String, default: "AAA arbitration" },
+    disputeResolutionMethod: { type: String, default: "AAA Arbitration" },
     disputeVenue: { type: String, default: "" },
     arbitrationSeat: { type: String, default: "Las Vegas, Nevada, USA" },
-    attorneysFees: { type: String, default: "Each Party bears own fees" },
+    attorneysFees: { type: String, default: "" },
   },
   { _id: false }
 );
@@ -244,7 +249,6 @@ const ScheduleASchema = new mongoose.Schema(
     preShootScriptRequired: { type: Boolean, default: false },
     preShootScriptDue: { type: String, default: "" },
     preShootScriptReviewBusinessDays: { type: Number, default: 2 },
-
     mandatoryTagsMentionsLinksCodes: { type: String, default: "" },
 
     review: { type: ReviewSchema, default: () => ({}) },
@@ -260,6 +264,43 @@ const ScheduleASchema = new mongoose.Schema(
   { _id: false }
 );
 
+const EditorLooseSectionSchema = new mongoose.Schema({}, { _id: false, strict: false });
+
+const EditorStateSchema = new mongoose.Schema(
+  {
+    partiesAndIdentity: { type: EditorLooseSectionSchema, default: () => ({}) },
+    deliverablesTimeline: { type: EditorLooseSectionSchema, default: () => ({}) },
+
+    fixedPaymentTerms: { type: EditorLooseSectionSchema, default: () => ({}) },
+    fixedPaymentTermsPrivate: { type: EditorLooseSectionSchema, default: () => ({}) },
+
+    milestonePaymentSchedule: { type: EditorLooseSectionSchema, default: () => ({}) },
+    milestonePaymentSchedulePrivate: { type: EditorLooseSectionSchema, default: () => ({}) },
+
+    productGiftingShipping: { type: EditorLooseSectionSchema, default: () => ({}) },
+
+    additionalCashCompensation: { type: EditorLooseSectionSchema, default: () => ({}) },
+    additionalCashCompensationPrivate: { type: EditorLooseSectionSchema, default: () => ({}) },
+
+    usageRightsContentOwnership: { type: EditorLooseSectionSchema, default: () => ({}) },
+    reportingAnalytics: { type: EditorLooseSectionSchema, default: () => ({}) },
+    exclusivityComplianceClaims: { type: EditorLooseSectionSchema, default: () => ({}) },
+    governingLawDisputeResolution: { type: EditorLooseSectionSchema, default: () => ({}) },
+  },
+  { _id: false, strict: false }
+);
+
+const ObjectionSchema = new mongoose.Schema(
+  {
+    fieldKey: { type: String, required: true },
+    raisedByRole: { type: String, enum: ["brand", "influencer"], required: true },
+    text: { type: String, default: "" },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const ContentSchema = new mongoose.Schema(
   {
     brand: { type: ContentBrandSchema, default: () => ({}) },
@@ -267,6 +308,7 @@ const ContentSchema = new mongoose.Schema(
     collabglam: { type: ContentCollabGlamSchema, default: () => ({}) },
     campaign: { type: ContentCampaignSchema, default: () => ({}) },
     scheduleA: { type: ScheduleASchema, default: () => ({}) },
+    editor: { type: EditorStateSchema, default: () => ({}) },
   },
   { _id: false }
 );
@@ -366,6 +408,13 @@ const ContractSchema = new mongoose.Schema(
     influencerId: { type: String, index: true, required: true },
     campaignId: { type: String, index: true, required: true },
 
+    campaignType: {
+      type: String,
+      enum: Object.values(CAMPAIGN_TYPES),
+      default: CAMPAIGN_TYPES.FIXED_PAYMENT,
+      index: true,
+    },
+
     status: {
       type: String,
       enum: STATUS_ENUM,
@@ -401,6 +450,12 @@ const ContractSchema = new mongoose.Schema(
     content: { type: ContentSchema, default: () => ({}) },
     admin: { type: AdminSchema, default: () => ({}) },
     other: { type: OtherSchema, default: () => ({}) },
+
+    objections: {
+      type: Map,
+      of: ObjectionSchema,
+      default: {},
+    },
 
     requestedEffectiveDate: { type: Date, default: null },
     requestedEffectiveDateTimezone: { type: String, default: "America/Los_Angeles" },
@@ -467,6 +522,14 @@ ContractSchema.pre("validate", function contractPreValidate(next) {
     this.requiredSigners = [...WORKFLOW_SIGNERS];
   }
 
+  if (!this.campaignType) {
+    this.campaignType = this.content?.campaign?.campaignType || CAMPAIGN_TYPES.FIXED_PAYMENT;
+  }
+
+  this.content = this.content || {};
+  this.content.campaign = this.content.campaign || {};
+  this.content.campaign.campaignType = this.campaignType;
+
   if (!this.brandName) this.brandName = this.content?.brand?.legalName || "";
   if (!this.brandAddress) this.brandAddress = this.content?.brand?.billingAddress || "";
   if (!this.influencerName) this.influencerName = this.content?.influencer?.legalName || "";
@@ -486,5 +549,6 @@ ContractSchema.pre("validate", function contractPreValidate(next) {
 ContractSchema.statics.normalizeStatus = normalizeStatus;
 ContractSchema.statics.CANONICAL_STATUS = CANONICAL_STATUS;
 ContractSchema.statics.WORKFLOW_SIGNERS = WORKFLOW_SIGNERS;
+ContractSchema.statics.CAMPAIGN_TYPES = CAMPAIGN_TYPES;
 
 module.exports = mongoose.model("Contract", ContractSchema);
