@@ -7,9 +7,10 @@ const {
   updateMediaKit,
   getAllMediaKits
 } = require('../controllers/mediaKitController');
+const { influencerAuth } = require("../auth/influencerAuth");
 
 // create from influencer (POST)
-router.post('/influencer', createByInfluencer);
+router.post('/influencer', influencerAuth, createByInfluencer);
 
 // update mediakit (POST)
 router.post('/update', updateMediaKit);

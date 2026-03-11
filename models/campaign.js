@@ -130,7 +130,7 @@ const CampaignSchema = new Schema(
 
     publishStatus: {
       type: String,
-      enum: ["draft","published"],
+      enum: ["draft", "published"],
       default: "draft",
       index: true,
     },
@@ -165,7 +165,7 @@ CampaignSchema.index({ brandId: 1, status: 1 });
 CampaignSchema.index({ brandId: 1, isDraft: 1, isActive: 1, createdAt: -1 });
 CampaignSchema.index({ "pendingUpdate.status": 1, updatedAt: -1 });
 CampaignSchema.index({ categoryId: 1, subcategoryIds: 1 });
-CampaignSchema.index({ publishStatus: 1});
+CampaignSchema.index({ publishStatus: 1 });
 CampaignSchema.index({ status: 1, isDraft: 1, isActive: 1 });
 
 module.exports =
