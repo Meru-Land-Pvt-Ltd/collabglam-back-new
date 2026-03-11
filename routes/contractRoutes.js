@@ -17,7 +17,7 @@ const {
   // Scoped edits
   brandUpdateFields,
   influencerUpdateFields,
-
+  initiateBulk,
   // Basic read
   getContract,
   reject,
@@ -54,6 +54,7 @@ router.post('/viewPdf', viewContractPdf);                // View final/locked PD
 router.post('/getContract', getContract);                // Latest contracts for Brand & Influencer
 
 router.post('/reject', reject);
+router.post("/initiate-bulk", initiateBulk);
 
 // lists
 router.get('/timezones', listTimezones);

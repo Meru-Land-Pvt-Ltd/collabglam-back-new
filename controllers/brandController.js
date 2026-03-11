@@ -3,7 +3,6 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 
-// tolerant imports
 const BrandModelImport = require("../models/brand");
 const BrandModel = BrandModelImport.BrandModel || BrandModelImport;
 
@@ -30,9 +29,11 @@ const HttpStatus = HttpStatusImport.HttpStatus || HttpStatusImport;
 const ApiErrorImport = require("../core/http/ApiError");
 const ApiError = ApiErrorImport.ApiError || ApiErrorImport;
 const ValidationError = ApiErrorImport.ValidationError;
+const UnauthorizedError = ApiErrorImport.UnauthorizedError;
 const ConflictError = ApiErrorImport.ConflictError;
 const InternalError = ApiErrorImport.InternalError;
 const NotFoundError = ApiErrorImport.NotFoundError;
+const RateLimitError = ApiErrorImport.RateLimitError;
 
 let ErrorCodes;
 try {
@@ -46,6 +47,10 @@ try {
     SIGNIN_RATE_LIMIT: "SIGNIN_RATE_LIMIT",
     SIGNIN_DAILY_LIMIT: "SIGNIN_DAILY_LIMIT",
     INTERNAL_ERROR: "INTERNAL_ERROR",
+    CONFLICT: "CONFLICT",
+    VALIDATION_FAILED: "VALIDATION_FAILED",
+    RESOURCE_NOT_FOUND: "RESOURCE_NOT_FOUND",
+    RATE_LIMITED: "RATE_LIMITED",
   };
 }
 
@@ -114,11 +119,7 @@ function getBearerToken(req) {
   const auth = req.headers.authorization;
 
   if (!auth || !auth.startsWith("Bearer ")) {
-    throw new ApiError({
-      status: HttpStatus.UNAUTHORIZED || 401,
-      code: ErrorCodes.AUTH_INVALID_TOKEN,
-      message: "Missing or invalid Authorization header",
-    });
+    throw new UnauthorizedError("Missing or invalid Authorization header");
   }
 
   return auth.slice(7).trim();
@@ -139,9 +140,23 @@ function isQAArray(value) {
 }
 
 function rethrowAsApiError(err) {
+  if (err instanceof ApiError) throw err;
+
   if (err && err.code === 11000) {
-    throw new ConflictError("Email already registered. Please login.", {
-      keyValue: err.keyValue,
+    const field =
+      Object.keys(err.keyPattern || err.keyValue || {})[0] || "unknown";
+    const value = err.keyValue?.[field];
+
+    if (field === "email") {
+      throw new ConflictError("Email already registered. Please login.", {
+        field,
+        value,
+      });
+    }
+
+    throw new ConflictError(`${field} already exists. Please use a different value.`, {
+      field,
+      value,
     });
   }
 
@@ -165,8 +180,7 @@ function handleControllerError(next, err) {
   }
 
   if (err instanceof ApiError) return next(err);
-
-  return next(new InternalError("Internal server error", undefined, err));
+  return next(new InternalError("Internal server error", null, err));
 }
 
 async function findBrandByEmail(email, includePassword = false) {
@@ -186,6 +200,15 @@ async function clearPendingOtpDocs(email, purpose) {
     docType: "otp",
     purpose,
     status: 0,
+  }).exec();
+}
+
+async function clearAllOtpDocs(email, purpose) {
+  await VerifyOtpModel.deleteMany({
+    email: normalizeEmail(email),
+    role: "brand",
+    docType: "otp",
+    purpose,
   }).exec();
 }
 
@@ -236,16 +259,32 @@ function assertValidOtpDoc(otpDoc, email, otp) {
   }
 }
 
-async function markOtpUsed(otpDoc, userId = null) {
+async function markOtpUsed(otpDoc, options = {}) {
+  const { userId = null, extendExpiryMs = null } = options;
+
+  const update = {
+    status: 1,
+    userId: userId || otpDoc.userId || null,
+  };
+
+  if (extendExpiryMs && Number(extendExpiryMs) > 0) {
+    update.expiresAt = new Date(Date.now() + Number(extendExpiryMs));
+  }
+
   await VerifyOtpModel.updateOne(
     { _id: otpDoc._id, status: 0 },
-    { $set: { status: 1, userId: userId || otpDoc.userId || null } }
+    { $set: update }
   ).exec();
 }
 
 async function getSigninLimitDoc(email) {
   return VerifyOtpModel.findOneAndUpdate(
-    { email: normalizeEmail(email), role: "brand", docType: "limit", key: "signin_limit" },
+    {
+      email: normalizeEmail(email),
+      role: "brand",
+      docType: "limit",
+      key: "signin_limit",
+    },
     {
       $setOnInsert: {
         email: normalizeEmail(email),
@@ -318,10 +357,8 @@ async function enforceOtpLimitByKey(email, key) {
       await limitDoc.save();
     }
 
-    throw new ApiError({
-      status: HttpStatus.TOO_MANY_REQUESTS || 429,
+    throw new RateLimitError("Try again after 24 hours.", {
       code: ErrorCodes.OTP_DAILY_LIMIT,
-      message: "Try again after 24 hours.",
     });
   }
 
@@ -332,10 +369,8 @@ async function enforceOtpLimitByKey(email, key) {
     const waitMs =
       new Date(limitDoc.signupOtpCooldownUntil).getTime() - nowMs;
 
-    throw new ApiError({
-      status: HttpStatus.TOO_MANY_REQUESTS || 429,
+    throw new RateLimitError(`Try again in ${msToWaitString(waitMs)}.`, {
       code: ErrorCodes.OTP_RATE_LIMIT,
-      message: `Try again in ${msToWaitString(waitMs)}.`,
     });
   }
 
@@ -376,11 +411,10 @@ async function enforceSigninLimit(email) {
   ) {
     const waitMs = new Date(doc.signinCooldownUntil).getTime() - nowMs;
 
-    throw new ApiError({
-      status: HttpStatus.TOO_MANY_REQUESTS || 429,
-      code: ErrorCodes.SIGNIN_RATE_LIMIT,
-      message: `Too many failed login attempts. Try again in ${msToWaitString(waitMs)}.`,
-    });
+    throw new RateLimitError(
+      `Too many failed login attempts. Try again in ${msToWaitString(waitMs)}.`,
+      { code: ErrorCodes.SIGNIN_RATE_LIMIT }
+    );
   }
 
   if ((doc.signinFailedCount ?? 0) >= SIGNIN_TOTAL) {
@@ -391,11 +425,10 @@ async function enforceSigninLimit(email) {
       await doc.save();
     }
 
-    throw new ApiError({
-      status: HttpStatus.TOO_MANY_REQUESTS || 429,
-      code: ErrorCodes.SIGNIN_DAILY_LIMIT,
-      message: "Too many failed login attempts. Try again after 24 hours.",
-    });
+    throw new RateLimitError(
+      "Too many failed login attempts. Try again after 24 hours.",
+      { code: ErrorCodes.SIGNIN_DAILY_LIMIT }
+    );
   }
 }
 
@@ -435,23 +468,28 @@ async function recordFailedSignin(email) {
   ) {
     const waitMs = new Date(doc.signinCooldownUntil).getTime() - nowMs;
 
-    throw new ApiError({
-      status: HttpStatus.TOO_MANY_REQUESTS || 429,
-      code:
-        (doc.signinFailedCount ?? 0) >= SIGNIN_TOTAL
-          ? ErrorCodes.SIGNIN_DAILY_LIMIT
-          : ErrorCodes.SIGNIN_RATE_LIMIT,
-      message:
-        (doc.signinFailedCount ?? 0) >= SIGNIN_TOTAL
-          ? "Too many failed login attempts. Try again after 24 hours."
-          : `Too many failed login attempts. Try again in ${msToWaitString(waitMs)}.`,
-    });
+    throw new RateLimitError(
+      (doc.signinFailedCount ?? 0) >= SIGNIN_TOTAL
+        ? "Too many failed login attempts. Try again after 24 hours."
+        : `Too many failed login attempts. Try again in ${msToWaitString(waitMs)}.`,
+      {
+        code:
+          (doc.signinFailedCount ?? 0) >= SIGNIN_TOTAL
+            ? ErrorCodes.SIGNIN_DAILY_LIMIT
+            : ErrorCodes.SIGNIN_RATE_LIMIT,
+      }
+    );
   }
 }
 
 async function resetSigninLimit(email) {
   await VerifyOtpModel.updateOne(
-    { email: normalizeEmail(email), role: "brand", docType: "limit", key: "signin_limit" },
+    {
+      email: normalizeEmail(email),
+      role: "brand",
+      docType: "limit",
+      key: "signin_limit",
+    },
     {
       $set: {
         signinFailedCount: 0,
@@ -468,7 +506,7 @@ function buildSafeSignupPayload(body, hashedPassword) {
     name: safeTrim(body.name) || safeTrim(body.brandName),
     companySize: safeTrim(body.companySize),
     industry: safeTrim(body.industry),
-    password: hashedPassword,
+    passwordHash: hashedPassword,
   };
 }
 
@@ -479,7 +517,9 @@ function validateSignupRequest(body) {
   const password = String(body.password || "");
 
   if (!brandName) throw new ValidationError("Brand name is required");
-  if (!email || !isValidEmail(email)) throw new ValidationError("Valid email is required");
+  if (!email || !isValidEmail(email)) {
+    throw new ValidationError("Valid email is required");
+  }
   if (!industry) throw new ValidationError("Industry is required");
   if (!password.trim()) throw new ValidationError("Password is required");
   if (!isPasswordLenOk(password)) {
@@ -565,34 +605,27 @@ async function verifyOtpSignUp(req, res, next) {
     assertValidOtpDoc(otpDoc, email, otp);
 
     const payload = otpDoc.signupPayload || {};
-
-    if (!payload.brandName || !payload.industry || !payload.password) {
+    if (!payload.brandName || !payload.industry || !payload.passwordHash) {
       throw new ValidationError("Signup details missing. Please request OTP again.");
     }
 
-    let brand = await findBrandByEmail(email);
-
-    if (!brand) {
-      try {
-        brand = await BrandModel.create({
-          email,
-          brandName: safeTrim(payload.brandName),
-          name: safeTrim(payload.name) || safeTrim(payload.brandName),
-          companySize: safeTrim(payload.companySize),
-          industry: safeTrim(payload.industry),
-          password: payload.password,
-        });
-      } catch (createError) {
-        if (createError && createError.code === 11000) {
-          brand = await findBrandByEmail(email);
-          if (!brand) throw createError;
-        } else {
-          throw createError;
-        }
-      }
+    const existingBrand = await findBrandByEmail(email);
+    if (existingBrand) {
+      await clearAllOtpDocs(email, "signup");
+      throw new ConflictError("Email already registered. Please login.");
     }
 
-    await markOtpUsed(otpDoc, brand._id);
+    const brand = await BrandModel.create({
+      email,
+      brandName: safeTrim(payload.brandName),
+      name: safeTrim(payload.name) || safeTrim(payload.brandName),
+      companySize: safeTrim(payload.companySize),
+      industry: safeTrim(payload.industry),
+      password: payload.passwordHash,
+    });
+
+    await markOtpUsed(otpDoc, { userId: brand._id });
+    await clearAllOtpDocs(email, "signup");
 
     const token = signJwt({
       brandId: String(brand._id),
@@ -652,10 +685,7 @@ async function saveBrandOnboarding(req, res, next) {
     const update = {};
 
     if (page1 !== undefined || ispage1Skip !== undefined) {
-      if (
-        ispage1Skip !== undefined &&
-        typeof ispage1Skip !== "boolean"
-      ) {
+      if (ispage1Skip !== undefined && typeof ispage1Skip !== "boolean") {
         throw new ValidationError("ispage1Skip must be boolean");
       }
 
@@ -675,10 +705,7 @@ async function saveBrandOnboarding(req, res, next) {
     }
 
     if (page2 !== undefined || ispage2Skip !== undefined) {
-      if (
-        ispage2Skip !== undefined &&
-        typeof ispage2Skip !== "boolean"
-      ) {
+      if (ispage2Skip !== undefined && typeof ispage2Skip !== "boolean") {
         throw new ValidationError("ispage2Skip must be boolean");
       }
 
@@ -698,10 +725,7 @@ async function saveBrandOnboarding(req, res, next) {
     }
 
     if (page3 !== undefined || ispage3Skip !== undefined) {
-      if (
-        ispage3Skip !== undefined &&
-        typeof ispage3Skip !== "boolean"
-      ) {
+      if (ispage3Skip !== undefined && typeof ispage3Skip !== "boolean") {
         throw new ValidationError("ispage3Skip must be boolean");
       }
 
@@ -907,7 +931,10 @@ async function verifyOtpForgotBrand(req, res, next) {
     const otpDoc = await getLatestPendingOtp(email, "reset_password");
     assertValidOtpDoc(otpDoc, email, otp);
 
-    await markOtpUsed(otpDoc, brand._id);
+    await markOtpUsed(otpDoc, {
+      userId: brand._id,
+      extendExpiryMs: RESET_TTL_MS,
+    });
 
     const resetToken = signResetJwt({
       tokenType: "pwd_reset",
@@ -949,11 +976,7 @@ async function updatePasswordBrand(req, res, next) {
       !decoded?.resetId ||
       !decoded?.email
     ) {
-      throw new ApiError({
-        status: HttpStatus.UNAUTHORIZED || 401,
-        code: ErrorCodes.AUTH_INVALID_TOKEN,
-        message: "Invalid reset token",
-      });
+      throw new UnauthorizedError("Invalid reset token");
     }
 
     const newPassword = String(req.body?.newPassword || "");

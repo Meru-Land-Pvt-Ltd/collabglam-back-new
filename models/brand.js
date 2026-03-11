@@ -65,11 +65,9 @@ const brandSchema = new Schema(
     email: {
       type: String,
       required: [true, "Email is required"],
-      unique: true,
       lowercase: true,
       trim: true,
       match: [emailRegex, "Invalid email"],
-      index: true,
     },
 
     brandName: {

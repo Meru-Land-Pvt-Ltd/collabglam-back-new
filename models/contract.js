@@ -10,10 +10,10 @@ const STATUS_ENUM = Object.freeze(Array.from(new Set([...CANONICAL_STATUS, ...LE
 
 const WORKFLOW_SIGNERS = Object.freeze(["brand", "influencer"]);
 
-const CAMPAIGN_TYPES = Object.freeze({
-  FIXED_PAYMENT: "fixed_payment",
-  MILESTONE_BASED: "milestone_based",
-  PRODUCT_GIFTING: "product_gifting",
+const PAYMENT_TYPES = Object.freeze({
+  MILESTONE: "Milestone",
+  FIXED: "Fixed",
+  GIFTING: "Gifting",
 });
 
 function normalizeStatus(status) {
@@ -21,6 +21,26 @@ function normalizeStatus(status) {
   if (CANONICAL_STATUS.includes(status)) return status;
   if (LEGACY_STATUS_MAP[status]) return LEGACY_STATUS_MAP[status];
   return CONTRACT_STATUS.BRAND_SENT_DRAFT;
+}
+
+function normalizePaymentType(value) {
+  if (!value) return PAYMENT_TYPES.MILESTONE;
+
+  const raw = String(value).trim().toLowerCase();
+
+  if (raw === "milestone" || raw === "milestone_based") {
+    return PAYMENT_TYPES.MILESTONE;
+  }
+
+  if (raw === "fixed" || raw === "fixed_payment") {
+    return PAYMENT_TYPES.FIXED;
+  }
+
+  if (raw === "gifting" || raw === "product_gifting") {
+    return PAYMENT_TYPES.GIFTING;
+  }
+
+  return PAYMENT_TYPES.MILESTONE;
 }
 
 const SignatureSchema = new mongoose.Schema(
@@ -120,10 +140,10 @@ const ContentCampaignSchema = new mongoose.Schema(
     territoryTargetCountry: { type: String, default: "Worldwide" },
     effectiveDate: { type: Date, default: null },
     campaignTitleOrId: { type: String, default: "" },
-    campaignType: {
+    paymentType: {
       type: String,
-      enum: Object.values(CAMPAIGN_TYPES),
-      default: CAMPAIGN_TYPES.FIXED_PAYMENT,
+      enum: Object.values(PAYMENT_TYPES),
+      default: PAYMENT_TYPES.MILESTONE,
     },
   },
   { _id: false }
@@ -408,10 +428,10 @@ const ContractSchema = new mongoose.Schema(
     influencerId: { type: String, index: true, required: true },
     campaignId: { type: String, index: true, required: true },
 
-    campaignType: {
+    paymentType: {
       type: String,
-      enum: Object.values(CAMPAIGN_TYPES),
-      default: CAMPAIGN_TYPES.FIXED_PAYMENT,
+      enum: Object.values(PAYMENT_TYPES),
+      default: PAYMENT_TYPES.MILESTONE,
       index: true,
     },
 
@@ -522,13 +542,16 @@ ContractSchema.pre("validate", function contractPreValidate(next) {
     this.requiredSigners = [...WORKFLOW_SIGNERS];
   }
 
-  if (!this.campaignType) {
-    this.campaignType = this.content?.campaign?.campaignType || CAMPAIGN_TYPES.FIXED_PAYMENT;
-  }
+  this.content = this.content || {};
+  this.content.campaign = this.content.campaign || {};
+
+  this.paymentType = normalizePaymentType(
+    this.paymentType || this.content?.campaign?.paymentType
+  );
 
   this.content = this.content || {};
   this.content.campaign = this.content.campaign || {};
-  this.content.campaign.campaignType = this.campaignType;
+  this.content.campaign.paymentType = this.paymentType;
 
   if (!this.brandName) this.brandName = this.content?.brand?.legalName || "";
   if (!this.brandAddress) this.brandAddress = this.content?.brand?.billingAddress || "";
@@ -549,6 +572,6 @@ ContractSchema.pre("validate", function contractPreValidate(next) {
 ContractSchema.statics.normalizeStatus = normalizeStatus;
 ContractSchema.statics.CANONICAL_STATUS = CANONICAL_STATUS;
 ContractSchema.statics.WORKFLOW_SIGNERS = WORKFLOW_SIGNERS;
-ContractSchema.statics.CAMPAIGN_TYPES = CAMPAIGN_TYPES;
+ContractSchema.statics.PAYMENT_TYPES = PAYMENT_TYPES;
 
 module.exports = mongoose.model("Contract", ContractSchema);
