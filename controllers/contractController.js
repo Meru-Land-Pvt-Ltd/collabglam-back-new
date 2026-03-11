@@ -309,16 +309,71 @@ function mergeDeep(base, patch) {
   return out;
 }
 
-function flatten(obj, prefix = "") {
-  const out = {};
-  Object.entries(obj || {}).forEach(([k, v]) => {
-    const p = prefix ? `${prefix}.${k}` : k;
-    if (v && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date)) {
-      Object.assign(out, flatten(v, p));
-    } else {
-      out[p] = v;
+function toPlainSafe(value, seen = new WeakSet()) {
+  if (value === null || value === undefined) return value;
+  if (value instanceof Date) return value;
+
+  if (typeof value !== "object") return value;
+
+  if (typeof value?.toObject === "function") {
+    value = value.toObject({ depopulate: true, flattenMaps: true });
+  }
+
+  if (value instanceof Map) {
+    const out = {};
+    for (const [k, v] of value.entries()) {
+      out[k] = toPlainSafe(v, seen);
     }
-  });
+    return out;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((v) => toPlainSafe(v, seen));
+  }
+
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    out[k] = toPlainSafe(v, seen);
+  }
+  return out;
+}
+
+function flatten(obj, prefix = "") {
+  const safe = toPlainSafe(obj);
+  const out = {};
+
+  function walk(value, path) {
+    if (value instanceof Date || value === null || value === undefined) {
+      out[path] = value;
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      out[path] = value;
+      return;
+    }
+
+    if (typeof value !== "object") {
+      out[path] = value;
+      return;
+    }
+
+    const entries = Object.entries(value);
+    if (!entries.length) {
+      out[path] = value;
+      return;
+    }
+
+    for (const [k, v] of entries) {
+      const nextPath = path ? `${path}.${k}` : k;
+      walk(v, nextPath);
+    }
+  }
+
+  walk(safe, prefix);
   return out;
 }
 
@@ -2161,14 +2216,16 @@ exports.influencerConfirm = async (req, res) => {
       });
     }
 
-    const before = { content: contract.content?.toObject?.() || contract.content };
     contract.content = contract.content || {};
-    const changedPaths = applyAllowedDeepUpdates(contract, incoming, ALLOWED_INFLUENCER_PATHS);
-    const after = { content: contract.content };
 
-    const editedFields = computeEditedFields(before, after, ["content"]);
-    if (editedFields.length || changedPaths.length) {
-      bumpVersion(contract, "influencer", req.user?.id, editedFields.length ? editedFields : changedPaths);
+    const changedPaths = applyAllowedDeepUpdates(
+      contract,
+      incoming,
+      ALLOWED_INFLUENCER_PATHS
+    );
+
+    if (changedPaths.length) {
+      bumpVersion(contract, "influencer", req.user?.id, changedPaths);
       contract.status = CONTRACT_STATUS.INFLUENCER_EDITED;
       contract.awaitingRole = "brand";
       resetAcceptancesForNewVersion(contract);
@@ -2179,7 +2236,7 @@ exports.influencerConfirm = async (req, res) => {
     contract.isAccepted = 1;
 
     addAudit(contract, "influencer", "INFLUENCER_ACCEPTED", {
-      editedFields: editedFields.length ? editedFields : changedPaths,
+      editedFields: changedPaths,
       version: contract.version,
       nextRole: sync.nextRole,
     });
@@ -3237,9 +3294,9 @@ exports.initiateBulk = async (req, res) => {
 
         const requestedDateBuilt = requestedEffectiveDate
           ? buildRequestedEffectiveDate(
-              requestedEffectiveDate,
-              requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ
-            )
+            requestedEffectiveDate,
+            requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ
+          )
           : undefined;
 
         const contract = new Contract({
