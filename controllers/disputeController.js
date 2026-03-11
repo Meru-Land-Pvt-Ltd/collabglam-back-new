@@ -3,7 +3,7 @@ const Dispute = require('../models/dispute');
 const Campaign = require('../models/campaign');
 const Admin = require('../models/admin');
 const Brand = require('../models/brand');
-const Influencer = require('../models/influencer');
+const { InfluencerModel: Influencer } = require('../models/influencer');
 const ApplyCampaign = require('../models/applyCampaign');
 const Contract = require('../models/contract');
 const { createAndEmit } = require('../utils/notifier');
@@ -237,17 +237,18 @@ exports.brandCreateDispute = async (req, res) => {
       attachments = [],
     } = req.body || {};
 
+    console.log("campaignId in brandCreateDispute:", influencerId, campaignId);
     if (!brandId || !influencerId || !subject) {
       return res.status(400).json({
         message: 'brandId, influencerId and subject are required',
       });
     }
 
-    const brand = await Brand.findOne({ brandId: String(brandId) }).lean();
+    const brand = await Brand.findOne({ _id: String(brandId) }).lean();
     if (!brand) return res.status(404).json({ message: 'Brand not found' });
 
     const influencer = await Influencer.findOne({
-      influencerId: String(influencerId),
+      _id: String(influencerId),
     }).lean();
     if (!influencer) return res.status(404).json({ message: 'Influencer not found' });
 
@@ -255,9 +256,10 @@ exports.brandCreateDispute = async (req, res) => {
     let camp = null;
     if (campaignId) {
       camp = await Campaign.findOne({
-        campaignsId: campaignId,
+        _id: campaignId,
         brandId: String(brandId),
       }).lean();
+      console.log("Found campaign:", camp);
       if (camp) linkedCampaignId = String(campaignId);
     }
 
@@ -337,7 +339,7 @@ exports.brandList = async (req, res) => {
       return res.status(400).json({ message: 'brandId is required' });
     }
 
-    const brand = await Brand.findOne({ brandId: String(brandId) }).lean();
+    const brand = await Brand.findOne({ _id: String(brandId) }).lean();
     if (!brand) {
       return res.status(404).json({ message: 'Brand not found' });
     }
@@ -398,23 +400,24 @@ exports.brandList = async (req, res) => {
       ).map(String);
 
       const [influencers, campaigns] = await Promise.all([
-        influencerIds.length
-          ? Influencer.find({ influencerId: { $in: influencerIds } })
-            .select('influencerId name')
+      influencerIds.length
+        ? Influencer.find({ _id: { $in: influencerIds } })
+            .select('_id name')
             .lean()
-          : [],
-        campaignIds.length
-          ? Campaign.find({ campaignsId: { $in: campaignIds } })
-            .select('campaignsId productOrServiceName')
+        : [],
+      campaignIds.length
+        ? Campaign.find({ _id: { $in: campaignIds } })
+            .select('_id productOrServiceName')
             .lean()
-          : [],
-      ]);
+        : [],
+    ]);
 
       const infMap = new Map(
-        (influencers || []).map((i) => [String(i.influencerId), i.name])
+        (influencers || []).map((i) => [String(i._id), i.name])
       );
+
       const cmap = new Map(
-        (campaigns || []).map((c) => [String(c.campaignsId), c.productOrServiceName])
+        (campaigns || []).map((c) => [String(c._id), c.productOrServiceName])
       );
 
       const enriched = rowsWithRole.map((r) => {
@@ -499,7 +502,7 @@ exports.brandGetById = async (req, res) => {
       return res.status(400).json({ message: 'brandId is required' });
     }
 
-    const brand = await Brand.findOne({ brandId: String(brandId) }).lean();
+    const brand = await Brand.findOne({ _id: String(brandId) }).lean();
     if (!brand) return res.status(404).json({ message: 'Brand not found' });
 
     const d = await Dispute.findOne({ disputeId: id }).lean();
@@ -518,7 +521,7 @@ exports.brandGetById = async (req, res) => {
             .lean()
           : null,
         d.influencerId
-          ? Influencer.findOne({ influencerId: d.influencerId })
+          ? Influencer.findOne({ _id: d.influencerId })
             .select('influencerId name')
             .lean()
           : null,
@@ -583,7 +586,7 @@ exports.brandAddComment = async (req, res) => {
       return res.status(400).json({ message: 'text is required' });
     }
 
-    const brand = await Brand.findOne({ brandId: String(brandId) }).lean();
+    const brand = await Brand.findOne({ _id: String(brandId) }).lean();
     if (!brand) return res.status(404).json({ message: 'Brand not found' });
 
     const d = await Dispute.findOne({ disputeId: id });
