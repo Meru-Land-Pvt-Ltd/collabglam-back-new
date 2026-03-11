@@ -4,6 +4,8 @@ const router = express.Router();
 const campaignController = require("../controllers/campaignsController");
 const { verifyBrandOrAdmin } = require("../middlewares/verifyBrandOrAdmin");
 const { brandAuth } = require("../auth/brandAuth");
+const { influencerAuth } = require("../auth/influencerAuth");
+const  brandOrInfluencerAuth  = require("../auth/brandOrInfluencerAuth");
 
 // 1. Create a new campaign
 router.post("/create", verifyBrandOrAdmin, campaignController.createCampaign);
@@ -18,7 +20,7 @@ router.post("/update-manual", brandAuth, campaignController.updateManualCampaign
 router.get("/getAll", brandAuth, campaignController.getAllCampaigns);
 
 // 4. Get one campaign by its campaignsId
-router.get("/id", brandAuth, campaignController.getCampaignById);
+router.get("/id", campaignController.getCampaignById);
 
 // 5. Delete a campaign by its campaignsId
 router.post("/delete", brandAuth, campaignController.deleteCampaignByCampaignId);
@@ -28,9 +30,9 @@ router.get("/previous", brandAuth, campaignController.getPreviousCampaigns);
 router.post("/byCategoryId", brandAuth, campaignController.getActiveCampaignsByCategories);
 
 router.post("/checkApplied", brandAuth, campaignController.checkApplied);
-router.post("/byInfluencer", brandAuth, campaignController.getCampaignsByInfluencer);
+router.post("/byInfluencer", influencerAuth, campaignController.getCampaignsByInfluencer);
 router.post("/myCampaign", brandAuth, campaignController.getApprovedCampaignsByInfluencer);
-router.post("/applied", brandAuth, campaignController.getAppliedCampaignsByInfluencer);
+router.post("/applied", brandOrInfluencerAuth, campaignController.getAppliedCampaignsByInfluencer);
 router.post("/history", brandAuth, campaignController.getCampaignHistoryByBrand);
 
 router.post("/accepted", brandAuth, campaignController.getAcceptedCampaigns);
@@ -49,16 +51,18 @@ router.post("/reject-pending", campaignController.rejectCampaignPendingUpdate);
 
 router.get("/created-by-admin/:brandId", campaignController.getAdminCampaigns);
 
-router.get("/category", brandAuth, campaignController.getCategories);
+router.get("/category",campaignController.getCategories);
 router.get("/subcategory", brandAuth, campaignController.getSubcategories);
 
 // existing endpoint
 router.post("/view-campaign-brand", brandAuth, campaignController.viewCampaignByIdForBrand);
 
-// new alias for your edit page
-router.post("/viewCampaignByIdForBrand", brandAuth, campaignController.viewCampaignByIdForBrand);
-
 router.post("/recommended-influencers", brandAuth, campaignController.getRecommendedInfluencersByCampaignId);
 router.post("/update-status",brandAuth, campaignController.updateStatus);
+router.post(
+  "/view-campaign-by-influencer",
+  influencerAuth,
+  campaignController.viewCampaignByIdForInfluencer
+);
 
 module.exports = router;

@@ -68,7 +68,6 @@ const CampaignSchema = new Schema(
     description: { type: String, trim: true, default: "" },
     campaignType: { type: String, trim: true, default: "" },
 
-    productServiceType: { type: String, trim: true, default: "" },
     campaignCategory: { type: String, trim: true, default: "" },
     campaignSubcategory: { type: String, trim: true, default: "" },
 
@@ -76,7 +75,6 @@ const CampaignSchema = new Schema(
     subcategoryIds: [{ type: Schema.Types.ObjectId }],
 
     productImages: { type: [Schema.Types.Mixed], default: [] },
-    images: { type: [Schema.Types.Mixed], default: [] },
     productLink: { type: String, trim: true, default: "" },
     videoLink: { type: String, trim: true, default: "" },
     productServiceInfo: { type: [Schema.Types.Mixed], default: [] },
@@ -123,8 +121,6 @@ const CampaignSchema = new Schema(
     timeline: { type: timelineSchema, default: () => ({}) },
     categories: { type: [categoryPairSchema], default: [] },
 
-    productOrServiceName: { type: String, trim: true, default: "" },
-
     status: {
       type: String,
       enum: ["draft", "active", "paused", "completed", "archived"],
@@ -136,13 +132,6 @@ const CampaignSchema = new Schema(
       type: String,
       enum: ["draft","published"],
       default: "draft",
-      index: true,
-    },
-
-    campaignStatus: {
-      type: String,
-      enum: ["open", "paused"],
-      default: "paused",
       index: true,
     },
 
@@ -177,7 +166,7 @@ CampaignSchema.index({ brandId: 1, isDraft: 1, isActive: 1, createdAt: -1 });
 CampaignSchema.index({ "pendingUpdate.status": 1, updatedAt: -1 });
 CampaignSchema.index({ categoryId: 1, subcategoryIds: 1 });
 CampaignSchema.index({ publishStatus: 1});
-CampaignSchema.index({ campaignStatus: 1, isDraft: 1, isActive: 1 });
+CampaignSchema.index({ status: 1, isDraft: 1, isActive: 1 });
 
 module.exports =
   mongoose.models.Campaign || mongoose.model("Campaign", CampaignSchema);

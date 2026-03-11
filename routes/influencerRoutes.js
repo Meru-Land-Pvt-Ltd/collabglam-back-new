@@ -29,52 +29,51 @@ const {
   getInfluencerOnboarding,
   markInfluencerTourSeen,
 } = require('../controllers/influencerController');
-const { influencerAuth } = require("../middlewares/influencerAuth")
+const { influencerAuth } = require("../auth/influencerAuth");
 // Public endpoints:
 router.post('/request-otp', sendSignupOtpInfluencer);
 router.post('/verify-otp', verifyOtpSignUpInfluencer);
-router.post('/register', uploadProfileImage, registerInfluencer);
-router.post('/save-influencer-onboarding',influencerAuth,saveQuickOnboarding);
+router.post('/save-influencer-onboarding', influencerAuth, saveQuickOnboarding);
 
 
 router.post('/login', signInInfluencer);
 router.post('/get-campaign', getCampaignsByInfluencer);
-router.post('/getlist', verifyToken, getList);
-router.get('/getById', verifyToken, getById);
+router.post('/getlist', influencerAuth, getList);
+router.get('/getById', influencerAuth, getById);
 
-router.post('/sendOtp', requestPasswordResetOtpInfluencer);
-router.post('/verifyOtp', verifyPasswordResetOtpInfluencer);
-router.post('/updatePassword', resetPasswordInfluencer);
+router.post('/sendOtp', influencerAuth, requestPasswordResetOtpInfluencer);
+router.post('/verifyOtp', influencerAuth, verifyPasswordResetOtpInfluencer);
+router.post('/updatePassword', influencerAuth, resetPasswordInfluencer);
 
-router.post('/viewPaymentByType', verifyToken, viewPaymentByType);
+router.post('/viewPaymentByType', influencerAuth, viewPaymentByType);
 
-router.post('/addPaymentMethod', verifyToken, addPaymentMethod);
-router.post('/deletePaymentMethod', verifyToken, deletePaymentMethod);
-router.post('/updatePaymentMethod', verifyToken, updatePaymentMethod);
-router.post('/suggestInfluencers', verifyToken, suggestInfluencers);
+router.post('/addPaymentMethod', influencerAuth, addPaymentMethod);
+router.post('/deletePaymentMethod', influencerAuth, deletePaymentMethod);
+router.post('/updatePaymentMethod', influencerAuth, updatePaymentMethod);
+router.post('/suggestInfluencers', influencerAuth, suggestInfluencers);
 
 // POST /influencer/searchBrands → search brands by name
 
-router.post('/updateProfile', verifyToken, uploadProfileImage, updateProfile);
-router.post('/requestEmailUpdate', verifyToken, requestEmailUpdate);
-router.post('/verifyEmailUpdateOtp', verifyToken, verifyotp)
+router.post('/updateProfile', influencerAuth, uploadProfileImage, updateProfile);
+router.post('/requestEmailUpdate', influencerAuth, requestEmailUpdate);
+router.post('/verifyEmailUpdateOtp', influencerAuth, verifyotp);
 
-router.get('/lite', verifyToken, getLiteById);;
+router.get('/lite', influencerAuth, getLiteById);
 
 router.post(
   '/claim-email/request-otp',
-  verifyToken,
+  influencerAuth,
   requestClaimEmailOtp
 );
 
 router.post(
   '/claim-email/verify',
-  verifyToken,
+  influencerAuth,
   verifyClaimEmailOtp
 );
 
-router.get('/onboarding', verifyToken, getInfluencerOnboarding);
-router.post('/onboarding/influencer-tour/seen', verifyToken, markInfluencerTourSeen);
+router.get('/onboarding', influencerAuth, getInfluencerOnboarding);
+router.post('/onboarding/influencer-tour/seen', influencerAuth, markInfluencerTourSeen);
 
 
 module.exports = router;

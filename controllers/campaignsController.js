@@ -2321,50 +2321,155 @@ exports.checkApplied = async (req, res) => {
 
 exports.getCampaignsByInfluencer = async (req, res) => {
   const { influencerId, search, page = 1, limit = 10 } = req.body;
-  if (!influencerId) return res.status(400).json({ message: 'influencerId required' });
+
+  if (!influencerId) {
+    return res.status(400).json({ message: "influencerId required" });
+  }
 
   try {
-    const inf = await Influencer.findOne({ influencerId }).lean();
-    if (!inf) return res.status(404).json({ message: 'Influencer not found' });
+    const safePage = Math.max(1, parseInt(page, 10) || 1);
+    const safeLimit = Math.max(1, parseInt(limit, 10) || 10);
+    const skip = (safePage - 1) * safeLimit;
+
+    // ✅ support both Mongo _id and custom influencerId
+    const influencerLookup = mongoose.Types.ObjectId.isValid(String(influencerId))
+      ? {
+          $or: [
+            { _id: influencerId },
+            { influencerId: String(influencerId) }
+          ]
+        }
+      : { influencerId: String(influencerId) };
+
+    const inf = await Influencer.findOne(influencerLookup).lean();
+
+    if (!inf) {
+      return res.status(404).json({ message: "Influencer not found" });
+    }
+
+    const publicInfluencerId = String(inf.influencerId || inf._id);
 
     const subIdToParentNum = await buildSubToParentNumMap();
-    const selectedSubIds = new Set((inf.onboarding?.subcategories || []).map(s => s?.subcategoryId).filter(Boolean).map(String));
+
+    const selectedSubIds = new Set(
+      (inf.onboarding?.subcategories || [])
+        .map((s) => s?.subcategoryId)
+        .filter(Boolean)
+        .map(String)
+    );
+
     const selectedCatNumIds = new Set();
-    if (typeof inf.onboarding?.categoryId === 'number') selectedCatNumIds.add(inf.onboarding.categoryId);
+
+    if (typeof inf.onboarding?.categoryId === "number") {
+      selectedCatNumIds.add(inf.onboarding.categoryId);
+    }
 
     for (const subId of selectedSubIds) {
       const parentNum = subIdToParentNum.get(subId);
-      if (typeof parentNum === 'number') selectedCatNumIds.add(parentNum);
+      if (typeof parentNum === "number") {
+        selectedCatNumIds.add(parentNum);
+      }
     }
 
-    if (selectedSubIds.size === 0 && selectedCatNumIds.size === 0) return res.json({ meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 }, campaigns: [] });
+    if (selectedSubIds.size === 0 && selectedCatNumIds.size === 0) {
+      return res.json({
+        meta: {
+          total: 0,
+          page: safePage,
+          limit: safeLimit,
+          totalPages: 0,
+        },
+        campaigns: [],
+      });
+    }
 
     const orClauses = [];
-    if (selectedSubIds.size) orClauses.push({ 'categories.subcategoryId': { $in: Array.from(selectedSubIds) } });
-    if (selectedCatNumIds.size) orClauses.push({ 'categories.categoryId': { $in: Array.from(selectedCatNumIds) } });
 
-    // Ensure influencers don't see drafts
-    const filter = { isActive: 1, isDraft: { $ne: 1 }, $or: orClauses };
-    if (search?.trim()) filter.$and = [{ $or: buildSearchOr(search.trim()) }];
+    if (selectedSubIds.size) {
+      orClauses.push({
+        "categories.subcategoryId": { $in: Array.from(selectedSubIds) },
+      });
+    }
 
-    const skip = (Math.max(1, parseInt(page, 10)) - 1) * Math.max(1, parseInt(limit, 10));
+    if (selectedCatNumIds.size) {
+      orClauses.push({
+        "categories.categoryId": { $in: Array.from(selectedCatNumIds) },
+      });
+    }
+
+    const filter = {
+      isActive: 1,
+      isDraft: { $ne: 1 },
+      $or: orClauses,
+    };
+
+    if (search?.trim()) {
+      filter.$and = [{ $or: buildSearchOr(search.trim()) }];
+    }
+
     const [total, campaigns] = await Promise.all([
       Campaign.countDocuments(filter),
-      Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Math.max(1, parseInt(limit, 10))).lean()
+      Campaign.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(safeLimit)
+        .lean(),
     ]);
 
     let canApply = true;
-    const applyF = (inf.subscription?.features || []).find(f => f.key === 'apply_to_campaigns_quota');
-    if (applyF) {
-      const fReset = await ensureMonthlyWindow(influencerId, 'apply_to_campaigns_quota', applyF);
-      if (readLimit(fReset) > 0 && Number(fReset.used || 0) >= readLimit(fReset)) canApply = false;
-    }
-    const cap = readLimit((inf.subscription?.features || []).find(f => f.key === 'active_collaborations_limit'));
-    if (cap > 0 && await countActiveCollaborationsForInfluencer(influencerId) >= cap) canApply = false;
 
-    return res.json({ meta: { total, page: Math.max(1, parseInt(page, 10)), limit: Math.max(1, parseInt(limit, 10)), totalPages: Math.ceil(total / Math.max(1, parseInt(limit, 10))) }, campaigns: campaigns.map((c) => ({ ...c, hasApplied: 0, hasApproved: 0, isContracted: 0, contractId: null, isAccepted: 0, canApply })) });
+    const applyF = (inf.subscription?.features || []).find(
+      (f) => f.key === "apply_to_campaigns_quota"
+    );
+
+    if (applyF) {
+      const fReset = await ensureMonthlyWindow(
+        publicInfluencerId,
+        "apply_to_campaigns_quota",
+        applyF
+      );
+
+      if (
+        readLimit(fReset) > 0 &&
+        Number(fReset.used || 0) >= readLimit(fReset)
+      ) {
+        canApply = false;
+      }
+    }
+
+    const cap = readLimit(
+      (inf.subscription?.features || []).find(
+        (f) => f.key === "active_collaborations_limit"
+      )
+    );
+
+    if (
+      cap > 0 &&
+      (await countActiveCollaborationsForInfluencer(publicInfluencerId)) >= cap
+    ) {
+      canApply = false;
+    }
+
+    return res.json({
+      meta: {
+        total,
+        page: safePage,
+        limit: safeLimit,
+        totalPages: Math.ceil(total / safeLimit),
+      },
+      campaigns: campaigns.map((c) => ({
+        ...c,
+        hasApplied: 0,
+        hasApproved: 0,
+        isContracted: 0,
+        contractId: null,
+        isAccepted: 0,
+        canApply,
+      })),
+    });
   } catch (err) {
-    return res.status(500).json({ message: 'Internal server error' });
+    console.error("getCampaignsByInfluencer error:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
@@ -2415,32 +2520,141 @@ exports.getApprovedCampaignsByInfluencer = async (req, res) => {
 
 exports.getAppliedCampaignsByInfluencer = async (req, res) => {
   const { influencerId, search, page = 1, limit = 10 } = req.body;
-  if (!influencerId) return res.status(400).json({ message: 'influencerId required' });
+
+  if (!influencerId) {
+    return res.status(400).json({ message: "influencerId required" });
+  }
+
   try {
-    const applyRecs = await ApplyCampaign.find({ 'applicants.influencerId': influencerId }, 'campaignId').lean();
-    let campaignIds = applyRecs.map((r) => r.campaignId);
-    if (!campaignIds.length) return res.status(200).json({ meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 }, campaigns: [] });
+    const safePage = Math.max(1, parseInt(page, 10) || 1);
+    const safeLimit = Math.max(1, parseInt(limit, 10) || 10);
+    const skip = (safePage - 1) * safeLimit;
 
-    const contracted = await Contract.find({ influencerId, campaignId: { $in: campaignIds }, $or: [{ isAssigned: 1 }, { isAccepted: 1 }] }, 'campaignId').lean();
-    const excludedIds = new Set(contracted.map((c) => c.campaignId));
+    // ✅ support both Mongo _id and custom influencerId
+    const influencerLookup = mongoose.Types.ObjectId.isValid(String(influencerId))
+      ? {
+          $or: [
+            { _id: influencerId },
+            { influencerId: String(influencerId) }
+          ]
+        }
+      : { influencerId: String(influencerId) };
+
+    const inf = await Influencer.findOne(influencerLookup, "_id influencerId").lean();
+
+    if (!inf) {
+      return res.status(404).json({ message: "Influencer not found" });
+    }
+
+    const internalInfluencerId = String(inf._id);
+    const publicInfluencerId = String(inf.influencerId || inf._id);
+
+    // ✅ fetch applied campaigns using either internal _id or public influencerId
+    const applyRecs = await ApplyCampaign.find(
+      {
+        $or: [
+          { "applicants.influencerId": internalInfluencerId },
+          { "applicants.influencerId": publicInfluencerId }
+        ]
+      },
+      "campaignId"
+    ).lean();
+
+    let campaignIds = [
+      ...new Set(
+        applyRecs
+          .map((r) => String(r.campaignId || "").trim())
+          .filter(Boolean)
+      )
+    ];
+
+    if (!campaignIds.length) {
+      return res.status(200).json({
+        meta: {
+          total: 0,
+          page: safePage,
+          limit: safeLimit,
+          totalPages: 0
+        },
+        campaigns: []
+      });
+    }
+
+    // ✅ exclude contracted/accepted campaigns using either influencer id style
+    const contracted = await Contract.find(
+      {
+        influencerId: { $in: [internalInfluencerId, publicInfluencerId] },
+        campaignId: { $in: campaignIds },
+        $or: [{ isAssigned: 1 }, { isAccepted: 1 }]
+      },
+      "campaignId"
+    ).lean();
+
+    const excludedIds = new Set(
+      contracted.map((c) => String(c.campaignId || "").trim()).filter(Boolean)
+    );
+
     campaignIds = campaignIds.filter((id) => !excludedIds.has(id));
-    if (!campaignIds.length) return res.status(200).json({ meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 }, campaigns: [] });
 
-    const filter = { _id: { $in: toCampaignObjectIds(campaignIds) } };
-    if (search?.trim()) filter.$or = buildSearchOr(search.trim());
+    if (!campaignIds.length) {
+      return res.status(200).json({
+        meta: {
+          total: 0,
+          page: safePage,
+          limit: safeLimit,
+          totalPages: 0
+        },
+        campaigns: []
+      });
+    }
 
-    const skip = (Math.max(1, parseInt(page, 10)) - 1) * Math.max(1, parseInt(limit, 10));
+    // ✅ campaignId may be stored as Campaign._id OR Campaign.campaignsId
+    const campaignObjectIds = campaignIds.filter((id) =>
+      mongoose.Types.ObjectId.isValid(id)
+    );
+
+    const campaignIdFilter = {
+      $or: [
+        { campaignsId: { $in: campaignIds } },
+        ...(campaignObjectIds.length ? [{ _id: { $in: campaignObjectIds } }] : [])
+      ]
+    };
+
+    const filter =
+      search && String(search).trim()
+        ? {
+            $and: [campaignIdFilter, { $or: buildSearchOr(String(search).trim()) }]
+          }
+        : campaignIdFilter;
+
     const [total, rawCampaigns] = await Promise.all([
       Campaign.countDocuments(filter),
-      Campaign.find(filter, '-description').sort({ createdAt: -1 }).skip(skip).limit(Math.max(1, parseInt(limit, 10))).lean()
+      Campaign.find(filter, "-description")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(safeLimit)
+        .lean()
     ]);
 
-    return res.json({
-      meta: { total, page: Math.max(1, parseInt(page, 10)), limit: Math.max(1, parseInt(limit, 10)), totalPages: Math.ceil(total / Math.max(1, parseInt(limit, 10))) },
-      campaigns: rawCampaigns.map(({ description, ...c }) => ({ ...c, hasApplied: 1, isContracted: 0, isAccepted: 0 }))
+    return res.status(200).json({
+      meta: {
+        total,
+        page: safePage,
+        limit: safeLimit,
+        totalPages: Math.ceil(total / safeLimit)
+      },
+      campaigns: rawCampaigns.map(({ description, ...c }) => ({
+        ...c,
+        hasApplied: 1,
+        hasApproved: 0,
+        isContracted: 0,
+        contractId: null,
+        isAccepted: 0
+      }))
     });
   } catch (err) {
-    return res.status(500).json({ message: 'Internal server error' });
+    console.error("getAppliedCampaignsByInfluencer error:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
@@ -3839,3 +4053,82 @@ exports.updateManualCampaign = async (req, res) => {
   }
 };
 
+function buildCampaignLookupForInfluencerView(campaignId) {
+  const raw = clean(campaignId);
+
+  if (isOid(raw)) {
+    return {
+      $or: [
+        { _id: toObjectId(raw) },
+        { campaignId: raw }
+      ]
+    };
+  }
+
+  return { campaignId: raw };
+}
+
+exports.viewCampaignByIdForInfluencer = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const influencerId = clean(req.body.influencerId);
+    if (!influencerId) {
+      return fail(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        "Valid influencerId is required",
+        requestId
+      );
+    }
+
+    if (!isOid(influencerId)) {
+      return fail(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        "Valid influencerId is required",
+        requestId
+      );
+    }
+
+    const influencerDoc = await Influencer.findById(influencerId)
+      .select("_id influencerId name")
+      .lean();
+
+    if (!influencerDoc) {
+      return fail(res, 404, "NOT_FOUND", "Influencer not found", requestId);
+    }
+
+    const campaignId = clean(req.body.campaignId);
+    if (!campaignId) {
+      return fail(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        "campaignId is required",
+        requestId
+      );
+    }
+
+    const campaign = await Campaign.findOne(
+      buildCampaignLookupForInfluencerView(campaignId)
+    );
+
+    if (!campaign) {
+      return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
+    }
+
+    const enriched = (await enrichCampaigns([campaign]))[0];
+
+    return ApiResponse.sendOk(
+      res,
+      200,
+      { doc: enriched },
+      requestId
+    );
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
+  }
+};
