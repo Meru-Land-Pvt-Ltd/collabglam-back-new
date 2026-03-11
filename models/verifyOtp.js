@@ -20,7 +20,7 @@ const VerifyOtpSchema = new Schema(
 
     status: {
       type: Number,
-      enum: [0, 1], // 0 = pending, 1 = used/verified
+      enum: [0, 1], // 0 = pending, 1 = used
       default: 0,
       required: true,
     },
@@ -92,7 +92,7 @@ VerifyOtpSchema.index(
   }
 );
 
-// fast latest OTP lookup
+// latest pending OTP lookup
 VerifyOtpSchema.index({
   email: 1,
   role: 1,
@@ -102,7 +102,7 @@ VerifyOtpSchema.index({
   createdAt: -1,
 });
 
-// auto-delete expired OTP docs
+// delete expired OTP docs automatically
 VerifyOtpSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 module.exports =
