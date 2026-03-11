@@ -1543,11 +1543,6 @@ exports.influencerCampaignsForDispute = async (req, res) => {
     const filter = {
   _id: { $in: campaignIds.map((id) => new Types.ObjectId(id)) },
 };
-
-    console.log('applyRecs:', applyRecs);
-    console.log('campaignIds:', campaignIds);
-    console.log('campaign filter:', filter);
-
     if (typeof search === 'string' && search.trim()) {
       const term = search.trim();
       filter.$or = buildSearchOr(term);
