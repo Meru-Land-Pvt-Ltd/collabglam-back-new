@@ -94,11 +94,11 @@ function renderTemplateString(str, context = {}) {
 function normalizeAttachments(attachments) {
   return Array.isArray(attachments)
     ? attachments.map((att) => ({
-        filename: att.filename || att.name || "attachment",
-        contentType: att.contentType || "application/octet-stream",
-        contentBase64: att.contentBase64 || att.content || "",
-        size: Number(att.size) || 0,
-      }))
+      filename: att.filename || att.name || "attachment",
+      contentType: att.contentType || "application/octet-stream",
+      contentBase64: att.contentBase64 || att.content || "",
+      size: Number(att.size) || 0,
+    }))
     : [];
 }
 
@@ -583,11 +583,11 @@ async function sendCampaignInvitationInternal(payload = {}) {
 
   const sesAttachments = safeAttachments.length
     ? safeAttachments.map((att) => ({
-        filename: att.filename,
-        contentType: att.contentType,
-        contentBase64: att.contentBase64,
-        size: att.size,
-      }))
+      filename: att.filename,
+      contentType: att.contentType,
+      contentBase64: att.contentBase64,
+      size: att.size,
+    }))
     : undefined;
 
   // Send
@@ -732,11 +732,11 @@ async function sendBrandToInfluencer(req, res) {
 
     const sesAttachments = safeAttachments.length
       ? safeAttachments.map((a) => ({
-          filename: a.filename,
-          contentType: a.contentType,
-          contentBase64: a.contentBase64,
-          size: a.size,
-        }))
+        filename: a.filename,
+        contentType: a.contentType,
+        contentBase64: a.contentBase64,
+        size: a.size,
+      }))
       : undefined;
 
     const fromAlias = thread.brandDisplayAlias || thread.brandAliasEmail;
@@ -822,11 +822,11 @@ async function sendInfluencerToBrand(req, res) {
 
     const sesAttachments = safeAttachments.length
       ? safeAttachments.map((a) => ({
-          filename: a.filename,
-          contentType: a.contentType,
-          contentBase64: a.contentBase64,
-          size: a.size,
-        }))
+        filename: a.filename,
+        contentType: a.contentType,
+        contentBase64: a.contentBase64,
+        size: a.size,
+      }))
       : undefined;
 
     const fromAlias = thread.influencerDisplayAlias || thread.influencerAliasEmail;
@@ -1555,7 +1555,11 @@ async function getConversationForCurrentInfluencer(req, res) {
       .lean();
 
     if (!thread) return res.status(404).json({ error: "Conversation not found" });
-    if (String(thread.influencer) !== String(influencer._id)) return res.status(403).json({ error: "Forbidden" });
+    
+    const threadInfluencerId = String(thread.influencer?._id || thread.influencer);
+    if (threadInfluencerId !== String(influencer._id)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
 
     const messages = await EmailMessage.find({ thread: thread._id }).sort({ createdAt: 1 }).lean();
 
