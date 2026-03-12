@@ -109,35 +109,115 @@ async function normalizeLanguagesForMediaKit(influencerLanguages = []) {
     .filter(Boolean);
 }
 
+function normalizeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function cleanModashDoc(docOrObj) {
+  const obj = docOrObj?.toObject
+    ? docOrObj.toObject({ getters: false, virtuals: false, depopulate: true })
+    : { ...docOrObj };
+
+  delete obj.__v;
+  return obj;
+}
+
 function mapModashToSocialProfiles(modashDocs = []) {
   if (!Array.isArray(modashDocs)) return [];
 
-  return modashDocs.map((p) => ({
-    provider: p.provider || null,
-    username: p.username || p.handle || null,
-    fullname: p.fullname || null,
-    url: p.url || null,
-    picture: p.picture || null,
+  return modashDocs.map((doc) => {
+    const raw = cleanModashDoc(doc);
 
-    followers: p.followers ?? null,
-    engagements: p.engagements ?? null,
-    engagementRate: p.engagementRate ?? null,
-    averageViews: p.averageViews ?? null,
+    return {
+      modashId: raw._id ? String(raw._id) : null,
 
-    stats: p.stats || null,
-    categories: Array.isArray(p.categories) ? p.categories : [],
+      // keep everything from saved Modash report
+      ...raw,
 
-    recentPosts: Array.isArray(p.recentPosts) ? p.recentPosts : [],
-    popularPosts: Array.isArray(p.popularPosts) ? p.popularPosts : [],
-    hashtags: Array.isArray(p.hashtags) ? p.hashtags : [],
-    mentions: Array.isArray(p.mentions) ? p.mentions : [],
-    brandAffinity: Array.isArray(p.brandAffinity) ? p.brandAffinity : [],
-    lookalikes: Array.isArray(p.lookalikes) ? p.lookalikes : [],
-    sponsoredPosts: Array.isArray(p.sponsoredPosts) ? p.sponsoredPosts : [],
+      // normalize important fields for frontend
+      provider: raw.provider || null,
+      userId: raw.userId || null,
+      username: raw.username || raw.handle || null,
+      handle: raw.handle || (raw.username ? `@${raw.username}` : null),
+      fullname: raw.fullname || null,
+      url: raw.url || null,
+      picture: raw.picture || null,
 
-    createdAt: p.createdAt || null,
-    updatedAt: p.updatedAt || null,
-  }));
+      followers: raw.followers ?? null,
+      engagements: raw.engagements ?? null,
+      engagementRate: raw.engagementRate ?? null,
+      averageViews: raw.averageViews ?? null,
+
+      isPrivate: raw.isPrivate ?? null,
+      isVerified: raw.isVerified ?? null,
+      accountType: raw.accountType ?? null,
+      secUid: raw.secUid ?? null,
+
+      city: raw.city || null,
+      state: raw.state || null,
+      country: raw.country || null,
+      ageGroup: raw.ageGroup || null,
+      gender: raw.gender || null,
+      language: raw.language || null,
+      bio: raw.bio || null,
+
+      stats: raw.stats || null,
+      statsByContentType: raw.statsByContentType || null,
+
+      postsCount: raw.postsCount ?? null,
+      avgLikes: raw.avgLikes ?? null,
+      avgComments: raw.avgComments ?? null,
+      avgViews: raw.avgViews ?? null,
+      avgReelsPlays: raw.avgReelsPlays ?? null,
+      totalLikes: raw.totalLikes ?? null,
+      totalViews: raw.totalViews ?? null,
+
+      categories: normalizeArray(raw.categories),
+      hashtags: normalizeArray(raw.hashtags),
+      mentions: normalizeArray(raw.mentions),
+      brandAffinity: normalizeArray(raw.brandAffinity),
+
+      audience: raw.audience || null,
+      audienceCommenters: raw.audienceCommenters || null,
+      audienceExtra: raw.audienceExtra || null,
+      lookalikes: normalizeArray(raw.lookalikes),
+
+      recentPosts: normalizeArray(raw.recentPosts),
+      popularPosts: normalizeArray(raw.popularPosts),
+      sponsoredPosts: normalizeArray(raw.sponsoredPosts),
+
+      paidPostPerformance: raw.paidPostPerformance ?? null,
+      paidPostPerformanceViews: raw.paidPostPerformanceViews ?? null,
+      sponsoredPostsMedianViews: raw.sponsoredPostsMedianViews ?? null,
+      sponsoredPostsMedianLikes: raw.sponsoredPostsMedianLikes ?? null,
+      nonSponsoredPostsMedianViews: raw.nonSponsoredPostsMedianViews ?? null,
+      nonSponsoredPostsMedianLikes: raw.nonSponsoredPostsMedianLikes ?? null,
+
+      // this is the most important one if you want "everything"
+      providerRaw: raw.providerRaw || null,
+
+      createdAt: raw.createdAt || null,
+      updatedAt: raw.updatedAt || null,
+    };
+  });
+}
+
+function buildMediaKitResponse(docOrObj, socialProfilesSnapshot = []) {
+  const mediaKit = sanitizeMediaKit(docOrObj);
+
+  mediaKit.socialProfiles = socialProfilesSnapshot;
+
+  // optional alias if frontend wants a clearer field name
+  mediaKit.influencerReports = socialProfilesSnapshot;
+
+  const primaryReport =
+    socialProfilesSnapshot.find(
+      (p) => p.provider === mediaKit.primaryPlatform
+    ) || socialProfilesSnapshot[0] || null;
+
+  mediaKit.primaryInfluencerReport = primaryReport;
+
+  return mediaKit;
 }
 
 async function getModashProfilesForInfluencer(influencer) {
@@ -193,6 +273,7 @@ async function createByInfluencer(req, res) {
 
       if (socialProfilesSnapshot.length) {
         doc.socialProfiles = socialProfilesSnapshot;
+        doc.markModified("socialProfiles");
       }
 
       doc.languages = normalizedLanguages;
@@ -207,9 +288,11 @@ async function createByInfluencer(req, res) {
 
       await doc.save();
 
+      const responseMediaKit = buildMediaKitResponse(doc, socialProfilesSnapshot);
+
       return res.status(200).json({
         mediaKitId: doc.mediaKitId,
-        mediaKit: sanitizeMediaKit(doc),
+        mediaKit: responseMediaKit,
       });
     }
 
@@ -226,9 +309,11 @@ async function createByInfluencer(req, res) {
       socialProfiles: socialProfilesSnapshot,
     });
 
+    const responseMediaKit = buildMediaKitResponse(mediaKit, socialProfilesSnapshot);
+
     return res.status(201).json({
       mediaKitId: mediaKit.mediaKitId,
-      mediaKit: sanitizeMediaKit(mediaKit),
+      mediaKit: responseMediaKit,
     });
   } catch (err) {
     console.error("Create MediaKit error:", err);

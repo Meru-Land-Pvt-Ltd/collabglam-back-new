@@ -2618,13 +2618,14 @@ exports.getCampaignSummary = async (req, res) => {
       return res.status(400).json({ message: "Valid campaign id is required." });
     }
 
-    const campaign = await Campaign.findById(campaignId, "campaignTitle campaignBudget budget timeline").lean();
+    const campaign = await Campaign.findById(campaignId, "campaignTitle campaignBudget budget timeline paymentType").lean();
     if (!campaign) return res.status(404).json({ message: "Campaign not found." });
 
     return res.json({
       campaignName: campaign.campaignTitle,
       budget: campaign.campaignBudget ?? campaign.budget ?? 0,
       timeline: campaign.timeline || {},
+      paymentType: campaign.paymentType
     });
   } catch (error) {
     return res.status(500).json({ message: "Internal server error" });
