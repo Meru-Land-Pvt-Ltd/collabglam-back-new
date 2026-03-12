@@ -65,4 +65,12 @@ router.post(
   campaignController.viewCampaignByIdForInfluencer
 );
 
-module.exports = router;
+
+router.post(
+  "/influencer/get-all-active",
+  influencerAuth, 
+  campaignController.getAllActiveCampaignsForInfluencer
+);
+
+
+module.exports = router;  
