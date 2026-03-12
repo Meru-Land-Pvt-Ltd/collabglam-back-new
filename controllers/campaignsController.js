@@ -3744,3 +3744,115 @@ exports.viewCampaignByIdForInfluencer = async (req, res) => {
     return sendControllerError(res, requestId, err);
   }
 };
+
+exports.getAllActiveCampaignsForInfluencer = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const { influencerId, page = 1, limit = 10, search = "" } = req.body || {};
+
+    if (!influencerId) {
+      return fail(res, 400, "VALIDATION_ERROR", "influencerId is required", requestId);
+    }
+
+    const safePage = Math.max(1, parseInt(page, 10) || 1);
+    const safeLimit = Math.max(1, parseInt(limit, 10) || 10);
+    const skip = (safePage - 1) * safeLimit;
+
+    // support both Mongo _id and custom influencerId
+    const influencerLookup = mongoose.Types.ObjectId.isValid(String(influencerId))
+      ? {
+          $or: [
+            { _id: influencerId },
+            { influencerId: String(influencerId) }
+          ]
+        }
+      : { influencerId: String(influencerId) };
+
+    const influencer = await Influencer.findOne(influencerLookup, "_id influencerId").lean();
+
+    if (!influencer) {
+      return fail(res, 404, "NOT_FOUND", "Influencer not found", requestId);
+    }
+
+    const internalInfluencerId = String(influencer._id);
+    const publicInfluencerId = String(influencer.influencerId || influencer._id);
+
+    // find campaigns already applied by this influencer
+    const appliedDocs = await ApplyCampaign.find(
+      {
+        $or: [
+          { "applicants.influencerId": internalInfluencerId },
+          { "applicants.influencerId": publicInfluencerId }
+        ]
+      },
+      "campaignId"
+    ).lean();
+
+    const appliedCampaignIds = [
+      ...new Set(
+        appliedDocs
+          .map((doc) => String(doc.campaignId || "").trim())
+          .filter(Boolean)
+      )
+    ];
+
+    const appliedObjectIds = appliedCampaignIds.filter((id) =>
+      mongoose.Types.ObjectId.isValid(id)
+    );
+
+    const filter = {
+      status: "active",
+      isActive: 1,
+      isDraft: { $ne: 1 }
+    };
+
+    // exclude already applied campaigns
+    if (appliedCampaignIds.length) {
+      filter.$and = [
+        {
+          $nor: [
+            { campaignsId: { $in: appliedCampaignIds } },
+            ...(appliedObjectIds.length ? [{ _id: { $in: appliedObjectIds } }] : [])
+          ]
+        }
+      ];
+    }
+
+    if (search && String(search).trim()) {
+      const searchClause = { $or: buildSearchOr(String(search).trim()) };
+
+      if (filter.$and) {
+        filter.$and.push(searchClause);
+      } else {
+        filter.$and = [searchClause];
+      }
+    }
+
+    const [total, campaigns] = await Promise.all([
+      Campaign.countDocuments(filter),
+      Campaign.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(safeLimit)
+        .lean()
+    ]);
+
+    return ApiResponse.sendOk(
+      res,
+      200,
+      {
+        items: campaigns,
+        pagination: {
+          total,
+          page: safePage,
+          limit: safeLimit,
+          totalPages: Math.ceil(total / safeLimit)
+        }
+      },
+      requestId
+    );
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
+  }
+};  
