@@ -1,33 +1,49 @@
 const mongoose = require("mongoose");
-const { Schema, model, Types } = mongoose;
+const { Schema, model } = mongoose;
 
-const FrozenCampaignSchema = new Schema(
+const FrozenAllocationSchema = new Schema(
   {
-    brandId: { type: Schema.Types.ObjectId, ref: "Brand", required: true, index: true },
-    campaignId: { type: Schema.Types.ObjectId, ref: "Campaign", required: true, index: true },
+    brandId: { type: String, required: true, index: true },
+    campaignId: { type: String, required: true, index: true },
+    influencerId: { type: String, required: true, index: true },
     freezeAmount: { type: Number, default: 0, min: 0 },
+  },
+  { _id: false }
+);
+
+const WalletTopupSchema = new Schema(
+  {
+    amount: { type: Number, required: true, min: 0 },
+    currency: { type: String, default: "inr" },
+    status: {
+      type: String,
+      enum: ["success", "pending", "failed"],
+      default: "success",
+    },
+    createdAt: { type: Date, default: Date.now },
+
+    // optional only, not required
+    paymentIntentId: { type: String, default: null },
   },
   { _id: false }
 );
 
 const BrandWalletSchema = new Schema(
   {
-    brandId: { type: Schema.Types.ObjectId, ref: "Brand", required: true, unique: true, index: true },
+    brandId: { type: String, required: true, unique: true, index: true },
 
-    // TOTAL wallet balance = usable + frozen
     walletBalance: { type: Number, default: 0, min: 0 },
-
-    // stored usable balance
     usableBalance: { type: Number, default: 0, min: 0 },
 
-    freezes: { type: [FrozenCampaignSchema], default: [] },
+    freezes: { type: [FrozenAllocationSchema], default: [] },
+    topups: { type: [WalletTopupSchema], default: [] },
   },
   { timestamps: true }
 );
 
 BrandWalletSchema.index({ brandId: 1 });
 BrandWalletSchema.index({ brandId: 1, "freezes.campaignId": 1 });
-BrandWalletSchema.index({ "freezes.brandId": 1, "freezes.campaignId": 1 });
+BrandWalletSchema.index({ brandId: 1, "freezes.campaignId": 1, "freezes.influencerId": 1 });
 
 const BrandWalletModel = model("BrandWallet", BrandWalletSchema);
 

@@ -1,6 +1,4 @@
-// routes/milestone.js
-
-const express = require('express');
+const express = require("express");
 const router = express.Router();
 
 const {
@@ -14,36 +12,36 @@ const {
   getInfluencerPaidTotal,
   adminListPayouts,
   adminMarkMilestonePaid,
-} = require('../controllers/milestoneController');
+} = require("../controllers/milestoneController");
 
-// create a new milestone
-router.post('/create', createMilestone);
+// Brand: create milestone and freeze amount in BrandWallet
+router.post("/create", createMilestone);
 
-// list all milestones for a campaign
-router.post('/byCampaign', getMilestonesByCampaign);
+// Get milestones by campaign
+router.post("/byCampaign", getMilestonesByCampaign);
 
-// get total wallet‐balance for a brand
-router.post('/balance', getWalletBalance);
+// Brand: get wallet balance from BrandWallet
+router.post("/balance", getWalletBalance);
 
-// milestones for influencer + campaign (typo kept if your frontend uses it)
-router.post('/getMilestome', getMilestonesByInfluencerAndCampaign);
+// Get milestones by influencer + campaign
+router.post("/getMilestome", getMilestonesByInfluencerAndCampaign);
 
-// milestones for influencer across campaigns
-router.post('/byInfluencer', getMilestonesByInfluencer);
+// Get milestones by influencer
+router.post("/byInfluencer", getMilestonesByInfluencer);
 
-// milestones for brand
-router.post('/byBrand', getMilestonesByBrand);
+// Brand: get milestones by brand + wallet details from BrandWallet
+router.post("/byBrand", getMilestonesByBrand);
 
-// release milestone (brand → initiated)
-router.post('/release', releaseMilestone);
+// Brand: release milestone, unfreeze and deduct wallet amount
+router.post("/release", releaseMilestone);
 
-// get total amount paid to an influencer
-router.post('/influencer', getInfluencerPaidTotal);
+// Get influencer total paid
+router.post("/influencer", getInfluencerPaidTotal);
 
-// admin payout list
-router.post('/adminListPayouts', adminListPayouts);
+// Admin payout list
+router.post("/adminListPayouts", adminListPayouts);
 
-// admin mark milestone paid
-router.post('/adminMarkMilestonePaid', adminMarkMilestonePaid);
+// Admin mark payout as paid
+router.post("/adminMarkMilestonePaid", adminMarkMilestonePaid);
 
 module.exports = router;
