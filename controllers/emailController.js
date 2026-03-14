@@ -43,10 +43,10 @@ const PLATFORM_MAP = new Map([
 const ses = new SESClient({
   region: process.env.SES_REGION || process.env.AWS_REGION || "us-east-1",
   credentials:
-    process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY
+    process.env.AWS_ACCESS_KEY_ID1 && process.env.AWS_SECRET_ACCESS_KEY1
       ? {
-          accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+          accessKeyId: process.env.AWS_ACCESS_KEY_ID1,
+          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY1,
         }
       : undefined,
 });

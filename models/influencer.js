@@ -39,12 +39,11 @@ const InfluencerSchema = new Schema(
     ispage2Skip: { type: Boolean, default: false },
     ispage3Skip: { type: Boolean, default: false },
 
-    // optional: influencer-level default alias
     proxyEmail: {
       type: String,
-      default: "",
       trim: true,
       lowercase: true,
+      default: undefined,
       validate: {
         validator(value) {
           return !value || emailRegex.test(value);
@@ -54,6 +53,17 @@ const InfluencerSchema = new Schema(
     },
   },
   { timestamps: true }
+);
+
+// unique only when proxyEmail exists and is not empty
+InfluencerSchema.index(
+  { proxyEmail: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      proxyEmail: { $type: "string", $ne: "" },
+    },
+  }
 );
 
 const InfluencerModel = models.Influencer || model("Influencer", InfluencerSchema);
