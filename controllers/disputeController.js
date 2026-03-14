@@ -6,6 +6,7 @@ const Brand = require('../models/brand');
 const { InfluencerModel: Influencer } = require('../models/influencer');
 const ApplyCampaign = require('../models/applyCampaign');
 const Contract = require('../models/contract');
+const { Types } = require('mongoose');
 const { createAndEmit } = require('../utils/notifier');
 
 // ⬇️ Adjust this path to your GridFS helper file if needed
@@ -78,7 +79,7 @@ function buildSearchOr(term) {
 
   const or = [
     { brandName: { $regex: safe, $options: 'i' } },
-    { productOrServiceName: { $regex: safe, $options: 'i' } },
+    { campaignTitle: { $regex: safe, $options: 'i' } },
     { description: { $regex: safe, $options: 'i' } },
     { 'categories.subcategoryName': { $regex: safe, $options: 'i' } },
     { 'categories.categoryName': { $regex: safe, $options: 'i' } },
@@ -310,7 +311,7 @@ exports.brandCreateDispute = async (req, res) => {
         category: dispute.subject,
         raisedBy: brand.name,
         raisedByRole: 'Brand',
-        campaignName: linkedCampaignId ? camp?.productOrServiceName || '' : '',
+        campaignName: linkedCampaignId ? camp?.campaignTitle || '' : '',
       });
     }
 
@@ -407,7 +408,7 @@ exports.brandList = async (req, res) => {
         : [],
       campaignIds.length
         ? Campaign.find({ _id: { $in: campaignIds } })
-            .select('_id productOrServiceName')
+            .select('_id campaignTitle')
             .lean()
         : [],
     ]);
@@ -417,9 +418,9 @@ exports.brandList = async (req, res) => {
       );
 
       const cmap = new Map(
-        (campaigns || []).map((c) => [String(c._id), c.productOrServiceName])
+        (campaigns || []).map((c) => [String(c._id), c.campaignTitle])
       );
-
+      
       const enriched = rowsWithRole.map((r) => {
         const campaignName = r.campaignId
           ? cmap.get(String(r.campaignId)) || null
@@ -456,6 +457,11 @@ exports.brandList = async (req, res) => {
         }
 
         const viewerIsRaiser = role === 'Brand';
+
+        console.log("Enriched dispute:", {
+          disputeId: r.disputeId,
+          campaignName,
+        });
 
         return {
           ...r,
@@ -517,7 +523,7 @@ exports.brandGetById = async (req, res) => {
       const [campaign, influencer] = await Promise.all([
         d.campaignId
           ? Campaign.findOne({ campaignsId: d.campaignId })
-            .select('campaignsId productOrServiceName')
+            .select('campaignsId campaignTitle')
             .lean()
           : null,
         d.influencerId
@@ -527,7 +533,7 @@ exports.brandGetById = async (req, res) => {
           : null,
       ]);
 
-      d.campaignName = campaign?.productOrServiceName || null;
+      d.campaignName = campaign?.campaignTitle || null;
 
       const influencerName = influencer?.name || null;
       const raisedByRole = d.createdBy?.role || null;
@@ -652,22 +658,24 @@ exports.influencerCreateDispute = async (req, res) => {
     }
 
     const influencer = await Influencer.findOne({
-      influencerId: String(influencerId),
+      _id: String(influencerId),
     }).lean();
     if (!influencer) return res.status(404).json({ message: 'Influencer not found' });
 
-    const brand = await Brand.findOne({ brandId: String(brandId) }).lean();
+    const brand = await Brand.findOne({ _id: String(brandId) }).lean();
     if (!brand) return res.status(404).json({ message: 'Brand not found' });
 
     let linkedCampaignId = null;
     let camp = null;
     if (campaignId) {
       camp = await Campaign.findOne({
-        campaignsId: campaignId,
+        _id: campaignId,
         brandId: String(brandId),
       }).lean();
+       console.log("Found campaign:", camp);
       if (camp) linkedCampaignId = String(campaignId);
     }
+
 
     const sanitizedAttachments = await buildAttachmentsFromReq(req, attachments);
 
@@ -716,7 +724,7 @@ exports.influencerCreateDispute = async (req, res) => {
         category: dispute.subject,
         raisedBy: influencer.name,
         raisedByRole: 'Influencer',
-        campaignName: linkedCampaignId ? camp?.productOrServiceName || '' : '',
+        campaignName: linkedCampaignId ? camp?.campaignTitle || '' : '',
       });
     }
 
@@ -729,7 +737,6 @@ exports.influencerCreateDispute = async (req, res) => {
   }
 };
 
-// Influencer list disputes
 exports.influencerList = async (req, res) => {
   try {
     const {
@@ -738,16 +745,14 @@ exports.influencerList = async (req, res) => {
       limit = 10,
       status,
       search,
-      appliedBy, // optional: "brand" | "influencer"
+      appliedBy, // "brand" | "influencer" optional
     } = req.body || {};
 
     if (!influencerId) {
       return res.status(400).json({ message: 'influencerId is required' });
     }
 
-    const influencer = await Influencer.findOne({
-      influencerId: String(influencerId),
-    }).lean();
+    const influencer = await Influencer.findOne({ _id: String(influencerId) }).lean();
     if (!influencer) {
       return res.status(404).json({ message: 'Influencer not found' });
     }
@@ -755,11 +760,11 @@ exports.influencerList = async (req, res) => {
     const p = Math.max(1, parseInt(page, 10) || 1);
     const l = Math.min(100, Math.max(1, parseInt(limit, 10) || 10));
 
-    // Base filter: all disputes where this influencer is involved
     const filter = {
       influencerId: String(influencerId),
     };
 
+    // numeric / string status support (0 = all)
     const normalizedStatus = normalizeStatusInput(status, { allowZeroAll: true });
     if (normalizedStatus && normalizedStatus !== '__ALL__') {
       filter.status = normalizedStatus;
@@ -773,22 +778,12 @@ exports.influencerList = async (req, res) => {
       filter.$or = [{ subject: re }, { description: re }, { disputeId: re }];
     }
 
-    // Optional filter by who raised the dispute
+    // who raised it (direction filter)
     if (appliedBy && typeof appliedBy === 'string') {
       const role = String(appliedBy).toLowerCase();
-
-      if (role === 'brand') {
-        // Raised against me (by brand)
-        filter['createdBy.role'] = 'Brand';
-      }
-
-      if (role === 'influencer') {
-        // Raised by me
-        filter['createdBy.role'] = 'Influencer';
-        filter['createdBy.id'] = String(influencerId);
-      }
+      if (role === 'brand') filter['createdBy.role'] = 'Brand';
+      if (role === 'influencer') filter['createdBy.role'] = 'Influencer';
     }
-    // If no appliedBy → influencer sees all disputes involving them (both directions)
 
     const total = await Dispute.countDocuments(filter);
     const rows = await Dispute.find(filter)
@@ -819,22 +814,23 @@ exports.influencerList = async (req, res) => {
 
       const [brands, campaigns] = await Promise.all([
         brandIds.length
-          ? Brand.find({ brandId: { $in: brandIds } })
-            .select('brandId name')
-            .lean()
+          ? Brand.find({ _id: { $in: brandIds } })
+              .select('_id name')
+              .lean()
           : [],
         campaignIds.length
-          ? Campaign.find({ campaignsId: { $in: campaignIds } })
-            .select('campaignsId productOrServiceName')
-            .lean()
+          ? Campaign.find({ _id: { $in: campaignIds } })
+              .select('_id campaignTitle')
+              .lean()
           : [],
       ]);
 
       const brandMap = new Map(
-        (brands || []).map((b) => [String(b.brandId), b.name])
+        (brands || []).map((b) => [String(b._id), b.name])
       );
+
       const cmap = new Map(
-        (campaigns || []).map((c) => [String(c.campaignsId), c.productOrServiceName])
+        (campaigns || []).map((c) => [String(c._id), c.campaignTitle])
       );
 
       const enriched = rowsWithRole.map((r) => {
@@ -907,7 +903,7 @@ exports.influencerList = async (req, res) => {
   }
 };
 
-// Influencer get dispute-by-id
+// Influencer get dispute-by-id (must match influencerId)
 exports.influencerGetById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -920,12 +916,8 @@ exports.influencerGetById = async (req, res) => {
       return res.status(400).json({ message: 'influencerId is required' });
     }
 
-    const influencer = await Influencer.findOne({
-      influencerId: String(influencerId),
-    }).lean();
-    if (!influencer) {
-      return res.status(404).json({ message: 'Influencer not found' });
-    }
+    const influencer = await Influencer.findOne({ _id: String(influencerId) }).lean();
+    if (!influencer) return res.status(404).json({ message: 'Influencer not found' });
 
     const d = await Dispute.findOne({ disputeId: id }).lean();
     if (!d) return res.status(404).json({ message: 'Dispute not found' });
@@ -939,17 +931,17 @@ exports.influencerGetById = async (req, res) => {
       const [campaign, brand] = await Promise.all([
         d.campaignId
           ? Campaign.findOne({ campaignsId: d.campaignId })
-            .select('campaignsId productOrServiceName')
-            .lean()
+              .select('campaignsId campaignTitle')
+              .lean()
           : null,
         d.brandId
-          ? Brand.findOne({ brandId: d.brandId })
-            .select('brandId name')
-            .lean()
+          ? Brand.findOne({ _id: d.brandId })
+              .select('_id name')
+              .lean()
           : null,
       ]);
 
-      d.campaignName = campaign?.productOrServiceName || null;
+      d.campaignName = campaign?.campaignTitle || null;
 
       const brandName = brand?.name || null;
       const raisedByRole = d.createdBy?.role || null;
@@ -1008,15 +1000,16 @@ exports.influencerAddComment = async (req, res) => {
       return res.status(400).json({ message: 'text is required' });
     }
 
-    const influencer = await Influencer.findOne({
-      influencerId: String(influencerId),
-    }).lean();
+    const influencer = await Influencer.findOne({ _id: String(influencerId) }).lean();
     if (!influencer) return res.status(404).json({ message: 'Influencer not found' });
 
     const d = await Dispute.findOne({ disputeId: id });
     if (!d) return res.status(404).json({ message: 'Dispute not found' });
 
-    if (d.influencerId !== String(influencerId)) return res.status(403).json({ message: 'Forbidden' });
+    if (d.influencerId !== String(influencerId)) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
     if (d.status === 'resolved' || d.status === 'rejected') {
       return res.status(400).json({ message: 'Cannot comment on a finalized dispute' });
     }
@@ -1085,7 +1078,7 @@ exports.adminGetById = async (req, res) => {
           : null,
         d.campaignId
           ? Campaign.findOne({ campaignsId: d.campaignId })
-            .select('campaignsId productOrServiceName')
+            .select('campaignsId campaignTitle')
             .lean()
           : null
       ]);
@@ -1093,7 +1086,7 @@ exports.adminGetById = async (req, res) => {
       // existing fields
       d.brandName = b?.name || null;
       d.influencerName = inf?.name || null;
-      d.campaignName = camp?.productOrServiceName || null;
+      d.campaignName = camp?.campaignTitle || null;
 
       // 👇 NEW: include brand & influencer emails on the dispute object
       d.brandEmail = b?.email || null;
@@ -1283,7 +1276,7 @@ exports.adminList = async (req, res) => {
           : [],
         campaignIds.length
           ? Campaign.find({ campaignsId: { $in: campaignIds } })
-            .select('campaignsId productOrServiceName')
+            .select('campaignsId campaignTitle')
             .lean()
           : [],
       ]);
@@ -1295,7 +1288,7 @@ exports.adminList = async (req, res) => {
         (influencers || []).map((i) => [String(i.influencerId), i.name])
       );
       const campMap = new Map(
-        (campaigns || []).map((c) => [String(c.campaignsId), c.productOrServiceName])
+        (campaigns || []).map((c) => [String(c.campaignsId), c.campaignTitle])
       );
 
       const enriched = rows.map((r) => {
@@ -1498,7 +1491,7 @@ exports.influencerCampaignsForDispute = async (req, res) => {
   try {
     // Ensure influencer exists (defensive)
     const inf = await Influencer.findOne({
-      influencerId: String(influencerId),
+      _id: String(influencerId),
     }).lean();
     if (!inf) {
       return res.status(404).json({ message: 'Influencer not found' });
@@ -1552,8 +1545,9 @@ exports.influencerCampaignsForDispute = async (req, res) => {
     const limNum = Math.max(1, parseInt(limit, 10));
     const skip = (pageNum - 1) * limNum;
 
-    const filter = { campaignsId: { $in: campaignIds } };
-
+    const filter = {
+  _id: { $in: campaignIds.map((id) => new Types.ObjectId(id)) },
+};
     if (typeof search === 'string' && search.trim()) {
       const term = search.trim();
       filter.$or = buildSearchOr(term);
@@ -1563,7 +1557,7 @@ exports.influencerCampaignsForDispute = async (req, res) => {
     const projection = [
       'brandId',
       'brandName',
-      'productOrServiceName',
+      'campaignTitle',
       'isActive',
       'applicantCount',
       'hasApplied',
@@ -1592,7 +1586,8 @@ exports.influencerCampaignsForDispute = async (req, res) => {
       return {
         // campaign identity
         campaignId: c.campaignsId,
-        campaignName: c.productOrServiceName,
+        _id: c._id, 
+        campaignName: c.campaignTitle,
 
         // brand info
         brandId: c.brandId,
