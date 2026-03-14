@@ -79,7 +79,7 @@ function buildSearchOr(term) {
 
   const or = [
     { brandName: { $regex: safe, $options: 'i' } },
-    { productOrServiceName: { $regex: safe, $options: 'i' } },
+    { campaignTitle: { $regex: safe, $options: 'i' } },
     { description: { $regex: safe, $options: 'i' } },
     { 'categories.subcategoryName': { $regex: safe, $options: 'i' } },
     { 'categories.categoryName': { $regex: safe, $options: 'i' } },
@@ -311,7 +311,7 @@ exports.brandCreateDispute = async (req, res) => {
         category: dispute.subject,
         raisedBy: brand.name,
         raisedByRole: 'Brand',
-        campaignName: linkedCampaignId ? camp?.productOrServiceName || '' : '',
+        campaignName: linkedCampaignId ? camp?.campaignTitle || '' : '',
       });
     }
 
@@ -408,7 +408,7 @@ exports.brandList = async (req, res) => {
         : [],
       campaignIds.length
         ? Campaign.find({ _id: { $in: campaignIds } })
-            .select('_id productOrServiceName')
+            .select('_id campaignTitle')
             .lean()
         : [],
     ]);
@@ -418,9 +418,9 @@ exports.brandList = async (req, res) => {
       );
 
       const cmap = new Map(
-        (campaigns || []).map((c) => [String(c._id), c.productOrServiceName])
+        (campaigns || []).map((c) => [String(c._id), c.campaignTitle])
       );
-
+      
       const enriched = rowsWithRole.map((r) => {
         const campaignName = r.campaignId
           ? cmap.get(String(r.campaignId)) || null
@@ -457,6 +457,11 @@ exports.brandList = async (req, res) => {
         }
 
         const viewerIsRaiser = role === 'Brand';
+
+        console.log("Enriched dispute:", {
+          disputeId: r.disputeId,
+          campaignName,
+        });
 
         return {
           ...r,
@@ -518,7 +523,7 @@ exports.brandGetById = async (req, res) => {
       const [campaign, influencer] = await Promise.all([
         d.campaignId
           ? Campaign.findOne({ campaignsId: d.campaignId })
-            .select('campaignsId productOrServiceName')
+            .select('campaignsId campaignTitle')
             .lean()
           : null,
         d.influencerId
@@ -528,7 +533,7 @@ exports.brandGetById = async (req, res) => {
           : null,
       ]);
 
-      d.campaignName = campaign?.productOrServiceName || null;
+      d.campaignName = campaign?.campaignTitle || null;
 
       const influencerName = influencer?.name || null;
       const raisedByRole = d.createdBy?.role || null;
@@ -719,7 +724,7 @@ exports.influencerCreateDispute = async (req, res) => {
         category: dispute.subject,
         raisedBy: influencer.name,
         raisedByRole: 'Influencer',
-        campaignName: linkedCampaignId ? camp?.productOrServiceName || '' : '',
+        campaignName: linkedCampaignId ? camp?.campaignTitle || '' : '',
       });
     }
 
@@ -815,7 +820,7 @@ exports.influencerList = async (req, res) => {
           : [],
         campaignIds.length
           ? Campaign.find({ _id: { $in: campaignIds } })
-              .select('_id productOrServiceName')
+              .select('_id campaignTitle')
               .lean()
           : [],
       ]);
@@ -825,7 +830,7 @@ exports.influencerList = async (req, res) => {
       );
 
       const cmap = new Map(
-        (campaigns || []).map((c) => [String(c._id), c.productOrServiceName])
+        (campaigns || []).map((c) => [String(c._id), c.campaignTitle])
       );
 
       const enriched = rowsWithRole.map((r) => {
@@ -926,7 +931,7 @@ exports.influencerGetById = async (req, res) => {
       const [campaign, brand] = await Promise.all([
         d.campaignId
           ? Campaign.findOne({ campaignsId: d.campaignId })
-              .select('campaignsId productOrServiceName')
+              .select('campaignsId campaignTitle')
               .lean()
           : null,
         d.brandId
@@ -936,7 +941,7 @@ exports.influencerGetById = async (req, res) => {
           : null,
       ]);
 
-      d.campaignName = campaign?.productOrServiceName || null;
+      d.campaignName = campaign?.campaignTitle || null;
 
       const brandName = brand?.name || null;
       const raisedByRole = d.createdBy?.role || null;
@@ -1073,7 +1078,7 @@ exports.adminGetById = async (req, res) => {
           : null,
         d.campaignId
           ? Campaign.findOne({ campaignsId: d.campaignId })
-            .select('campaignsId productOrServiceName')
+            .select('campaignsId campaignTitle')
             .lean()
           : null
       ]);
@@ -1081,7 +1086,7 @@ exports.adminGetById = async (req, res) => {
       // existing fields
       d.brandName = b?.name || null;
       d.influencerName = inf?.name || null;
-      d.campaignName = camp?.productOrServiceName || null;
+      d.campaignName = camp?.campaignTitle || null;
 
       // 👇 NEW: include brand & influencer emails on the dispute object
       d.brandEmail = b?.email || null;
@@ -1271,7 +1276,7 @@ exports.adminList = async (req, res) => {
           : [],
         campaignIds.length
           ? Campaign.find({ campaignsId: { $in: campaignIds } })
-            .select('campaignsId productOrServiceName')
+            .select('campaignsId campaignTitle')
             .lean()
           : [],
       ]);
@@ -1283,7 +1288,7 @@ exports.adminList = async (req, res) => {
         (influencers || []).map((i) => [String(i.influencerId), i.name])
       );
       const campMap = new Map(
-        (campaigns || []).map((c) => [String(c.campaignsId), c.productOrServiceName])
+        (campaigns || []).map((c) => [String(c.campaignsId), c.campaignTitle])
       );
 
       const enriched = rows.map((r) => {
@@ -1552,7 +1557,7 @@ exports.influencerCampaignsForDispute = async (req, res) => {
     const projection = [
       'brandId',
       'brandName',
-      'productOrServiceName',
+      'campaignTitle',
       'isActive',
       'applicantCount',
       'hasApplied',
@@ -1582,7 +1587,7 @@ exports.influencerCampaignsForDispute = async (req, res) => {
         // campaign identity
         campaignId: c.campaignsId,
         _id: c._id, 
-        campaignName: c.productOrServiceName,
+        campaignName: c.campaignTitle,
 
         // brand info
         brandId: c.brandId,

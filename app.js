@@ -45,6 +45,7 @@ const campaignInvitationRoutes = require('./routes/campaignInvitationRoutes');
 const delieverableRoutes = require('./routes/delieverableRoute')
 const listRoutes = require('./routes/listRoutes');
 const brandWalletRoutes = require('./routes/brandWalletRoutes');
+const supportRoutes = require("./routes/supportRoutes");
 // sockets (Socket.IO + native WS)
 const sockets = require('./sockets');
 
@@ -108,6 +109,7 @@ app.use('/admin-invitations', campaignInvitationRoutes);
 app.use('/deliverable', delieverableRoutes);
 app.use('/list', listRoutes);
 app.use('/wallet', brandWalletRoutes);
+app.use("/support", supportRoutes);
 
 // Friendly 413 response (must be after body parsers)
 app.use((err, req, res, next) => {
