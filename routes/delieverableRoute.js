@@ -10,15 +10,21 @@ const {
   listInfluencerDeliverablesByCampaign2,
   getAllDeliverables,
 } = require("../controllers/delieverableController");
+const { influencerAuth } = require("../auth/influencerAuth");
+const {brandAuth} = require("../auth/brandAuth");
+const brandOrInfluencerAuth = require("../auth/brandOrInfluencerAuth");
 
 // 1) POST - create (always pending)
-router.post("/create", createDeliverableApproval);
+router.post("/create", influencerAuth, createDeliverableApproval);
 
-// 2) PATCH - approve/changes
-router.patch("/:delieverableApprovalId/status", updateDeliverableApprovalStatus);
+router.post(
+  "/deliverables/:deliverableId/approval-status",
+  brandAuth,
+  updateDeliverableApprovalStatus
+);
 
 // 3) GET - list campaign-wise
-router.get("/campaign/:campaignId", listDeliverablesByCampaign);
+router.get("/campaign/:campaignId", brandOrInfluencerAuth, listDeliverablesByCampaign);
 router.get("/influencer/:influencerId", listInfluencerDeliverablesByCampaign);
 router.get("/influencer/campaign/:campaignId", listInfluencerDeliverablesByCampaign2);
 router.get("/getall", getAllDeliverables);

@@ -31,11 +31,11 @@ router.post("/byCategoryId", brandAuth, campaignController.getActiveCampaignsByC
 
 router.post("/checkApplied", brandAuth, campaignController.checkApplied);
 router.post("/byInfluencer", influencerAuth, campaignController.getCampaignsByInfluencer);
-router.post("/myCampaign", brandAuth, campaignController.getApprovedCampaignsByInfluencer);
+router.post("/myCampaign", influencerAuth, campaignController.getApprovedCampaignsByInfluencer);
 router.post("/applied", brandOrInfluencerAuth, campaignController.getAppliedCampaignsByInfluencer);
 router.post("/history", brandAuth, campaignController.getCampaignHistoryByBrand);
 
-router.post("/accepted", brandAuth, campaignController.getAcceptedCampaigns);
+router.post("/accepted", campaignController.getAcceptedCampaigns);
 router.post("/accepted-inf", brandAuth, campaignController.getAcceptedInfluencers);
 
 router.post("/contracted", influencerAuth, campaignController.getContractedCampaignsByInfluencer);

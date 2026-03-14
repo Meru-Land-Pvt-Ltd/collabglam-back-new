@@ -2,17 +2,56 @@ const mongoose = require("mongoose");
 const Delieverable = require("../models/delieverable");
 const CampaignInvite = require("../models/campaignInvitation");
 const Campaign = require("../models/campaign");
-const Influencer = require("../models/influencer");
+const { InfluencerModel: Influencer } = require("../models/influencer"); // adjust path if needed
 const Milestone = require("../models/milestone");
 const Notification = require("../models/notification");
 
-
 const escapeRegex = (s = "") => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-// helper to remove mongo fields from any object
-const stripMongo = (obj) => {
+
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+const toObjectId = (id) => new mongoose.Types.ObjectId(id);
+
+const normalizeUrls = (url) => {
+  if (!url) return [];
+
+  const items = Array.isArray(url) ? url : [url];
+
+  return items
+    .map((item) => {
+      if (!item) return null;
+
+      if (typeof item === "string") {
+        return { label: "", url: item };
+      }
+
+      if (typeof item === "object" && item.url) {
+        return {
+          label: item.label || "",
+          url: item.url,
+        };
+      }
+
+      return null;
+    })
+    .filter((item) => item && item.url);
+};
+
+const normalizeDoc = (obj) => {
   if (!obj) return obj;
-  const { _id, __v, ...rest } = obj;
-  return rest;
+
+  const raw = typeof obj.toObject === "function" ? obj.toObject() : obj;
+  const { __v, ...rest } = raw;
+
+  return {
+    ...rest,
+    _id: raw._id ? String(raw._id) : undefined,
+    deliverableId: raw._id ? String(raw._id) : undefined,
+    brandId: raw.brandId ? String(raw.brandId) : "",
+    influencerId: raw.influencerId ? String(raw.influencerId) : "",
+    campaignId: raw.campaignId ? String(raw.campaignId) : "",
+    milestoneId: raw.milestoneId ? String(raw.milestoneId) : "",
+    milestoneHistoryId: raw.milestoneHistoryId ? String(raw.milestoneHistoryId) : "",
+  };
 };
 
 const createNotificationSafe = async (payload) => {
@@ -33,7 +72,7 @@ exports.createDeliverableApproval = async (req, res) => {
       title,
       description,
       url,
-      milestoneHistoryId, // ✅ REQUIRED (we fetch title using this)
+      milestoneHistoryId,
     } = req.body;
 
     if (!brandId || !influencerId || !campaignId || !title || !milestoneHistoryId) {
@@ -44,13 +83,27 @@ exports.createDeliverableApproval = async (req, res) => {
       });
     }
 
-    const mHistoryId = String(milestoneHistoryId);
+    if (
+      !isValidObjectId(brandId) ||
+      !isValidObjectId(influencerId) ||
+      !isValidObjectId(campaignId) ||
+      !isValidObjectId(milestoneHistoryId)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "One or more ids are invalid.",
+      });
+    }
 
-    // ✅ Find milestone document that contains this milestoneHistoryId
+    const brandObjectId = toObjectId(brandId);
+    const influencerObjectId = toObjectId(influencerId);
+    const campaignObjectId = toObjectId(campaignId);
+    const milestoneHistoryObjectId = toObjectId(milestoneHistoryId);
+
     const msDoc = await Milestone.findOne({
-      "milestoneHistory.milestoneHistoryId": mHistoryId,
+      "milestoneHistory._id": milestoneHistoryObjectId,
     })
-      .select("milestoneId milestoneHistory")
+      .select("_id brandId milestoneHistory")
       .lean();
 
     if (!msDoc) {
@@ -60,9 +113,8 @@ exports.createDeliverableApproval = async (req, res) => {
       });
     }
 
-    // ✅ Extract exact history item
     const historyItem = (msDoc.milestoneHistory || []).find(
-      (h) => String(h.milestoneHistoryId) === mHistoryId
+      (h) => String(h._id) === String(milestoneHistoryObjectId)
     );
 
     if (!historyItem) {
@@ -72,74 +124,71 @@ exports.createDeliverableApproval = async (req, res) => {
       });
     }
 
-    // ✅ Safety checks (optional but recommended)
-    if (String(historyItem.campaignId) !== String(campaignId)) {
+    if (String(msDoc.brandId) !== String(brandObjectId)) {
+      return res.status(400).json({
+        success: false,
+        message: "brandId does not match milestone brandId.",
+      });
+    }
+
+    if (String(historyItem.campaignId) !== String(campaignObjectId)) {
       return res.status(400).json({
         success: false,
         message: "campaignId does not match milestone history campaignId.",
       });
     }
 
-    if (String(historyItem.influencerId) !== String(influencerId)) {
+    if (String(historyItem.influencerId) !== String(influencerObjectId)) {
       return res.status(400).json({
         success: false,
         message: "influencerId does not match milestone history influencerId.",
       });
     }
 
-    // ✅ Store BOTH milestoneId + milestoneHistoryId in Deliverable
+    const deliverableApprovalId = new mongoose.Types.ObjectId().toString();
+
     const doc = await Delieverable.create({
-      brandId,
-      influencerId,
-      campaignId,
+      brandId: brandObjectId,
+      influencerId: influencerObjectId,
+      campaignId: campaignObjectId,
+      milestoneId: msDoc._id,
+      milestoneHistoryId: milestoneHistoryObjectId,
+      delieverableApprovalId: deliverableApprovalId, // keep this only if schema uses this exact typo field
       title,
       description: description || "",
-      url: Array.isArray(url) ? url : url ? [url] : [],
-      milestoneId: String(msDoc.milestoneId),      // ✅ store milestoneId (root)
-      milestoneHistoryId: mHistoryId,              // ✅ store milestoneHistoryId
+      url: normalizeUrls(url),
       status: "pending",
       approvedRole: "",
       comments: "",
       approvalId: "",
     });
 
+    const [influencerDoc, campaignDoc] = await Promise.all([
+      Influencer.findById(influencerObjectId).select("name").lean(),
+      Campaign.findById(campaignObjectId).select("campaignTitle").lean(),
+    ]);
 
-    // ✅ After deliverable created, notify BRAND
-    const influencerDoc = await Influencer.findOne({ influencerId: String(influencerId) })
-      .select("fullName name username")
-      .lean();
-
-    const influencerName =
-      influencerDoc?.fullName || influencerDoc?.name || influencerDoc?.username || "Influencer";
-
-    // optional: campaign name
-    const campaignDoc = await Campaign.findOne({ campaignsId: String(campaignId) })
-      .select("productOrServiceName")
-      .lean();
-
-    const campaignName = campaignDoc?.productOrServiceName || "Campaign";
-
+    const influencerName = influencerDoc?.name || "Influencer";
+    const campaignName = campaignDoc?.campaignTitle || "Campaign";
     const milestoneTitle = historyItem?.milestoneTitle || "";
 
-    const deliverableEntityId =
-      doc?.delieverableApprovalId || doc?.deliverableApprovalId || doc?.notificationId || null;
-
     await createNotificationSafe({
-      brandId: String(brandId),
+      brandId: String(brandObjectId),
       type: "deliverable.submitted",
       title: "New deliverable submitted",
-      message: `${influencerName} submitted a deliverable for ${campaignName}${milestoneTitle ? ` (Milestone: ${milestoneTitle})` : ""
-        }.`,
+      message: `${influencerName} submitted a deliverable for ${campaignName}${
+        milestoneTitle ? ` (Milestone: ${milestoneTitle})` : ""
+      }.`,
       entityType: "deliverable",
-      entityId: deliverableEntityId ? String(deliverableEntityId) : String(campaignId),
-      actionPath: `brand/deleverables?campaignId=${campaignId}`,
+      entityId: String(doc._id),
+      actionPath: `/brand/deliverables?campaignId=${campaignId}`,
       isRead: false,
     });
 
     return res.status(201).json({
       success: true,
       message: "Deliverable approval created (pending).",
-      data: stripMongo(doc.toObject()),
+      data: normalizeDoc(doc),
     });
   } catch (err) {
     return res.status(500).json({
@@ -150,11 +199,20 @@ exports.createDeliverableApproval = async (req, res) => {
   }
 };
 
-// 2) PATCH: Update status to approved/changes
+// 2) POST: Update status to approved/revision
 exports.updateDeliverableApprovalStatus = async (req, res) => {
   try {
-    const { delieverableApprovalId } = req.params;
+    const deliverableId =
+      req.params.deliverableId || req.params.delieverableApprovalId;
+
     const { status, comments, approvedRole, approvalId } = req.body;
+
+    if (!deliverableId || !isValidObjectId(deliverableId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid deliverableId is required.",
+      });
+    }
 
     if (!["approved", "revision"].includes(status)) {
       return res.status(400).json({
@@ -168,7 +226,7 @@ exports.updateDeliverableApprovalStatus = async (req, res) => {
     if (typeof comments === "string") update.comments = comments;
     if (typeof approvalId === "string") update.approvalId = approvalId;
 
-    if (approvedRole) {
+    if (approvedRole !== undefined) {
       if (!["Brand", "Admin"].includes(approvedRole)) {
         return res.status(400).json({
           success: false,
@@ -178,21 +236,30 @@ exports.updateDeliverableApprovalStatus = async (req, res) => {
       update.approvedRole = approvedRole;
     }
 
-    const doc = await Delieverable.findOneAndUpdate(
-      { delieverableApprovalId },
+    const doc = await Delieverable.findByIdAndUpdate(
+      deliverableId,
       { $set: update },
       { new: true }
     ).lean();
-    // ✅ Notify INFLUENCER when status changes
-    const campaignDoc = await Campaign.findOne({ campaignsId: String(doc.campaignId) })
-      .select("productOrServiceName")
+
+    if (!doc) {
+      return res.status(404).json({
+        success: false,
+        message: "Deliverable approval not found.",
+      });
+    }
+
+    const campaignDoc = await Campaign.findById(doc.campaignId)
+      .select("campaignTitle")
       .lean();
 
-    const campaignName = campaignDoc?.productOrServiceName || "Campaign";
-
-    const statusLabel = status === "approved" ? "Approved" : "Revision requested";
+    const campaignName = campaignDoc?.campaignTitle || "Campaign";
+    const statusLabel =
+      status === "approved" ? "Approved" : "Revision requested";
     const notifTitle =
-      status === "approved" ? "Deliverable approved ✅" : "Deliverable needs changes ✏️";
+      status === "approved"
+        ? "Deliverable approved ✅"
+        : "Deliverable needs changes ✏️";
 
     const byRole = approvedRole || doc.approvedRole || "Brand";
 
@@ -201,30 +268,21 @@ exports.updateDeliverableApprovalStatus = async (req, res) => {
         ? ` Comment: ${comments.trim()}`
         : "";
 
-    const deliverableEntityId =
-      doc?.delieverableApprovalId || doc?.deliverableApprovalId || doc?.notificationId || null;
-
     await createNotificationSafe({
       influencerId: String(doc.influencerId),
       type: "deliverable.status.updated",
       title: notifTitle,
       message: `${byRole} marked your deliverable "${doc.title}" as ${statusLabel} in ${campaignName}.${commentLine}`,
       entityType: "deliverable",
-      entityId: deliverableEntityId ? String(deliverableEntityId) : String(doc.campaignId),
-      actionPath: `/influencer/campaigns-invite/${doc.campaignId}`,
+      entityId: String(doc._id),
+      actionPath: `/influencer/campaigns-invite/${String(doc.campaignId)}`,
       isRead: false,
     });
-    if (!doc) {
-      return res.status(404).json({
-        success: false,
-        message: "Deliverable approval not found.",
-      });
-    }
 
     return res.status(200).json({
       success: true,
       message: `Deliverable status updated to '${status}'.`,
-      data: stripMongo(doc),
+      data: normalizeDoc(doc),
     });
   } catch (err) {
     return res.status(500).json({
@@ -235,22 +293,26 @@ exports.updateDeliverableApprovalStatus = async (req, res) => {
   }
 };
 
-// 3) GET: List deliverables by campaignsId (UUID) (+ optional status)
+// 3) GET: List deliverables by campaignId (+ optional status)
 exports.listDeliverablesByCampaign = async (req, res) => {
   try {
     const { campaignId } = req.params;
     const { status } = req.query;
 
-    const query = { campaignId: String(campaignId) };
+    if (!campaignId || !isValidObjectId(campaignId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid campaignId is required.",
+      });
+    }
+
+    const query = { campaignId: toObjectId(campaignId) };
     if (status) query.status = status;
 
-    // 1) Get deliverables
     const docs = await Delieverable.find(query)
-      .select("-_id -__v")
       .sort({ createdAt: -1 })
       .lean();
 
-    // 2) Collect unique influencerIds
     const influencerIds = [
       ...new Set(
         docs
@@ -259,16 +321,14 @@ exports.listDeliverablesByCampaign = async (req, res) => {
       ),
     ];
 
-    // 3) Fetch influencers
     const influencers = influencerIds.length
-      ? await Influencer.find({ influencerId: { $in: influencerIds } })
-        .select("-_id influencerId name fullName username")
-        .lean()
+      ? await Influencer.find({ _id: { $in: influencerIds.map(toObjectId) } })
+          .select("name")
+          .lean()
       : [];
 
-    const infMap = new Map(influencers.map((i) => [String(i.influencerId), i]));
+    const infMap = new Map(influencers.map((i) => [String(i._id), i]));
 
-    // ✅ 4) Collect unique milestoneHistoryIds FROM deliverables
     const milestoneHistoryIds = [
       ...new Set(
         docs
@@ -277,48 +337,44 @@ exports.listDeliverablesByCampaign = async (req, res) => {
       ),
     ];
 
-    // ✅ 5) Fetch milestone titles using milestoneHistoryId
     const rows = milestoneHistoryIds.length
       ? await Milestone.aggregate([
-        { $match: { "milestoneHistory.milestoneHistoryId": { $in: milestoneHistoryIds } } },
-        { $unwind: "$milestoneHistory" },
-        { $match: { "milestoneHistory.milestoneHistoryId": { $in: milestoneHistoryIds } } },
-        {
-          $project: {
-            _id: 0,
-            milestoneId: 1,
-            milestoneHistoryId: "$milestoneHistory.milestoneHistoryId",
-            milestoneTitle: "$milestoneHistory.milestoneTitle",
+          { $unwind: "$milestoneHistory" },
+          {
+            $match: {
+              "milestoneHistory._id": {
+                $in: milestoneHistoryIds.map((id) => new mongoose.Types.ObjectId(id)),
+              },
+            },
           },
-        },
-      ])
+          {
+            $project: {
+              _id: 0,
+              milestoneHistoryId: "$milestoneHistory._id",
+              milestoneTitle: "$milestoneHistory.milestoneTitle",
+            },
+          },
+        ])
       : [];
 
     const titleByHistoryId = new Map(
       rows.map((r) => [String(r.milestoneHistoryId), r.milestoneTitle])
     );
 
-    // 6) Attach influencer + milestoneTitle
     const data = docs.map((d) => {
       const inf = infMap.get(String(d.influencerId));
-
-      const influencerName = inf?.fullName || inf?.name || inf?.username || "";
-      const influencerHandle = inf?.username || "";
-
+      const influencerName = inf?.name || "";
       const mhId = d?.milestoneHistoryId ? String(d.milestoneHistoryId) : "";
 
       return {
-        ...d,
-        milestoneTitle: titleByHistoryId.get(mhId) || "", // ✅ from milestoneHistoryId
+        ...normalizeDoc(d),
+        milestoneTitle: titleByHistoryId.get(mhId) || "",
         influencerName,
-        influencerHandle,
         influencer: inf
           ? {
-            influencerId: inf.influencerId,
-            name: influencerName,
-            username: inf.username || "",
-            fullName: inf.fullName || "",
-          }
+              _id: String(inf._id),
+              name: inf.name || "",
+            }
           : null,
       };
     });
@@ -338,38 +394,47 @@ exports.listDeliverablesByCampaign = async (req, res) => {
   }
 };
 
-// 4) GET: List influencer invites + campaign name using campaignsId UUID (NO _id usage)
+// 4) GET: List influencer invites + campaign name
+// Assumption: campaignInvitation model is also updated to use ObjectId fields:
+// { influencerId: ObjectId, campaignId: ObjectId, platform, createdAt }
 exports.listInfluencerDeliverablesByCampaign = async (req, res) => {
   try {
     const { influencerId } = req.params;
 
-    // 1) Get invites (UUID only)
-    const invites = await CampaignInvite.find({ influencerId })
-      .select("-_id campaignsId platform createdAt")
+    if (!influencerId || !isValidObjectId(influencerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid influencerId is required.",
+      });
+    }
+
+    const invites = await CampaignInvite.find({ influencerId: toObjectId(influencerId) })
+      .select("campaignId platform createdAt")
       .sort({ createdAt: -1 })
       .lean();
 
-    // 2) Collect UUID campaignsId
-    const campaignsIds = invites.map((x) => x.campaignsId).filter(Boolean);
+    const campaignIds = [...new Set(invites.map((x) => x.campaignId).filter(Boolean).map(String))];
 
-    // 3) Fetch campaigns by campaignsId (UUID field)
-    const campaigns = campaignsIds.length
-      ? await Campaign.find({ campaignsId: { $in: campaignsIds } })
-        .select("-_id campaignsId productOrServiceName")
-        .lean()
+    const campaigns = campaignIds.length
+      ? await Campaign.find({ _id: { $in: campaignIds.map(toObjectId) } })
+          .select("campaignTitle")
+          .lean()
       : [];
 
-    // 4) Map campaigns by campaignsId
-    const campaignMap = new Map(campaigns.map((c) => [c.campaignsId, c]));
+    const campaignMap = new Map(campaigns.map((c) => [String(c._id), c]));
 
-    // 5) Response (NO _id anywhere)
     const docs = invites.map((inv) => {
-      const c = campaignMap.get(inv.campaignsId) || null;
+      const c = campaignMap.get(String(inv.campaignId)) || null;
       return {
         platform: inv.platform,
         createdAt: inv.createdAt,
-        campaignsId: inv.campaignsId, // ✅ UUID
-        campaign: c ? { productOrServiceName: c.productOrServiceName } : null,
+        campaignId: String(inv.campaignId),
+        campaign: c
+          ? {
+              _id: String(c._id),
+              campaignTitle: c.campaignTitle,
+            }
+          : null,
       };
     });
 
@@ -388,19 +453,23 @@ exports.listInfluencerDeliverablesByCampaign = async (req, res) => {
   }
 };
 
-// 5) GET: Campaign-wise invite list with influencer details (UUID campaignsId only)
+
 exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
   try {
     const { campaignId } = req.params;
-    const campaignIdStr = String(campaignId);
 
-    // 1) Get invites by campaignsId (STRING) + include platform + createdAt
-    const invites = await CampaignInvite.find({ campaignsId: campaignIdStr })
+    if (!campaignId || !isValidObjectId(campaignId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid campaignId is required.",
+      });
+    }
+
+    const invites = await CampaignInvite.find({ campaignId: toObjectId(campaignId) })
       .select("influencerId deliverables platform createdAt")
       .sort({ createdAt: -1 })
       .lean();
 
-    // 2) Collect unique influencer UUIDs (STRING)
     const influencerIds = [
       ...new Set(
         invites
@@ -410,14 +479,12 @@ exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
       ),
     ];
 
-    // 3) Fetch influencer details (unique list)
     const influencers = influencerIds.length
-      ? await Influencer.find({ influencerId: { $in: influencerIds } })
-        .select("name username fullName country socialLinks influencerId")
-        .lean()
+      ? await Influencer.find({ _id: { $in: influencerIds.map(toObjectId) } })
+          .select("name email countryName categories languages")
+          .lean()
       : [];
 
-    // ✅ Build map: influencerId -> { platforms:Set, createdAtLatest }
     const metaByInfluencer = new Map();
 
     for (const inv of invites) {
@@ -430,7 +497,7 @@ exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
       if (!metaByInfluencer.has(infId)) {
         metaByInfluencer.set(infId, {
           platforms: new Set(),
-          createdAt: c, // since invites sorted desc, first is latest
+          createdAt: c,
         });
       }
 
@@ -438,28 +505,29 @@ exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
 
       if (p) meta.platforms.add(p);
 
-      // safety: ensure latest createdAt (if sort ever changes)
       if (c && (!meta.createdAt || new Date(c) > new Date(meta.createdAt))) {
         meta.createdAt = c;
       }
     }
 
-    // ✅ Attach platforms + createdAt to each influencer
     const influencersWithMeta = influencers.map((inf) => {
-      const id = String(inf.influencerId);
+      const id = String(inf._id);
       const meta = metaByInfluencer.get(id);
 
       return {
-        ...inf,
+        _id: String(inf._id),
+        name: inf.name || "",
+        email: inf.email || "",
+        countryName: inf.countryName || "",
+        categories: inf.categories || [],
+        languages: inf.languages || [],
         platforms: meta ? Array.from(meta.platforms) : [],
-        createdAt: meta?.createdAt || null, // ✅ latest invite createdAt
+        createdAt: meta?.createdAt || null,
       };
     });
 
-    // ✅ TOTALS
     const totalInvites = invites.length;
     const totalInfluencers = influencerIds.length;
-
     const totalDeliverables = invites.reduce((sum, inv) => {
       const d = inv?.deliverables;
       if (Array.isArray(d)) return sum + d.length;
@@ -474,7 +542,7 @@ exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
         influencers: totalInfluencers,
         deliverables: totalDeliverables,
       },
-      influencers: influencersWithMeta, // ✅ now includes platforms + createdAt
+      influencers: influencersWithMeta,
     });
   } catch (err) {
     return res.status(500).json({
@@ -485,8 +553,7 @@ exports.listInfluencerDeliverablesByCampaign2 = async (req, res) => {
   }
 };
 
-
-// ✅ NEW: GET ALL deliverables by brandId OR influencerId
+// 6) GET ALL deliverables by brandId OR influencerId
 exports.getAllDeliverables = async (req, res) => {
   try {
     const {
@@ -494,7 +561,7 @@ exports.getAllDeliverables = async (req, res) => {
       influencerId,
       status,
       campaignId,
-      search, // ✅ NEW
+      search,
       page = 1,
       limit = 20,
     } = req.query;
@@ -506,65 +573,85 @@ exports.getAllDeliverables = async (req, res) => {
       });
     }
 
+    if (brandId && !isValidObjectId(brandId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid brandId.",
+      });
+    }
+
+    if (influencerId && !isValidObjectId(influencerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid influencerId.",
+      });
+    }
+
+    if (campaignId && !isValidObjectId(campaignId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid campaignId.",
+      });
+    }
+
     const p = Math.max(1, parseInt(page, 10));
     const l = Math.max(1, parseInt(limit, 10));
 
     const query = {};
-    if (brandId) query.brandId = String(brandId);
-    if (influencerId) query.influencerId = String(influencerId);
+    if (brandId) query.brandId = toObjectId(brandId);
+    if (influencerId) query.influencerId = toObjectId(influencerId);
     if (status) query.status = String(status);
-    if (campaignId) query.campaignId = String(campaignId);
+    if (campaignId) query.campaignId = toObjectId(campaignId);
 
-    // ✅ SEARCH (title/desc/comments + campaignName + milestoneTitle)
     const term = String(search || "").trim();
     if (term) {
       const rx = new RegExp(escapeRegex(term), "i");
 
-      // 1) campaignIds where productOrServiceName matches
-      const matchedCampaigns = await Campaign.find({
-        productOrServiceName: rx,
-      })
-        .select("campaignsId -_id")
-        .lean();
-
-      const matchedCampaignIds = matchedCampaigns
-        .map((c) => String(c.campaignsId))
-        .filter(Boolean);
-
-      // 2) milestoneHistoryIds where milestoneTitle matches
-      const matchedMilestones = await Milestone.aggregate([
-        { $unwind: "$milestoneHistory" },
-        { $match: { "milestoneHistory.milestoneTitle": rx } },
-        {
-          $project: {
-            _id: 0,
-            milestoneHistoryId: "$milestoneHistory.milestoneHistoryId",
+      const [matchedCampaigns, matchedMilestones] = await Promise.all([
+        Campaign.find({ campaignTitle: rx }).select("_id").lean(),
+        Milestone.aggregate([
+          { $unwind: "$milestoneHistory" },
+          { $match: { "milestoneHistory.milestoneTitle": rx } },
+          {
+            $project: {
+              _id: 0,
+              milestoneHistoryId: "$milestoneHistory._id",
+            },
           },
-        },
+        ]),
       ]);
 
-      const matchedMilestoneHistoryIds = matchedMilestones
-        .map((m) => String(m.milestoneHistoryId))
+      const matchedCampaignIds = matchedCampaigns
+        .map((c) => c._id)
         .filter(Boolean);
 
-      query.$or = [
+      const matchedMilestoneHistoryIds = matchedMilestones
+        .map((m) => m.milestoneHistoryId)
+        .filter(Boolean);
+
+      const orList = [
         { title: rx },
         { description: rx },
         { comments: rx },
-        { delieverableApprovalId: rx },
-        ...(matchedCampaignIds.length
-          ? [{ campaignId: { $in: matchedCampaignIds } }]
-          : []),
-        ...(matchedMilestoneHistoryIds.length
-          ? [{ milestoneHistoryId: { $in: matchedMilestoneHistoryIds } }]
-          : []),
       ];
+
+      if (isValidObjectId(term)) {
+        orList.push({ _id: toObjectId(term) });
+      }
+
+      if (matchedCampaignIds.length) {
+        orList.push({ campaignId: { $in: matchedCampaignIds } });
+      }
+
+      if (matchedMilestoneHistoryIds.length) {
+        orList.push({ milestoneHistoryId: { $in: matchedMilestoneHistoryIds } });
+      }
+
+      query.$or = orList;
     }
 
-    // 1) Get deliverables (paginated)
     const [docs, total] = await Promise.all([
       Delieverable.find(query)
-        .select("-_id -__v")
         .sort({ createdAt: -1 })
         .skip((p - 1) * l)
         .limit(l)
@@ -572,7 +659,6 @@ exports.getAllDeliverables = async (req, res) => {
       Delieverable.countDocuments(query),
     ]);
 
-    // 2) Collect influencerIds
     const influencerIds = [
       ...new Set(
         docs
@@ -581,16 +667,6 @@ exports.getAllDeliverables = async (req, res) => {
       ),
     ];
 
-    // 3) Fetch influencers
-    const influencers = influencerIds.length
-      ? await Influencer.find({ influencerId: { $in: influencerIds } })
-          .select("-_id influencerId name fullName username")
-          .lean()
-      : [];
-
-    const infMap = new Map(influencers.map((i) => [String(i.influencerId), i]));
-
-    // 4) Collect campaignIds (UUIDs)
     const campaignIds = [
       ...new Set(
         docs
@@ -599,76 +675,66 @@ exports.getAllDeliverables = async (req, res) => {
       ),
     ];
 
-    // 5) Fetch campaigns
-    const campaigns = campaignIds.length
-      ? await Campaign.find({ campaignsId: { $in: campaignIds } })
-          .select("-_id campaignsId productOrServiceName")
-          .lean()
-      : [];
-
-    const campMap = new Map(campaigns.map((c) => [String(c.campaignsId), c]));
-
-    // 6) Collect milestoneHistoryIds
     const milestoneHistoryIds = [
       ...new Set(
         docs
-          .map((d) =>
-            d?.milestoneHistoryId ? String(d.milestoneHistoryId) : null
-          )
+          .map((d) => (d?.milestoneHistoryId ? String(d.milestoneHistoryId) : null))
           .filter(Boolean)
       ),
     ];
 
-    // 7) Fetch milestone titles by milestoneHistoryId
-    const rows = milestoneHistoryIds.length
-      ? await Milestone.aggregate([
-          {
-            $match: {
-              "milestoneHistory.milestoneHistoryId": { $in: milestoneHistoryIds },
+    const [influencers, campaigns, rows] = await Promise.all([
+      influencerIds.length
+        ? Influencer.find({ _id: { $in: influencerIds.map(toObjectId) } })
+            .select("name")
+            .lean()
+        : [],
+      campaignIds.length
+        ? Campaign.find({ _id: { $in: campaignIds.map(toObjectId) } })
+            .select("campaignTitle")
+            .lean()
+        : [],
+      milestoneHistoryIds.length
+        ? Milestone.aggregate([
+            { $unwind: "$milestoneHistory" },
+            {
+              $match: {
+                "milestoneHistory._id": {
+                  $in: milestoneHistoryIds.map((id) => new mongoose.Types.ObjectId(id)),
+                },
+              },
             },
-          },
-          { $unwind: "$milestoneHistory" },
-          {
-            $match: {
-              "milestoneHistory.milestoneHistoryId": { $in: milestoneHistoryIds },
+            {
+              $project: {
+                _id: 0,
+                milestoneHistoryId: "$milestoneHistory._id",
+                milestoneTitle: "$milestoneHistory.milestoneTitle",
+              },
             },
-          },
-          {
-            $project: {
-              _id: 0,
-              milestoneHistoryId: "$milestoneHistory.milestoneHistoryId",
-              milestoneTitle: "$milestoneHistory.milestoneTitle",
-            },
-          },
-        ])
-      : [];
+          ])
+        : [],
+    ]);
 
+    const infMap = new Map(influencers.map((i) => [String(i._id), i]));
+    const campMap = new Map(campaigns.map((c) => [String(c._id), c]));
     const titleByHistoryId = new Map(
       rows.map((r) => [String(r.milestoneHistoryId), r.milestoneTitle])
     );
 
-    // 8) Attach influencer + campaign + milestoneTitle
     const data = docs.map((d) => {
       const inf = infMap.get(String(d.influencerId));
       const camp = campMap.get(String(d.campaignId));
-
-      const influencerName = inf?.fullName || inf?.name || inf?.username || "";
-      const influencerHandle = inf?.username || "";
-
       const mhId = d?.milestoneHistoryId ? String(d.milestoneHistoryId) : "";
 
       return {
-        ...d,
-        campaignName: camp?.productOrServiceName || "",
+        ...normalizeDoc(d),
+        campaignName: camp?.campaignTitle || "",
         milestoneTitle: titleByHistoryId.get(mhId) || "",
-        influencerName,
-        influencerHandle,
+        influencerName: inf?.name || "",
         influencer: inf
           ? {
-              influencerId: inf.influencerId,
-              name: influencerName,
-              username: inf.username || "",
-              fullName: inf.fullName || "",
+              _id: String(inf._id),
+              name: inf.name || "",
             }
           : null,
       };

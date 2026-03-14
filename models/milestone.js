@@ -1,18 +1,25 @@
+// models/milestone.js
 const mongoose = require("mongoose");
+const { Schema } = mongoose;
 
-const milestoneHistorySchema = new mongoose.Schema(
+const milestoneHistorySchema = new Schema(
   {
     influencerId: {
-      type: String,
+      type: Schema.Types.ObjectId,
+      ref: "Influencer",
       required: true,
+      index: true,
     },
     campaignId: {
-      type: String,
+      type: Schema.Types.ObjectId,
+      ref: "Campaign",
       required: true,
+      index: true,
     },
     milestoneTitle: {
       type: String,
       required: true,
+      trim: true,
     },
     amount: {
       type: Number,
@@ -21,6 +28,7 @@ const milestoneHistorySchema = new mongoose.Schema(
     milestoneDescription: {
       type: String,
       default: "",
+      trim: true,
     },
     released: {
       type: Boolean,
@@ -28,6 +36,7 @@ const milestoneHistorySchema = new mongoose.Schema(
     },
     releasedAt: {
       type: Date,
+      default: null,
     },
     payoutStatus: {
       type: String,
@@ -36,6 +45,7 @@ const milestoneHistorySchema = new mongoose.Schema(
     },
     paidAt: {
       type: Date,
+      default: null,
     },
   },
   {
@@ -43,10 +53,11 @@ const milestoneHistorySchema = new mongoose.Schema(
   }
 );
 
-const milestoneSchema = new mongoose.Schema(
+const milestoneSchema = new Schema(
   {
     brandId: {
-      type: String,
+      type: Schema.Types.ObjectId,
+      ref: "Brand",
       required: true,
       index: true,
     },
@@ -62,7 +73,14 @@ const milestoneSchema = new mongoose.Schema(
       default: [],
     },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    versionKey: false,
+  }
 );
 
-module.exports = mongoose.model("Milestone", milestoneSchema);
+milestoneSchema.index({ brandId: 1, createdAt: -1 });
+milestoneSchema.index({ "milestoneHistory.influencerId": 1, "milestoneHistory.campaignId": 1 });
+
+module.exports =
+  mongoose.models.Milestone || mongoose.model("Milestone", milestoneSchema);

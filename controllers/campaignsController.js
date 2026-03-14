@@ -2387,71 +2387,202 @@ exports.getAcceptedCampaigns = async (req, res) => {
 };
 
 exports.getAcceptedInfluencers = async (req, res) => {
-  const { campaignId, search = "", page = 1, limit = 10, sortBy = "createdAt", order = "desc" } = req.body;
-  if (!campaignId) return res.status(400).json({ message: "campaignId required" });
-
   try {
-    const contracts = await Contract.find({
-      ...campaignIdFilter(campaignId), isRejected: { $ne: 1 },
-      status: { $in: [CONTRACT_STATUS.CONTRACT_SIGNED, CONTRACT_STATUS.MILESTONES_CREATED] },
-      $or: [{ supersededBy: { $exists: false } }, { supersededBy: null }, { supersededBy: "" }],
-    }, "influencerId contractId feeAmount lastActionAt createdAt status").sort({ lastActionAt: -1, createdAt: -1 }).lean();
+    const source = req.method === "GET" ? req.query : (req.body || {});
 
-    const influencerIds = contracts.map((c) => String(c.influencerId));
-    if (!influencerIds.length) return res.status(200).json({ meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 }, influencers: [] });
+    const {
+      campaignId,
+      search = "",
+      page = 1,
+      limit = 10,
+      sortBy = "createdAt",
+      order = "desc",
+    } = source;
 
-    const contractMap = new Map(); const feeMap = new Map();
-    for (const c of contracts) {
-      const key = String(c.influencerId);
-      if (!contractMap.has(key)) { contractMap.set(key, c.contractId || null); feeMap.set(key, Number(c.feeAmount || 0)); }
+    if (!campaignId) {
+      return res.status(400).json({ message: "campaignId required" });
     }
 
-    const filter = { influencerId: { $in: Array.from(contractMap.keys()) } };
-    if (search?.trim()) filter.$or = [{ name: new RegExp(search.trim(), "i") }, { handle: new RegExp(search.trim(), "i") }, { email: new RegExp(search.trim(), "i") }];
+    const contracts = await Contract.find(
+      {
+        ...buildContractCampaignFilter(campaignId),
+        isRejected: { $ne: 1 },
+        status: {
+          $in: [
+            CONTRACT_STATUS.CONTRACT_SIGNED,
+            CONTRACT_STATUS.MILESTONES_CREATED,
+          ],
+        },
+        $or: [
+          { supersededBy: { $exists: false } },
+          { supersededBy: null },
+          { supersededBy: "" },
+        ],
+      },
+      "influencerId contractId feeAmount lastActionAt createdAt updatedAt status"
+    )
+      .sort({ lastActionAt: -1, createdAt: -1 })
+      .lean();
 
-    const sortField = { createdAt: "createdAt", name: "name", followerCount: "followerCount", feeAmount: "feeAmount" }[sortBy] || "createdAt";
+    const influencerIds = contracts.map((c) => String(c.influencerId));
+    if (!influencerIds.length) {
+      return res.status(200).json({
+        meta: {
+          total: 0,
+          page: Number(page),
+          limit: Number(limit),
+          totalPages: 0,
+        },
+        influencers: [],
+      });
+    }
+
+    const contractMap = new Map();
+    const feeMap = new Map();
+
+    for (const c of contracts) {
+      const key = String(c.influencerId);
+      if (!contractMap.has(key)) {
+        contractMap.set(key, c.contractId || null);
+        feeMap.set(key, Number(c.feeAmount || 0));
+      }
+    }
+
+    const filter = {
+      influencerId: { $in: Array.from(contractMap.keys()) },
+    };
+
+    if (String(search).trim()) {
+      filter.$or = [
+        { name: new RegExp(String(search).trim(), "i") },
+        { handle: new RegExp(String(search).trim(), "i") },
+        { email: new RegExp(String(search).trim(), "i") },
+      ];
+    }
+
+    const sortField =
+      {
+        createdAt: "createdAt",
+        updatedAt: "updatedAt",
+        name: "name",
+        followerCount: "followerCount",
+        feeAmount: "feeAmount",
+      }[sortBy] || "createdAt";
+
     const sortDir = String(order).toLowerCase() === "asc" ? 1 : -1;
-    const skip = (Math.max(1, parseInt(page, 10)) - 1) * Math.max(1, parseInt(limit, 10));
+    const safePage = Math.max(1, parseInt(page, 10) || 1);
+    const safeLimit = Math.max(1, parseInt(limit, 10) || 10);
+    const skip = (safePage - 1) * safeLimit;
 
     const [total, rawInfluencers] = await Promise.all([
       Influencer.countDocuments(filter),
-      Influencer.find(filter).sort(sortField === "feeAmount" ? {} : { [sortField]: sortDir }).skip(skip).limit(Math.max(1, parseInt(limit, 10))).select("-passwordHash -__v").lean(),
+      Influencer.find(filter)
+        .sort(sortField === "feeAmount" ? {} : { [sortField]: sortDir })
+        .skip(skip)
+        .limit(safeLimit)
+        .select("-passwordHash -__v")
+        .lean(),
     ]);
 
-    if (!rawInfluencers.length) return res.json({ meta: { total: 0, page: Math.max(1, parseInt(page, 10)), limit: Math.max(1, parseInt(limit, 10)), totalPages: 0 }, influencers: [] });
+    if (!rawInfluencers.length) {
+      return res.json({
+        meta: {
+          total: 0,
+          page: safePage,
+          limit: safeLimit,
+          totalPages: 0,
+        },
+        influencers: [],
+      });
+    }
 
-    const modashProfiles = await Modash.find({ influencerId: { $in: rawInfluencers.map((i) => String(i.influencerId)) } }, "influencerId username handle followers provider").lean();
+    const modashProfiles = await Modash.find(
+      {
+        influencerId: {
+          $in: rawInfluencers.map((i) => String(i.influencerId)),
+        },
+      },
+      "influencerId username handle followers provider"
+    ).lean();
+
     const modashByInfluencerId = new Map();
     for (const m of modashProfiles) {
-      if (!modashByInfluencerId.has(String(m.influencerId))) modashByInfluencerId.set(String(m.influencerId), []);
-      modashByInfluencerId.get(String(m.influencerId)).push(m);
+      const key = String(m.influencerId);
+      if (!modashByInfluencerId.has(key)) {
+        modashByInfluencerId.set(key, []);
+      }
+      modashByInfluencerId.get(key).push(m);
     }
 
     function pickPrimaryProfile(influencerDoc, profilesForInfluencer) {
       if (!profilesForInfluencer?.length) return null;
-      if (["youtube", "instagram", "tiktok"].includes((influencerDoc.primaryPlatform || "").toLowerCase())) {
-        const direct = profilesForInfluencer.find((p) => String(p.provider || "").toLowerCase() === (influencerDoc.primaryPlatform || "").toLowerCase());
+
+      const primaryPlatform = String(
+        influencerDoc.primaryPlatform || ""
+      ).toLowerCase();
+
+      if (["youtube", "instagram", "tiktok"].includes(primaryPlatform)) {
+        const direct = profilesForInfluencer.find(
+          (p) => String(p.provider || "").toLowerCase() === primaryPlatform
+        );
         if (direct) return direct;
       }
-      return profilesForInfluencer.reduce((best, current) => (Number(current?.followers || 0) > Number(best?.followers || 0) ? current : best), null);
+
+      return profilesForInfluencer.reduce((best, current) =>
+        Number(current?.followers || 0) > Number(best?.followers || 0)
+          ? current
+          : best
+      );
     }
 
     let influencers = rawInfluencers.map((inf) => {
       const key = String(inf.influencerId);
-      const primaryProfile = pickPrimaryProfile(inf, modashByInfluencerId.get(key) || []);
+      const primaryProfile = pickPrimaryProfile(
+        inf,
+        modashByInfluencerId.get(key) || []
+      );
+
       return {
-        ...inf, contractId: contractMap.get(key) || null, feeAmount: feeMap.get(key) || 0, isAccepted: 1,
-        socialHandle: (primaryProfile && (primaryProfile.username || primaryProfile.handle)) || inf.handle || null,
-        audienceSize: primaryProfile && typeof primaryProfile.followers === "number" ? primaryProfile.followers : (typeof inf.followerCount === "number" ? inf.followerCount : 0),
-        primaryPlatform: inf.primaryPlatform || null, primaryProvider: primaryProfile ? primaryProfile.provider : null,
+        ...inf,
+        contractId: contractMap.get(key) || null,
+        feeAmount: feeMap.get(key) || 0,
+        isAccepted: 1,
+        socialHandle:
+          (primaryProfile &&
+            (primaryProfile.username || primaryProfile.handle)) ||
+          inf.handle ||
+          null,
+        audienceSize:
+          primaryProfile && typeof primaryProfile.followers === "number"
+            ? primaryProfile.followers
+            : typeof inf.followerCount === "number"
+            ? inf.followerCount
+            : 0,
+        primaryPlatform: inf.primaryPlatform || null,
+        primaryProvider: primaryProfile ? primaryProfile.provider : null,
       };
     });
 
-    if (sortField === "feeAmount") influencers.sort((a, b) => sortDir === 1 ? a.feeAmount - b.feeAmount : b.feeAmount - a.feeAmount);
+    if (sortField === "feeAmount") {
+      influencers.sort((a, b) =>
+        sortDir === 1 ? a.feeAmount - b.feeAmount : b.feeAmount - a.feeAmount
+      );
+    }
 
-    return res.json({ meta: { total, page: Math.max(1, parseInt(page, 10)), limit: Math.max(1, parseInt(limit, 10)), totalPages: Math.ceil(total / Math.max(1, parseInt(limit, 10))) }, influencers });
+    return res.json({
+      meta: {
+        total,
+        page: safePage,
+        limit: safeLimit,
+        totalPages: Math.ceil(total / safeLimit),
+      },
+      influencers,
+    });
   } catch (err) {
-    return res.status(500).json({ message: "Internal server error" });
+    console.error("getAcceptedInfluencers error:", err);
+    return res.status(500).json({
+      message: err.message || "Internal server error",
+    });
   }
 };
 
