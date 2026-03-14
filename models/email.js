@@ -1,4 +1,3 @@
-// models/email.js
 const mongoose = require("mongoose");
 
 const { Schema } = mongoose;
@@ -23,7 +22,6 @@ const emailThreadSchema = new mongoose.Schema(
       index: true,
     },
 
-    // conversation-level info
     subject: { type: String },
 
     lastMessageAt: { type: Date, index: true },
@@ -34,18 +32,14 @@ const emailThreadSchema = new mongoose.Schema(
     },
     lastMessageSnippet: { type: String },
 
-    // ✅ NEW: once influencer replies at least once, conversation becomes free forever
     hasInfluencerReplied: { type: Boolean, default: false, index: true },
 
-    // Proxy emails in use for this pair
     brandAliasEmail: { type: String, lowercase: true, index: true },
     influencerAliasEmail: { type: String, lowercase: true, index: true },
 
-    // What we display as "From" in UI
     brandDisplayAlias: { type: String },
     influencerDisplayAlias: { type: String },
 
-    // Snapshots for UI
     brandSnapshot: {
       name: String,
       email: String,
@@ -61,21 +55,19 @@ const emailThreadSchema = new mongoose.Schema(
       default: "active",
     },
 
-    createdBy: { type: String }, // 'brand' | 'influencer' | 'system'
+    createdBy: { type: String },
   },
   { timestamps: true }
 );
 
-// Only one thread per brand + influencer pair
 emailThreadSchema.index({ brand: 1, influencer: 1 }, { unique: true });
 
 emailThreadSchema.statics.generateAliasEmail = function (displayName) {
   const slug = slugifyName(displayName);
-  const domain = process.env.EMAIL_RELAY_DOMAIN || "mail.collabglam.com";
+  const domain = process.env.EMAIL_RELAY_DOMAIN || "mail.collabglam.cloud";
   return `${slug}@${domain}`;
 };
 
-// alias & display are identical
 emailThreadSchema.statics.generatePrettyAlias =
   emailThreadSchema.statics.generateAliasEmail;
 
@@ -101,11 +93,9 @@ const emailMessageSchema = new mongoose.Schema(
     },
     fromUserModel: { type: String, enum: ["Brand", "Influencer", "System"] },
 
-    // Existing field (keep)
     fromAliasEmail: { type: String },
     toRealEmail: { type: String },
 
-    // explicit proxy/real addressing
     fromProxyEmail: { type: String, lowercase: true, index: true },
     toProxyEmail: { type: String, lowercase: true, index: true },
     fromRealEmail: { type: String, lowercase: true, index: true },
@@ -114,15 +104,12 @@ const emailMessageSchema = new mongoose.Schema(
     htmlBody: String,
     textBody: String,
 
-    // Email threading fields
-    messageId: { type: String, index: true }, // Message-ID header
-    inReplyTo: { type: String, index: true }, // In-Reply-To header
+    messageId: { type: String, index: true },
+    inReplyTo: { type: String, index: true },
     references: [String],
 
-    // ✅ SES MessageId of the FORWARDED email (useful for routing replies & debugging)
     forwardedSesMessageId: { type: String, index: true },
 
-    // Timestamps from the email’s perspective
     sentAt: { type: Date },
     receivedAt: { type: Date },
 
@@ -139,13 +126,16 @@ const emailMessageSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// ✅ Recommended for fast policy checks
 emailMessageSchema.index({ thread: 1, direction: 1, createdAt: -1 });
-
-// ✅ Optional but recommended: prevent duplicate Message-ID per thread (safe with sparse)
-emailMessageSchema.index({ thread: 1, messageId: 1 }, { unique: true, sparse: true });
-
-// ✅ Optional: faster lookups when searching a forwarded SES messageId
+emailMessageSchema.index(
+  { thread: 1, messageId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      messageId: { $exists: true, $ne: null }
+    }
+  }
+);
 emailMessageSchema.index({ forwardedSesMessageId: 1 }, { sparse: true });
 
 // ---------------- Email Template Schema ----------------
@@ -165,9 +155,14 @@ const emailTemplateSchema = new Schema(
   { timestamps: true }
 );
 
-const EmailThread = mongoose.model("EmailThread", emailThreadSchema);
-const EmailMessage = mongoose.model("EmailMessage", emailMessageSchema);
-const EmailTemplate = mongoose.model("EmailTemplate", emailTemplateSchema);
+const EmailThread =
+  mongoose.models.EmailThread || mongoose.model("EmailThread", emailThreadSchema);
+
+const EmailMessage =
+  mongoose.models.EmailMessage || mongoose.model("EmailMessage", emailMessageSchema);
+
+const EmailTemplate =
+  mongoose.models.EmailTemplate || mongoose.model("EmailTemplate", emailTemplateSchema);
 
 module.exports = {
   EmailThread,
