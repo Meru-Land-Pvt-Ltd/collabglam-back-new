@@ -1,14 +1,5 @@
 "use strict";
 
-/**
- * Contract Controller (CollabGlam)
- * Latest Lane A agreement controller
- * - PDF rendering via Puppeteer (HTML -> PDF)
- * - Versioning + acceptances + signatures workflow
- * - Content-first contract structure
- * - Email + reminders are best-effort
- */
-
 const PDFDocument = require("pdfkit");
 const moment = require("moment-timezone");
 const puppeteer = require("puppeteer");
@@ -48,6 +39,7 @@ const CONTRACT_PDF_TITLE = "COLLABGLAM BRAND–INFLUENCER CAMPAIGN COLLABORATION
 const MAX_SIG_BYTES = 50 * 1024;
 
 const ALLOWED_BRAND_PATHS = [
+
   "content.brand.legalName",
   "content.brand.contactPersonName",
   "content.brand.noticeEmail",
@@ -74,9 +66,11 @@ const ALLOWED_BRAND_PATHS = [
 
   "content.scheduleA.commercial.totalCampaignFee",
   "content.scheduleA.commercial.currency",
-  "content.scheduleA.commercial.platformMilestonePaymentStructure",
   "content.scheduleA.commercial.customSplit",
   "content.scheduleA.commercial.advancePaymentTrigger",
+  "content.campaign.paymentType",
+  "content.scheduleA.commercial.paymentStructure",
+  "content.scheduleA.commercial.milestones",
   "content.scheduleA.commercial.remainingPaymentTrigger",
   "content.scheduleA.commercial.paymentProcessorFeesBorneBy",
   "content.scheduleA.commercial.paymentProcessorFeesNotes",
@@ -318,16 +312,71 @@ function mergeDeep(base, patch) {
   return out;
 }
 
-function flatten(obj, prefix = "") {
-  const out = {};
-  Object.entries(obj || {}).forEach(([k, v]) => {
-    const p = prefix ? `${prefix}.${k}` : k;
-    if (v && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date)) {
-      Object.assign(out, flatten(v, p));
-    } else {
-      out[p] = v;
+function toPlainSafe(value, seen = new WeakSet()) {
+  if (value === null || value === undefined) return value;
+  if (value instanceof Date) return value;
+
+  if (typeof value !== "object") return value;
+
+  if (typeof value?.toObject === "function") {
+    value = value.toObject({ depopulate: true, flattenMaps: true });
+  }
+
+  if (value instanceof Map) {
+    const out = {};
+    for (const [k, v] of value.entries()) {
+      out[k] = toPlainSafe(v, seen);
     }
-  });
+    return out;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((v) => toPlainSafe(v, seen));
+  }
+
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    out[k] = toPlainSafe(v, seen);
+  }
+  return out;
+}
+
+function flatten(obj, prefix = "") {
+  const safe = toPlainSafe(obj);
+  const out = {};
+
+  function walk(value, path) {
+    if (value instanceof Date || value === null || value === undefined) {
+      out[path] = value;
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      out[path] = value;
+      return;
+    }
+
+    if (typeof value !== "object") {
+      out[path] = value;
+      return;
+    }
+
+    const entries = Object.entries(value);
+    if (!entries.length) {
+      out[path] = value;
+      return;
+    }
+
+    for (const [k, v] of entries) {
+      const nextPath = path ? `${path}.${k}` : k;
+      walk(v, nextPath);
+    }
+  }
+
+  walk(safe, prefix);
   return out;
 }
 
@@ -466,6 +515,71 @@ function renderUsageRightsTable(rows = []) {
   `.trim();
 }
 
+const PAYMENT_TYPES = Object.freeze({
+  FIXED: "fixed_payment",
+  MILESTONE: "milestone_based",
+  GIFTING: "product_gifting",
+});
+
+function normalizePaymentType(raw) {
+  const v = String(raw || "").trim().toLowerCase();
+
+  if (["fixed", "fixed_payment", "fixed-payment"].includes(v)) {
+    return PAYMENT_TYPES.FIXED;
+  }
+  if (["milestone", "milestone_based", "milestone-based"].includes(v)) {
+    return PAYMENT_TYPES.MILESTONE;
+  }
+  if (["gifting", "product_gifting", "product-gifting"].includes(v)) {
+    return PAYMENT_TYPES.GIFTING;
+  }
+
+  return PAYMENT_TYPES.FIXED;
+}
+
+function getCampaignPaymentType(campaign, contentInput = {}) {
+  return normalizePaymentType(
+    contentInput?.campaign?.paymentType || campaign?.paymentType
+  );
+}
+
+function getCampaignFee(campaign, paymentType) {
+  if (paymentType === PAYMENT_TYPES.GIFTING) return 0;
+
+  return Number(
+    campaign?.influencerBudget ||
+    campaign?.campaignBudget ||
+    campaign?.budget ||
+    0
+  );
+}
+
+function buildDefaultDeliverables(campaign, inputDeliverables) {
+  if (Array.isArray(inputDeliverables) && inputDeliverables.length) {
+    return inputDeliverables;
+  }
+
+  return [
+    {
+      srNo: 1,
+      platformHandle: Array.isArray(campaign?.platformSelection)
+        ? campaign.platformSelection.join(", ")
+        : "",
+      deliverableFormat: "",
+      qty: 1,
+      draftDue: "",
+      liveDate: "",
+    },
+  ];
+}
+
+function getMandatoryTags(campaign) {
+  if (Array.isArray(campaign?.hashtags) && campaign.hashtags.length) {
+    return campaign.hashtags.join(", ");
+  }
+  return "";
+}
+
 // ============================ Content defaults ============================
 function createDefaultContent({
   campaign,
@@ -483,6 +597,18 @@ function createDefaultContent({
         requestedEffectiveDateTimezone || admin?.timezone || DEFAULT_TZ
       )
       : undefined;
+
+  const paymentType = getCampaignPaymentType(campaign, contentInput);
+  const totalCampaignFee =
+    contentInput?.scheduleA?.commercial?.totalCampaignFee ??
+    getCampaignFee(campaign, paymentType);
+
+  const defaultPaymentStructure =
+    paymentType === PAYMENT_TYPES.MILESTONE
+      ? "50% advance / 50% balance"
+      : paymentType === PAYMENT_TYPES.FIXED
+        ? "100% on completion"
+        : "Product gifting only";
 
   const base = {
     brand: {
@@ -518,24 +644,17 @@ function createDefaultContent({
       effectiveDate: effectiveDate || contentInput?.campaign?.effectiveDate || null,
       campaignTitleOrId:
         contentInput?.campaign?.campaignTitleOrId ||
+        campaign?.campaignTitle ||
         campaign?.productOrServiceName ||
-        campaign?.campaignId ||
-        "",
+        String(campaign?._id || ""),
+      paymentType,
     },
 
     scheduleA: {
-      deliverables: Array.isArray(contentInput?.scheduleA?.deliverables)
-        ? contentInput.scheduleA.deliverables
-        : [
-          {
-            srNo: 1,
-            platformHandle: "",
-            deliverableFormat: "",
-            qty: 1,
-            draftDue: "",
-            liveDate: "",
-          },
-        ],
+      deliverables: buildDefaultDeliverables(
+        campaign,
+        contentInput?.scheduleA?.deliverables
+      ),
 
       minimumVideoSpecs: contentInput?.scheduleA?.minimumVideoSpecs || "",
       preShootScriptRequired: Boolean(contentInput?.scheduleA?.preShootScriptRequired),
@@ -543,7 +662,7 @@ function createDefaultContent({
       preShootScriptReviewBusinessDays:
         contentInput?.scheduleA?.preShootScriptReviewBusinessDays || 2,
       mandatoryTagsMentionsLinksCodes:
-        contentInput?.scheduleA?.mandatoryTagsMentionsLinksCodes || "",
+        contentInput?.scheduleA?.mandatoryTagsMentionsLinksCodes || getMandatoryTags(campaign),
 
       review: {
         includedRevisionRounds:
@@ -560,12 +679,12 @@ function createDefaultContent({
 
       commercial: {
         totalCampaignFee:
-          contentInput?.scheduleA?.commercial?.totalCampaignFee || 0,
-        currency:
-          contentInput?.scheduleA?.commercial?.currency || "USD",
-        platformMilestonePaymentStructure:
+          paymentType === PAYMENT_TYPES.GIFTING ? 0 : Number(totalCampaignFee || 0),
+        currency: contentInput?.scheduleA?.commercial?.currency || "USD",
+        paymentStructure:
+          contentInput?.scheduleA?.commercial?.paymentStructure ||
           contentInput?.scheduleA?.commercial?.platformMilestonePaymentStructure ||
-          "50% advance / 50% balance",
+          defaultPaymentStructure,
         customSplit:
           contentInput?.scheduleA?.commercial?.customSplit || "",
         advancePaymentTrigger:
@@ -579,6 +698,23 @@ function createDefaultContent({
         laneAMarketplaceFeeNote:
           contentInput?.scheduleA?.commercial?.laneAMarketplaceFeeNote ||
           "Unless expressly stated otherwise, 10% of the applicable Influencer compensation funded through the Platform is deducted from the Influencer payout and retained by CollabGlam; the Brand-funded campaign amount remains fixed.",
+        milestones: Array.isArray(contentInput?.scheduleA?.commercial?.milestones)
+          ? contentInput.scheduleA.commercial.milestones.map((row, index) => ({
+            milestoneName: row?.milestoneName || `Milestone ${index + 1}`,
+            paymentAmount: Number(row?.paymentAmount || 0),
+            triggerEvent: row?.triggerEvent || "",
+            dueDate: row?.dueDate || "",
+          }))
+          : paymentType === PAYMENT_TYPES.MILESTONE
+            ? [
+              {
+                milestoneName: "Milestone 1",
+                paymentAmount: 0,
+                triggerEvent: "",
+                dueDate: "",
+              },
+            ]
+            : [],
       },
 
       rawFiles: {
@@ -594,14 +730,16 @@ function createDefaultContent({
 
       shipping: {
         productShippingApplicable:
-          contentInput?.scheduleA?.shipping?.productShippingApplicable || "No",
+          contentInput?.scheduleA?.shipping?.productShippingApplicable ||
+          (paymentType === PAYMENT_TYPES.GIFTING ? "Yes" : "No"),
         shipToName: contentInput?.scheduleA?.shipping?.shipToName || "",
         shipToAddress: contentInput?.scheduleA?.shipping?.shipToAddress || "",
         shipToPhone: contentInput?.scheduleA?.shipping?.shipToPhone || "",
         productReceiptConfirmationDeadline:
           contentInput?.scheduleA?.shipping?.productReceiptConfirmationDeadline || "",
         productReturnable:
-          contentInput?.scheduleA?.shipping?.productReturnable || "Gift / keep product",
+          contentInput?.scheduleA?.shipping?.productReturnable ||
+          (paymentType === PAYMENT_TYPES.GIFTING ? "Gift / keep product" : ""),
         returnWindowMethod:
           contentInput?.scheduleA?.shipping?.returnWindowMethod || "",
         riskOfLossNotes:
@@ -672,7 +810,96 @@ function createDefaultContent({
     },
   };
 
-  return mergeDeep(base, contentInput || {});
+  const merged = mergeDeep(base, contentInput || {});
+
+  merged.campaign = merged.campaign || {};
+  merged.scheduleA = merged.scheduleA || {};
+  merged.scheduleA.commercial = merged.scheduleA.commercial || {};
+
+  merged.campaign.paymentType = paymentType;
+  merged.scheduleA.commercial.paymentStructure =
+    merged.scheduleA.commercial.paymentStructure || defaultPaymentStructure;
+
+  merged.scheduleA.commercial.totalCampaignFee =
+    paymentType === PAYMENT_TYPES.GIFTING
+      ? 0
+      : Number(merged.scheduleA.commercial.totalCampaignFee || 0);
+
+  if (paymentType === PAYMENT_TYPES.MILESTONE) {
+    merged.scheduleA.commercial.milestones = Array.isArray(
+      merged.scheduleA.commercial.milestones
+    )
+      ? merged.scheduleA.commercial.milestones.map((row, index) => ({
+        milestoneName: row?.milestoneName || `Milestone ${index + 1}`,
+        paymentAmount: Number(row?.paymentAmount || 0),
+        triggerEvent: row?.triggerEvent || "",
+        dueDate: row?.dueDate || "",
+      }))
+      : [];
+  } else {
+    merged.scheduleA.commercial.milestones = [];
+  }
+  return merged;
+}
+
+function renderMilestonesTable(rows = []) {
+  const body = (Array.isArray(rows) ? rows : [])
+    .map(
+      (r, i) => `
+        <tr>
+          <td>${esc(String(i + 1))}</td>
+          <td>${esc(r?.milestoneName || "")}</td>
+          <td>${esc(String(r?.paymentAmount ?? ""))}</td>
+          <td>${esc(r?.triggerEvent || "")}</td>
+          <td>${esc(r?.dueDate || "")}</td>
+        </tr>
+      `
+    )
+    .join("");
+
+  return `
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Milestone</th>
+          <th>Amount</th>
+          <th>Trigger Event</th>
+          <th>Due Date</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${body || `<tr><td colspan="5">No milestones defined.</td></tr>`}
+      </tbody>
+    </table>
+  `.trim();
+}
+
+function renderCommercialTermsTableHTML(content = {}) {
+  const paymentType = normalizePaymentType(content?.campaign?.paymentType);
+  const commercial = content?.scheduleA?.commercial || {};
+
+  const baseTable = renderKeyValueTable([
+    ["Payment Type", paymentType],
+    ["Total Campaign Fee", compactJoin([commercial?.totalCampaignFee, commercial?.currency], " ")],
+    ["Payment Structure", commercial?.paymentStructure || ""],
+    ["Custom Split", commercial?.customSplit || ""],
+    ["Advance Payment Trigger", commercial?.advancePaymentTrigger || ""],
+    ["Remaining Payment Trigger", commercial?.remainingPaymentTrigger || ""],
+    ["Payment Processor Fees Borne By", commercial?.paymentProcessorFeesBorneBy || ""],
+    ["Payment Processor Fee Notes", commercial?.paymentProcessorFeesNotes || ""],
+    ["Lane A Marketplace Fee", commercial?.laneAMarketplaceFeeNote || ""],
+  ]);
+
+  if (paymentType !== PAYMENT_TYPES.MILESTONE) {
+    return baseTable;
+  }
+
+  return `
+    ${baseTable}
+    <div style="height:8px;"></div>
+    ${renderMilestonesTable(commercial?.milestones || [])}
+  `;
 }
 
 // ============================ Token map / Template rendering ============================
@@ -736,6 +963,8 @@ function buildTokenMap(contract) {
     "Campaign.ProductsServicesCovered": c?.campaign?.productsServicesCovered || "",
     "Campaign.Territory": c?.campaign?.territoryTargetCountry || "Worldwide",
 
+    "SOW.CommercialTermsTableHTML": renderCommercialTermsTableHTML(c),
+
     "SOW.MinimumVideoSpecs": c?.scheduleA?.minimumVideoSpecs || "",
     "SOW.PreShootScriptRequiredText": preShootText,
     "SOW.MandatoryTagsMentionsLinksCodes":
@@ -755,26 +984,6 @@ function buildTokenMap(contract) {
       ["Reshoot Obligation", review?.reshootObligation || ""],
       ["Reshoot Fee", review?.reshootFee || ""],
       ["Minimum Live Period", review?.minimumLivePeriod || ""],
-    ]),
-
-    "SOW.CommercialTermsTableHTML": renderKeyValueTable([
-      [
-        "Total Campaign Fee",
-        compactJoin([commercial?.totalCampaignFee, commercial?.currency], " "),
-      ],
-      [
-        "Platform Milestone Payment Structure",
-        commercial?.platformMilestonePaymentStructure || "",
-      ],
-      ["Custom Split", commercial?.customSplit || ""],
-      ["Advance Payment Trigger", commercial?.advancePaymentTrigger || ""],
-      ["Remaining Payment Trigger", commercial?.remainingPaymentTrigger || ""],
-      [
-        "Payment Processor Fees Borne By",
-        commercial?.paymentProcessorFeesBorneBy || "",
-      ],
-      ["Payment Processor Fee Notes", commercial?.paymentProcessorFeesNotes || ""],
-      ["Lane A Marketplace Fee", commercial?.laneAMarketplaceFeeNote || ""],
     ]),
 
     "SOW.RawFilesReportingTableHTML": renderKeyValueTable([
@@ -1616,6 +1825,7 @@ function parseSignatureImage({ signatureImageDataUrl, signatureImageBase64, sign
 function buildResendChildContract(
   parentDoc,
   {
+    campaignDoc,
     contentUpdates = {},
     requestedEffectiveDate,
     requestedEffectiveDateTimezone,
@@ -1636,8 +1846,16 @@ function buildResendChildContract(
     : parent?.requestedEffectiveDate;
 
   const mergedContent = mergeDeep(parent?.content || {}, contentUpdates || {});
+  const paymentType = normalizePaymentType(
+    contentUpdates?.campaign?.paymentType ||
+    parent?.content?.campaign?.paymentType ||
+    campaignDoc?.paymentType
+  );
+
+  mergedContent.campaign = mergedContent.campaign || {};
+  mergedContent.campaign.paymentType = paymentType;
+
   if (requestedDateBuilt) {
-    mergedContent.campaign = mergedContent.campaign || {};
     mergedContent.campaign.effectiveDate = requestedDateBuilt;
   }
 
@@ -1660,6 +1878,8 @@ function buildResendChildContract(
 
     acceptances: { brand: { accepted: false }, influencer: { accepted: false } },
     confirmations: { brand: { confirmed: false }, influencer: { confirmed: false } },
+
+    paymentType,
 
     signatures: {
       brand: { signed: false },
@@ -1773,7 +1993,8 @@ exports.initiate = async (req, res) => {
       autoCalcs: {},
     };
 
-    const adminTimezone = campaign?.timezone || requestedEffectiveDateTimezone || DEFAULT_TZ;
+    const adminTimezone =
+      campaign?.campaignTimezone || requestedEffectiveDateTimezone || DEFAULT_TZ;
     const admin = {
       timezone: adminTimezone,
       jurisdiction: "USA",
@@ -1816,6 +2037,7 @@ exports.initiate = async (req, res) => {
       brandId,
       influencerId,
       campaignId,
+      paymentType: getCampaignPaymentType(campaign, contentInput),
 
       status: CONTRACT_STATUS.BRAND_SENT_DRAFT,
       awaitingRole: "influencer",
@@ -1889,6 +2111,7 @@ exports.initiate = async (req, res) => {
       }
 
       const child = buildResendChildContract(parent, {
+        campaignDoc: campaign,
         contentUpdates: contentInput,
         requestedEffectiveDate,
         requestedEffectiveDateTimezone,
@@ -1962,7 +2185,7 @@ exports.initiate = async (req, res) => {
     await contract.save();
 
     await Campaign.updateOne(campaignQuery(campaignId), {
-      $set: { isContracted: 1, contractId: contract.contractId, isAccepted: 0 },
+      $set: { isContracted: 1 },
     });
 
     await createAndEmit({
@@ -2085,14 +2308,16 @@ exports.influencerConfirm = async (req, res) => {
       });
     }
 
-    const before = { content: contract.content?.toObject?.() || contract.content };
     contract.content = contract.content || {};
-    const changedPaths = applyAllowedDeepUpdates(contract, incoming, ALLOWED_INFLUENCER_PATHS);
-    const after = { content: contract.content };
 
-    const editedFields = computeEditedFields(before, after, ["content"]);
-    if (editedFields.length || changedPaths.length) {
-      bumpVersion(contract, "influencer", req.user?.id, editedFields.length ? editedFields : changedPaths);
+    const changedPaths = applyAllowedDeepUpdates(
+      contract,
+      incoming,
+      ALLOWED_INFLUENCER_PATHS
+    );
+
+    if (changedPaths.length) {
+      bumpVersion(contract, "influencer", req.user?.id, changedPaths);
       contract.status = CONTRACT_STATUS.INFLUENCER_EDITED;
       contract.awaitingRole = "brand";
       resetAcceptancesForNewVersion(contract);
@@ -2103,7 +2328,7 @@ exports.influencerConfirm = async (req, res) => {
     contract.isAccepted = 1;
 
     addAudit(contract, "influencer", "INFLUENCER_ACCEPTED", {
-      editedFields: editedFields.length ? editedFields : changedPaths,
+      editedFields: changedPaths,
       version: contract.version,
       nextRole: sync.nextRole,
     });
@@ -2579,8 +2804,8 @@ exports.sign = async (req, res) => {
         type: opp.type,
         title: `${signerRole === "brand" ? "Brand" : "Influencer"} signed`,
         message: `${signerRole === "brand"
-            ? contract.brandName || "Brand"
-            : contract.influencerName || "Influencer"
+          ? contract.brandName || "Brand"
+          : contract.influencerName || "Influencer"
           } added a signature.`,
         entityType: "contract",
         entityId: String(contract.contractId),
@@ -2677,8 +2902,14 @@ exports.sign = async (req, res) => {
 
 exports.brandUpdateFields = async (req, res) => {
   try {
-    const { contractId, brandId, brandUpdates = {}, type = 0 } = req.body;
-    const isPreview = Number(type) === 1;
+    const {
+      contractId,
+      brandId,
+      brandUpdates = {},
+      preview = false,
+      requestedEffectiveDate,
+      requestedEffectiveDateTimezone,
+    } = req.body;
 
     assertRequired(req.body, ["contractId", "brandId"]);
 
@@ -2686,6 +2917,7 @@ exports.brandUpdateFields = async (req, res) => {
     if (!contract) return respondError(res, "Contract not found", 404);
 
     requireNotLocked(contract);
+
     if (contract.editsLockedAt) {
       return respondError(
         res,
@@ -2694,21 +2926,85 @@ exports.brandUpdateFields = async (req, res) => {
       );
     }
 
-    contract.content = contract.content || {};
+    // PREVIEW MODE: clone + merge + render PDF, do NOT mutate live mongoose doc
+    if (preview) {
+      const tmp = contract.toObject?.() || contract;
 
-    const before = { content: contract.content?.toObject?.() || contract.content };
-    const changedPaths = applyAllowedDeepUpdates(contract, brandUpdates, ALLOWED_BRAND_PATHS);
-    const after = { content: contract.content?.toObject?.() || contract.content };
+      tmp.content = mergeDeep(
+        tmp.content || {},
+        brandUpdates?.content || {}
+      );
 
-    const editedFields = computeEditedFields(before, after, ["content"]);
+      if (requestedEffectiveDate) {
+        const builtDate = buildRequestedEffectiveDate(
+          requestedEffectiveDate,
+          requestedEffectiveDateTimezone || tmp.requestedEffectiveDateTimezone || DEFAULT_TZ
+        );
 
-    if (isPreview) {
-      return respondOK(res, {
-        message: "Brand fields preview",
-        contract,
-        editedFields: editedFields.length ? editedFields : changedPaths,
+        tmp.requestedEffectiveDate = builtDate;
+        tmp.requestedEffectiveDateTimezone =
+          requestedEffectiveDateTimezone ||
+          tmp.requestedEffectiveDateTimezone ||
+          DEFAULT_TZ;
+
+        tmp.content = tmp.content || {};
+        tmp.content.campaign = tmp.content.campaign || {};
+        tmp.content.campaign.effectiveDate = builtDate;
+      }
+
+      const tokens = buildTokenMap(tmp);
+      const text = renderTemplate(
+        tmp.admin?.legalTemplateText || MASTER_TEMPLATE,
+        tokens
+      );
+      const html = renderContractHTML({ contract: tmp, templateText: text });
+
+      return renderPDFWithPuppeteer({
+        html,
+        res,
+        filename: `Contract-Brand-Preview-${contractId}.pdf`,
+        headerTitle: CONTRACT_PDF_TITLE,
+        headerDate:
+          tokens["Agreement.EffectiveDateTime"] ||
+          tokens["Agreement.EffectiveDateLong"] ||
+          "Pending",
       });
     }
+
+    contract.content = contract.content || {};
+
+    const before = {
+      content: contract.content?.toObject?.({ depopulate: true, flattenMaps: true }) || {},
+    };
+
+    const changedPaths = applyAllowedDeepUpdates(
+      contract,
+      brandUpdates,
+      ALLOWED_BRAND_PATHS
+    );
+
+    if (requestedEffectiveDate) {
+      const builtDate = buildRequestedEffectiveDate(
+        requestedEffectiveDate,
+        requestedEffectiveDateTimezone || contract.requestedEffectiveDateTimezone || DEFAULT_TZ
+      );
+
+      contract.requestedEffectiveDate = builtDate;
+      contract.requestedEffectiveDateTimezone =
+        requestedEffectiveDateTimezone ||
+        contract.requestedEffectiveDateTimezone ||
+        DEFAULT_TZ;
+
+      contract.content = contract.content || {};
+      contract.content.campaign = contract.content.campaign || {};
+      contract.content.campaign.effectiveDate = builtDate;
+    }
+
+    const after = {
+      content: contract.content?.toObject?.({ depopulate: true, flattenMaps: true }) || {},
+    };
+
+    const editedFields = computeEditedFields(before, after, ["content"]);
 
     if (editedFields.length || changedPaths.length) {
       bumpVersion(
@@ -2717,8 +3013,8 @@ exports.brandUpdateFields = async (req, res) => {
         req.user?.id,
         editedFields.length ? editedFields : changedPaths
       );
-      resetAcceptancesForNewVersion(contract);
 
+      resetAcceptancesForNewVersion(contract);
       contract.status = CONTRACT_STATUS.BRAND_EDITED;
       contract.awaitingRole = "influencer";
       contract.lastSentAt = new Date();
@@ -2727,6 +3023,17 @@ exports.brandUpdateFields = async (req, res) => {
         editedFields: editedFields.length ? editedFields : changedPaths,
       });
     }
+
+    contract.paymentType = normalizePaymentType(
+      contract?.content?.campaign?.paymentType
+    );
+
+    contract.feeAmount = Number(
+      contract?.content?.scheduleA?.commercial?.totalCampaignFee || 0
+    );
+
+    contract.currency =
+      contract?.content?.scheduleA?.commercial?.currency || "USD";
 
     await contract.save();
 
@@ -2767,7 +3074,12 @@ exports.brandUpdateFields = async (req, res) => {
 
     return respondOK(res, { message: "Brand fields updated", contract });
   } catch (err) {
-    return respondError(res, err.message || "brandUpdateFields error", err.status || 500, err);
+    return respondError(
+      res,
+      err.message || "brandUpdateFields error",
+      err.status || 500,
+      err
+    );
   }
 };
 
@@ -2952,12 +3264,17 @@ exports.resend = async (req, res) => {
 
     const parent = await Contract.findOne({ contractId });
     if (!parent) return respondError(res, "Contract not found", 404);
+
+    const campaignDoc = await Campaign.findById(parent.campaignId);
+    if (!campaignDoc) return respondError(res, "Campaign not found", 404);
+
     if (isLockedContract(parent)) {
       return respondError(res, "Cannot resend a signed/locked contract", 400);
     }
 
     if (preview) {
       const tmp = buildResendChildContract(parent, {
+        campaignDoc,
         contentUpdates,
         requestedEffectiveDate,
         requestedEffectiveDateTimezone,
@@ -2982,6 +3299,7 @@ exports.resend = async (req, res) => {
     }
 
     const child = buildResendChildContract(parent, {
+      campaignDoc,
       contentUpdates,
       requestedEffectiveDate,
       requestedEffectiveDateTimezone,
@@ -3051,6 +3369,241 @@ exports.resend = async (req, res) => {
     return respondOK(res, { message: "Resent contract created", contract: child }, 201);
   } catch (err) {
     return respondError(res, err.message || "resend error", err.status || 500, err);
+  }
+};
+
+exports.initiateBulk = async (req, res) => {
+  try {
+    const {
+      brandId,
+      campaignId,
+      influencerIds = [],
+      content: contentInput = {},
+      requestedEffectiveDate,
+      requestedEffectiveDateTimezone,
+    } = req.body;
+
+    assertRequired(req.body, ["brandId", "campaignId"]);
+
+    if (!Array.isArray(influencerIds) || !influencerIds.length) {
+      return respondError(res, "influencerIds is required", 400);
+    }
+
+    const [campaign, brandDoc] = await Promise.all([
+      Campaign.findById(campaignId),
+      Brand.findById(brandId),
+    ]);
+
+    if (!campaign) return respondError(res, "Campaign not found", 404);
+    if (!brandDoc) return respondError(res, "Brand not found", 404);
+
+    const adminTimezone =
+      campaign?.campaignTimezone || requestedEffectiveDateTimezone || DEFAULT_TZ;
+
+    const admin = {
+      timezone: adminTimezone,
+      jurisdiction: "USA",
+      arbitrationSeat: "San Francisco, CA",
+      fxSource: "ECB",
+      extraRevisionFee: 0,
+      escrowAMLFlags: "",
+      collabglamSignatoryName: "",
+      collabglamSignatoryEmail: process.env.COLLABGLAM_SIGNATORY_EMAIL || "",
+      legalTemplateVersion: 1,
+      legalTemplateText: MASTER_TEMPLATE,
+      legalTemplateHistory: [
+        {
+          version: 1,
+          text: MASTER_TEMPLATE,
+          updatedAt: new Date(),
+          updatedBy: req.user?.email || "system",
+        },
+      ],
+    };
+
+    const results = await Promise.allSettled(
+      influencerIds.map(async (influencerId) => {
+        const influencerDoc = await Influencer.findById(influencerId);
+        if (!influencerDoc) {
+          throw new Error(`Influencer not found: ${influencerId}`);
+        }
+
+        // remove single-influencer values from shared bulk payload
+        const safeContentInput = JSON.parse(JSON.stringify(contentInput || {}));
+        delete safeContentInput.influencer;
+
+        if (safeContentInput?.scheduleA?.deliverables) {
+          safeContentInput.scheduleA.deliverables =
+            safeContentInput.scheduleA.deliverables.map((row, index) => ({
+              ...row,
+              srNo: Number(row?.srNo ?? index + 1),
+              platformHandle:
+                influencerDoc?.handle || influencerDoc?.profileUrl || row?.platformHandle || "",
+            }));
+        }
+
+        const other = {
+          brandProfile: {
+            legalName: brandDoc.legalName || brandDoc.name || "",
+            address: brandDoc.address || "",
+            contactName: brandDoc.contactName || brandDoc.ownerName || "",
+            email: brandDoc.email || "",
+            country: brandDoc.country || "",
+          },
+          influencerProfile: {
+            legalName: influencerDoc.legalName || influencerDoc.name || "",
+            address: influencerDoc.address || "",
+            contactName: influencerDoc.contactName || influencerDoc.name || "",
+            email: influencerDoc.email || "",
+            country: influencerDoc.country || "",
+            handle: influencerDoc.handle || "",
+          },
+          autoCalcs: {},
+        };
+
+        const content = createDefaultContent({
+          campaign,
+          brandDoc,
+          influencerDoc,
+          admin,
+          requestedEffectiveDate,
+          requestedEffectiveDateTimezone,
+          contentInput: safeContentInput,
+        });
+
+        const requestedDateBuilt = requestedEffectiveDate
+          ? buildRequestedEffectiveDate(
+            requestedEffectiveDate,
+            requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ
+          )
+          : undefined;
+
+        const contract = new Contract({
+          brandId,
+          influencerId,
+          campaignId,
+          paymentType: getCampaignPaymentType(campaign, contentInput),
+
+          status: CONTRACT_STATUS.BRAND_SENT_DRAFT,
+          awaitingRole: "influencer",
+          version: 0,
+          editsLockedAt: null,
+
+          requiredSigners: ["brand", "influencer"],
+
+          acceptances: {
+            brand: { accepted: false },
+            influencer: { accepted: false },
+          },
+          confirmations: {
+            brand: { confirmed: false },
+            influencer: { confirmed: false },
+          },
+
+          signatures: {
+            brand: { signed: false },
+            influencer: { signed: false },
+            collabglam: { signed: false },
+          },
+
+          content,
+          other,
+          admin,
+
+          requestedEffectiveDate: requestedDateBuilt,
+          requestedEffectiveDateTimezone:
+            requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ,
+
+          brandName: content.brand.legalName,
+          brandAddress: content.brand.billingAddress,
+          influencerName: content.influencer.legalName,
+          influencerAddress: content.influencer.address,
+          influencerHandle: content.influencer.postingHandleUrl,
+
+          lastSentAt: new Date(),
+          isAssigned: 1,
+          isAccepted: 0,
+          feeAmount: Number(content?.scheduleA?.commercial?.totalCampaignFee || 0),
+          currency: content?.scheduleA?.commercial?.currency || "USD",
+        });
+
+        addAudit(contract, "system", "INITIATED", {
+          campaignId,
+          status: contract.status,
+          bulk: true,
+        });
+
+        await contract.save();
+
+        await createAndEmit({
+          recipientType: "influencer",
+          influencerId: String(influencerId),
+          type: "contract.initiated",
+          title: `Contract initiated by ${brandDoc.name || "Brand"}`,
+          message: `Contract created for "${campaign.productOrServiceName || "Campaign"}".`,
+          entityType: "contract",
+          entityId: String(contract.contractId),
+          actionPath: `/influencer/my-campaign`,
+          meta: { campaignId, brandId, influencerId, bulk: true },
+        });
+
+        const infEmail = getEmailForRole({
+          contract,
+          role: "influencer",
+          influencerDoc,
+        });
+
+        await safeSendEmail({
+          contract,
+          templateKey: "contract_new_received_influencer",
+          to: infEmail,
+          recipientRole: "influencer",
+          recipientName: getNameForRole({
+            contract,
+            role: "influencer",
+            influencerDoc,
+          }),
+        });
+
+        await safeStartReminder(contract, "influencer");
+
+        return {
+          influencerId,
+          contractId: contract.contractId,
+        };
+      })
+    );
+
+    const sent = [];
+    const failed = [];
+
+    results.forEach((r, index) => {
+      if (r.status === "fulfilled") {
+        sent.push(r.value);
+      } else {
+        failed.push({
+          influencerId: influencerIds[index],
+          reason: r.reason?.message || "Failed",
+        });
+      }
+    });
+
+    await Campaign.updateOne(campaignQuery(campaignId), {
+      $set: { isContracted: 1 },
+    });
+
+    return respondOK(
+      res,
+      {
+        message: "Bulk contract processing completed",
+        sentCount: sent.length,
+        sent,
+        failed,
+      },
+      failed.length ? 207 : 201
+    );
+  } catch (err) {
+    return respondError(res, err.message || "initiateBulk error", err.status || 500, err);
   }
 };
 

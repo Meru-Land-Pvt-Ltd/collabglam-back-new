@@ -45,6 +45,7 @@ const campaignInvitationRoutes = require('./routes/campaignInvitationRoutes');
 const delieverableRoutes = require('./routes/delieverableRoute')
 const listRoutes = require('./routes/listRoutes');
 const brandWalletRoutes = require('./routes/brandWalletRoutes');
+const master=require('./routes/masterRoute');
 const supportRoutes = require("./routes/supportRoutes");
 // sockets (Socket.IO + native WS)
 const sockets = require('./sockets');
@@ -62,7 +63,7 @@ app.set('broadcastToRoom', sockets.legacyBroadcastToRoom);
 
 // ====== Express middleware ======
 app.use(cors({
-  origin: process.env.FRONTEND_ORIGIN || ['https://collabglam.cloud', 'http://localhost:3000', 'http://localhost:3001', 'https://mhd.sharemitra.com'],
+  origin: process.env.FRONTEND_ORIGIN || ['https://collabglam.cloud', 'http://localhost:3000', 'http://localhost:3001','http://192.168.1.5:3000', 'https://mhd.sharemitra.com'],
   credentials: true
 }));
 
@@ -109,6 +110,7 @@ app.use('/admin-invitations', campaignInvitationRoutes);
 app.use('/deliverable', delieverableRoutes);
 app.use('/list', listRoutes);
 app.use('/wallet', brandWalletRoutes);
+app.use('/admins', master);
 app.use("/support", supportRoutes);
 
 // Friendly 413 response (must be after body parsers)

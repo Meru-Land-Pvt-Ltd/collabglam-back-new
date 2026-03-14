@@ -21,6 +21,10 @@ const { ProductServiceGoalModel } = require("../models/productServiceGoal");
 const { ContentFormatModel: ContentFormat } = require("../models/contentFormat");
 const { PreferredHashtagModel: PreferredHashtag } = require("../models/preferredHashtag");
 
+// adjust these two imports only if your actual paths differ
+const Milestone = require("../models/milestone");
+const getFeature = require("../utils/getFeature");
+
 const { CONTRACT_STATUS } = require("../constants/contract");
 const { createAndEmit } = require("../utils/notifier");
 const { detectGeoFromRequest } = require("../utils/ipGeo");
@@ -28,7 +32,7 @@ const { ApiResponse } = require("../core/http/ApiResponse.js");
 const { HttpStatus } = require("../core/http/HttpStatus.js");
 
 // ===============================
-//  New Create / AI helpers
+// helpers
 // ===============================
 
 const escapeRegex = (s = "") =>
@@ -126,14 +130,6 @@ const requireIdArray = (res, requestId, field, v) => {
   return { ok: true, value: ids };
 };
 
-const requireArray = (res, requestId, field, v) => {
-  const arr = toUnknownArray(v);
-  if (!arr.length) {
-    return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", field, requestId) };
-  }
-  return { ok: true, value: arr };
-};
-
 const normalizePaymentType = (v) => {
   const s = clean(v).toLowerCase();
   if (s === "milestone") return "Milestone";
@@ -220,8 +216,9 @@ const sendControllerError = (res, requestId, err) => {
 };
 
 const pickStatus = (v) => {
-  const allowed = ["draft", "scheduled", "active", "paused", "completed"];
-  return typeof v === "string" && allowed.includes(v) ? v : "draft";
+  const allowed = ["draft", "active", "paused", "completed", "archived"];
+  const s = clean(v);
+  return allowed.includes(s) ? s : "draft";
 };
 
 const toPlatformArray = (v) => {
@@ -432,7 +429,7 @@ const enrichCampaigns = async (itemsRaw) => {
 
     return {
       ...c,
-      id: String(c._id || c.id || ""),
+      id: String(c._id || ""),
       details: {
         category: cat ? { id: String(cat._id), name: cat.name } : null,
         subcategories: subDetails,
@@ -450,190 +447,18 @@ const enrichCampaigns = async (itemsRaw) => {
 
 const buildCampaignLookupFilter = (campaignId, brandObjectId) => {
   const raw = clean(campaignId);
-  const or = [{ campaignsId: raw }];
+  if (!isOid(raw)) return null;
 
-  if (mongoose.Types.ObjectId.isValid(raw)) {
-    or.push({ _id: toObjectId(raw) });
-  }
-
-  const filter = { $or: or };
+  const filter = { _id: toObjectId(raw) };
   if (brandObjectId) filter.brandId = brandObjectId;
   return filter;
 };
 
-const parseCampaignWindowForUpdate = (body, tz, requestId, res, opts = {}) => {
-  const startAtUtc = toUtcDateFromAny(body.startAt, tz);
-  const endAtUtc = toUtcDateFromAny(body.endAt, tz);
-
-  if (!startAtUtc) {
-    return {
-      ok: false,
-      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "startAt", requestId),
-    };
-  }
-
-  if (!endAtUtc) {
-    return {
-      ok: false,
-      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId),
-    };
-  }
-
-  if (startAtUtc.getTime() >= endAtUtc.getTime()) {
-    return {
-      ok: false,
-      resp: failField(
-        res,
-        HttpStatus.BAD_REQUEST,
-        "VALIDATION_ERROR",
-        "endAt",
-        requestId,
-        "startAt must be < endAt"
-      ),
-    };
-  }
-
-  if (!opts.allowPastStart) {
-    const c1 = assertNotPastUtc(startAtUtc, tz, "startAt");
-    if (!c1.ok) {
-      return {
-        ok: false,
-        resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "startAt", requestId, c1.message),
-      };
-    }
-  }
-
-  const c2 = assertNotPastUtc(endAtUtc, tz, "endAt");
-  if (!c2.ok) {
-    return {
-      ok: false,
-      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId, c2.message),
-    };
-  }
-
-  return { ok: true, value: { startAt: startAtUtc, endAt: endAtUtc } };
-};
-
-const buildCampaignUpdatePatch = (body, existing, status, timing, extra = {}) => {
-  const budget = toNumber(body.campaignBudget);
-  const numInfluencers = toInt(body.numberOfInfluencers);
-  const minFollowers = toInt(body.minFollowers);
-  const maxFollowers = toInt(body.maxFollowers);
-
-  const toOidOrFallback = (value, fallback) => {
-    const s = clean(value);
-    return s && isOid(s) ? toObjectId(s) : fallback;
-  };
-
-  const toOidArrayOrFallback = (value, fallback = []) => {
-    const arr = normalizeObjectIdArray(value).map((x) => toObjectId(x));
-    return arr.length ? arr : fallback;
-  };
-
-  const patch = {
-    campaignTitle: clean(body.campaignTitle) || existing.campaignTitle,
-    productOrServiceName: clean(body.campaignTitle) || existing.productOrServiceName,
-
-    description: clean(body.description) || existing.description,
-    campaignType: clean(body.campaignType) || existing.campaignType || "",
-
-    categoryId: toOidOrFallback(body.categoryId, existing.categoryId),
-    subcategoryIds: toOidArrayOrFallback(body.subcategoryIds, existing.subcategoryIds || []),
-
-    productImages: toUnknownArray(body.productImages).length
-      ? toUnknownArray(body.productImages)
-      : toUnknownArray(existing.productImages || existing.images),
-
-    images: toUnknownArray(body.productImages).length
-      ? toUnknownArray(body.productImages)
-      : toUnknownArray(existing.images || existing.productImages),
-
-    productLink: clean(body.productLink),
-    videoLink: clean(body.videoLink),
-
-    campaignGoals: toOidArrayOrFallback(body.campaignGoals, existing.campaignGoals || []),
-    influencerTierIds: toOidArrayOrFallback(body.influencerTierIds, existing.influencerTierIds || []),
-    contentFormats: toOidArrayOrFallback(body.contentFormats, existing.contentFormats || []),
-    contentLanguageIds: toOidArrayOrFallback(body.contentLanguageIds, existing.contentLanguageIds || []),
-    preferredHashtags: toOidArrayOrFallback(body.preferredHashtags, existing.preferredHashtags || []),
-
-    platformSelection: toPlatformArray(body.platformSelection),
-    targetCountryIds: toOidArrayOrFallback(body.targetCountryIds, existing.targetCountryIds || []),
-    targetAgeRanges: toOidArrayOrFallback(body.targetAgeRanges, existing.targetAgeRanges || []),
-
-    paymentType: clean(body.paymentType)
-      ? normalizePaymentType(body.paymentType)
-      : existing.paymentType,
-
-    campaignBudget: Number.isFinite(budget) ? budget : existing.campaignBudget,
-    budget: Number.isFinite(budget) ? budget : existing.budget,
-
-    numberOfInfluencers: Number.isFinite(numInfluencers)
-      ? numInfluencers
-      : existing.numberOfInfluencers,
-
-    minFollowers:
-      Number.isFinite(minFollowers) && minFollowers > 0
-        ? minFollowers
-        : existing.minFollowers,
-
-    maxFollowers:
-      Number.isFinite(maxFollowers) && maxFollowers > 0
-        ? maxFollowers
-        : existing.maxFollowers,
-
-    additionalNotes: clean(body.additionalNotes),
-
-    status,
-    campaignTimezone: clean(body.campaignTimezone) || existing.campaignTimezone || DEFAULT_CAMPAIGN_TZ,
-
-    isDraft: status === "draft" ? 1 : 0,
-    isActive: status === "active" ? 1 : 0,
-    publishStatus: status === "draft" ? "draft" : status === "scheduled" ? "scheduled" : "published",
-    campaignStatus: status === "active" ? "open" : existing.campaignStatus || "paused",
-    statusUpdatedAt: new Date(),
-  };
-
-  if (extra.categoryName) {
-    patch.campaignCategory = extra.categoryName;
-  }
-
-  if (Array.isArray(extra.subcategoryNames) && extra.subcategoryNames.length) {
-    patch.campaignSubcategory = extra.subcategoryNames.join(", ");
-    patch.categories = extra.subcategoryNames.map((subName, idx) => ({
-      categoryId: String(body.categoryId || existing.categoryId || ""),
-      categoryName: extra.categoryName || "",
-      subcategoryId: String(normalizeObjectIdArray(body.subcategoryIds)[idx] || ""),
-      subcategoryName: subName,
-    }));
-  }
-
-  if (timing?.startAt) patch.startAt = timing.startAt;
-  if (timing?.endAt) patch.endAt = timing.endAt;
-
-  patch.timeline = {
-    startDate: timing?.startAt || existing.startAt || existing.timeline?.startDate,
-    endDate: timing?.endAt || existing.endAt || existing.timeline?.endDate,
-  };
-
-  if (status === "active") {
-    patch.publishedAt = existing.publishedAt || new Date();
-    patch.scheduledAt = undefined;
-    patch.scheduledLocation = undefined;
-  }
-
-  if (status === "draft") {
-    patch.publishedAt = undefined;
-    patch.scheduledAt = undefined;
-    patch.scheduledLocation = undefined;
-  }
-
-  if (status === "scheduled") {
-    patch.scheduledAt = timing?.scheduledAt;
-    patch.scheduledLocation = existing.createdLocation;
-  }
-
-  return patch;
+const buildContractCampaignFilter = (campaignId) => {
+  const raw = clean(campaignId);
+  const or = [{ campaignId: raw }];
+  if (isOid(raw)) or.push({ campaignId: toObjectId(raw) });
+  return { $or: or };
 };
 
 const toUtcDateFromAny = (v, tz) => {
@@ -659,14 +484,7 @@ const parseCampaignWindow = (body, tz, requestId, res, required) => {
   if (startAtUtc.getTime() >= endAtUtc.getTime()) {
     return {
       ok: false,
-      resp: failField(
-        res,
-        HttpStatus.BAD_REQUEST,
-        "VALIDATION_ERROR",
-        "endAt",
-        requestId,
-        "startAt must be < endAt"
-      ),
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId, "startAt must be < endAt"),
     };
   }
 
@@ -683,16 +501,87 @@ const parseCampaignWindow = (body, tz, requestId, res, required) => {
   return { ok: true, value: { startAt: startAtUtc, endAt: endAtUtc } };
 };
 
-const inferMode = (statusRaw, scheduledAt) => {
-  if (clean(scheduledAt)) return "schedule";
-  const statusStr = clean(statusRaw);
-  if (!statusStr) return "publish";
+const parseCampaignWindowForUpdate = (body, tz, requestId, res, opts = {}) => {
+  const startAtUtc = toUtcDateFromAny(body.startAt, tz);
+  const endAtUtc = toUtcDateFromAny(body.endAt, tz);
 
-  const status = pickStatus(statusRaw);
-  if (status === "draft") return "draft";
-  if (status === "scheduled") return "schedule";
-  return "publish";
+  if (!startAtUtc) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "startAt", requestId),
+    };
+  }
+
+  if (!endAtUtc) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId),
+    };
+  }
+
+  if (startAtUtc.getTime() >= endAtUtc.getTime()) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId, "startAt must be < endAt"),
+    };
+  }
+
+  if (!opts.allowPastStart) {
+    const c1 = assertNotPastUtc(startAtUtc, tz, "startAt");
+    if (!c1.ok) {
+      return {
+        ok: false,
+        resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "startAt", requestId, c1.message),
+      };
+    }
+  }
+
+  const c2 = assertNotPastUtc(endAtUtc, tz, "endAt");
+  if (!c2.ok) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId, c2.message),
+    };
+  }
+
+  return { ok: true, value: { startAt: startAtUtc, endAt: endAtUtc } };
 };
+
+const parseDraftWindowSoft = (body, tz) => {
+  const startAtUtc = toUtcDateFromAny(body.startAt, tz);
+  const endAtUtc = toUtcDateFromAny(body.endAt, tz);
+  if (!startAtUtc || !endAtUtc) return {};
+  if (startAtUtc.getTime() >= endAtUtc.getTime()) return {};
+  return { startAt: startAtUtc, endAt: endAtUtc };
+};
+
+const inferMode = (statusRaw) => {
+  const status = pickStatus(statusRaw);
+  return status === "draft" ? "draft" : "publish";
+};
+
+const findBrandDocByAnyId = async (brandId) => {
+  const s = clean(brandId);
+  if (!s) return null;
+
+  let brand = null;
+
+  if (mongoose.Types.ObjectId.isValid(s)) {
+    brand = await Brand.findById(s).lean();
+  }
+
+  if (!brand) {
+    brand = await Brand.findOne({ brandId: s }).lean();
+  }
+
+  return brand;
+};
+
+const getCampaignDisplayName = (campaign) =>
+  String(campaign?.campaignTitle || "Campaign").trim();
+
+const toCampaignObjectIds = (ids = []) =>
+  ids.map((id) => clean(String(id))).filter(isOid).map(toObjectId);
 
 const validateForMode = async (res, requestId, mode, body, opts = {}) => {
   const brandIdR = requireObjectId(res, requestId, "brandId", body.brandId);
@@ -735,7 +624,7 @@ const validateForMode = async (res, requestId, mode, body, opts = {}) => {
   const existingProductImages = toUnknownArray(opts.existingProductImages);
   const incomingProductImages = toUnknownArray(body.productImages);
 
-  if (mode !== "draft" && !incomingProductImages.length && !existingProductImages.length) {
+  if (!incomingProductImages.length && !existingProductImages.length) {
     return {
       ok: false,
       resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "productImages", requestId),
@@ -767,27 +656,13 @@ const validateForMode = async (res, requestId, mode, body, opts = {}) => {
     if (!Number.isFinite(n)) {
       return {
         ok: false,
-        resp: failField(
-          res,
-          HttpStatus.BAD_REQUEST,
-          "VALIDATION_ERROR",
-          "minFollowers",
-          requestId,
-          "Min followers must be a number."
-        ),
+        resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "minFollowers", requestId, "Min followers must be a number."),
       };
     }
     if (n < MIN_FOLLOWERS_ALLOWED) {
       return {
         ok: false,
-        resp: failField(
-          res,
-          HttpStatus.BAD_REQUEST,
-          "VALIDATION_ERROR",
-          "minFollowers",
-          requestId,
-          `Min followers must be at least ${fmtInt(MIN_FOLLOWERS_ALLOWED)}.`
-        ),
+        resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "minFollowers", requestId, `Min followers must be at least ${fmtInt(MIN_FOLLOWERS_ALLOWED)}.`),
       };
     }
     minFollowers = n;
@@ -798,40 +673,19 @@ const validateForMode = async (res, requestId, mode, body, opts = {}) => {
     if (!Number.isFinite(n)) {
       return {
         ok: false,
-        resp: failField(
-          res,
-          HttpStatus.BAD_REQUEST,
-          "VALIDATION_ERROR",
-          "maxFollowers",
-          requestId,
-          "Max followers must be a number."
-        ),
+        resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "maxFollowers", requestId, "Max followers must be a number."),
       };
     }
     if (n < MIN_FOLLOWERS_ALLOWED) {
       return {
         ok: false,
-        resp: failField(
-          res,
-          HttpStatus.BAD_REQUEST,
-          "VALIDATION_ERROR",
-          "maxFollowers",
-          requestId,
-          `Max followers must be at least ${fmtInt(MIN_FOLLOWERS_ALLOWED)}.`
-        ),
+        resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "maxFollowers", requestId, `Max followers must be at least ${fmtInt(MIN_FOLLOWERS_ALLOWED)}.`),
       };
     }
     if (typeof minFollowers === "number" && n < minFollowers) {
       return {
         ok: false,
-        resp: failField(
-          res,
-          HttpStatus.BAD_REQUEST,
-          "VALIDATION_ERROR",
-          "maxFollowers",
-          requestId,
-          "Max followers must be greater than or equal to min followers."
-        ),
+        resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "maxFollowers", requestId, "Max followers must be greater than or equal to min followers."),
       };
     }
   }
@@ -867,14 +721,7 @@ const validateForMode = async (res, requestId, mode, body, opts = {}) => {
   if (!Number.isFinite(budget) || budget < 0) {
     return {
       ok: false,
-      resp: failField(
-        res,
-        HttpStatus.BAD_REQUEST,
-        "VALIDATION_ERROR",
-        "campaignBudget",
-        requestId,
-        "campaignBudget must be >= 0"
-      ),
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "campaignBudget", requestId, "campaignBudget must be >= 0"),
     };
   }
 
@@ -893,25 +740,10 @@ const validateForMode = async (res, requestId, mode, body, opts = {}) => {
   if (!agesR.ok) return { ok: false, resp: agesR.resp };
 
   if (!hasDateInput(body.startAt)) {
-    return {
-      ok: false,
-      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "startAt", requestId),
-    };
+    return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "startAt", requestId) };
   }
   if (!hasDateInput(body.endAt)) {
-    return {
-      ok: false,
-      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId),
-    };
-  }
-
-  if (mode === "schedule") {
-    if (!hasDateInput(body.scheduledAt)) {
-      return {
-        ok: false,
-        resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "scheduledAt", requestId),
-      };
-    }
+    return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId) };
   }
 
   return {
@@ -924,111 +756,6 @@ const validateForMode = async (res, requestId, mode, body, opts = {}) => {
     },
   };
 };
-
-const parseDraftWindowSoft = (body, tz) => {
-  const startAtUtc = toUtcDateFromAny(body.startAt, tz);
-  const endAtUtc = toUtcDateFromAny(body.endAt, tz);
-  if (!startAtUtc || !endAtUtc) return {};
-  if (startAtUtc.getTime() >= endAtUtc.getTime()) return {};
-  return { startAt: startAtUtc, endAt: endAtUtc };
-};
-
-const parseSchedule = (body, tz, requestId, res) => {
-  const scheduledAtStr = clean(body.scheduledAt);
-  if (!scheduledAtStr) {
-    return {
-      ok: false,
-      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "scheduledAt", requestId),
-    };
-  }
-
-  const scheduledAtUtc = toUtcFromLocalOrAbsolute(scheduledAtStr, tz);
-  if (!scheduledAtUtc) {
-    return {
-      ok: false,
-      resp: failField(
-        res,
-        HttpStatus.BAD_REQUEST,
-        "VALIDATION_ERROR",
-        "scheduledAt",
-        requestId,
-        "Invalid scheduledAt format"
-      ),
-    };
-  }
-
-  const chk = assertNotPastUtc(scheduledAtUtc, tz, "scheduledAt");
-  if (!chk.ok) {
-    return {
-      ok: false,
-      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "scheduledAt", requestId, chk.message),
-    };
-  }
-
-  const win = parseCampaignWindow(body, tz, requestId, res, true);
-  if (!win.ok) return win;
-
-  const startRaw = clean(body.startAt);
-  const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(startRaw);
-
-  const startLimitUtc = isDateOnly
-    ? DateTime.fromISO(startRaw, { zone: normalizeTimezone(tz) }).endOf("day").toUTC().toJSDate()
-    : win.value.startAt;
-
-  if (scheduledAtUtc.getTime() > startLimitUtc.getTime()) {
-    return {
-      ok: false,
-      resp: failField(
-        res,
-        HttpStatus.BAD_REQUEST,
-        "VALIDATION_ERROR",
-        "scheduledAt",
-        requestId,
-        "scheduledAt must be <= startAt"
-      ),
-    };
-  }
-
-  return {
-    ok: true,
-    value: { scheduledAt: scheduledAtUtc, startAt: win.value.startAt, endAt: win.value.endAt },
-  };
-};
-
-const findBrandDocByAnyId = async (brandId) => {
-  const s = clean(brandId);
-  if (!s) return null;
-
-  let brand = null;
-
-  if (mongoose.Types.ObjectId.isValid(s)) {
-    brand = await Brand.findById(s).lean();
-  }
-
-  if (!brand) {
-    brand = await Brand.findOne({ brandId: s }).lean();
-  }
-
-  return brand;
-};
-
-const getCampaignDisplayName = (campaign) =>
-  String(campaign?.campaignTitle || campaign?.productOrServiceName || "Campaign").trim();
-
-function campaignIdFilter(campaignId) {
-  const oid = toCampaignObjectId(campaignId);
-  return oid ? { campaignId: String(oid) } : { campaignId: null };
-}
-
-const getCampaignEntityId = (campaign) => String(campaign?._id || "");
-
-const toCampaignObjectId = (campaignId) => {
-  const id = clean(campaignId);
-  return isOid(id) ? toObjectId(id) : null;
-};
-
-const toCampaignObjectIds = (ids = []) =>
-  ids.map((id) => clean(String(id))).filter(isOid).map(toObjectId);
 
 const buildCampaignDoc = (body, geo, status, byAi, timing, extra = {}) => {
   const isDraft = status === "draft";
@@ -1083,11 +810,14 @@ const buildCampaignDoc = (body, geo, status, byAi, timing, extra = {}) => {
     approvalMode: extra.approvalMode || "direct",
 
     status,
-    campaignTimezone: clean(body.campaignTimezone) || undefined,
+    campaignTimezone: clean(body.campaignTimezone) || DEFAULT_CAMPAIGN_TZ,
 
     campaignTitle: clean(body.campaignTitle),
     description: isDraft ? strOrUndef(body.description) : clean(body.description),
     campaignType: isDraft ? strOrUndef(body.campaignType) : clean(body.campaignType) || "",
+
+    campaignCategory: extra.categoryName || "",
+    campaignSubcategory: Array.isArray(extra.subcategoryNames) ? extra.subcategoryNames.join(", ") : "",
 
     categoryId: oid(body.categoryId),
     subcategoryIds: isDraft ? oidArrayOrUndef(body.subcategoryIds) : oidArray(body.subcategoryIds),
@@ -1099,87 +829,216 @@ const buildCampaignDoc = (body, geo, status, byAi, timing, extra = {}) => {
     campaignGoals: isDraft ? oidArrayOrUndef(body.campaignGoals) : oidArray(body.campaignGoals),
     influencerTierIds: isDraft ? oidArrayOrUndef(body.influencerTierIds) : oidArray(body.influencerTierIds),
     contentFormats: isDraft ? oidArrayOrUndef(body.contentFormats) : oidArray(body.contentFormats),
-
     contentLanguageIds: oidArrayOrUndef(body.contentLanguageIds),
     preferredHashtags: oidArrayOrUndef(body.preferredHashtags),
+    targetCountryIds: isDraft ? oidArrayOrUndef(body.targetCountryIds) : oidArray(body.targetCountryIds),
+    targetAgeRanges: isDraft ? oidArrayOrUndef(body.targetAgeRanges) : oidArray(body.targetAgeRanges),
+
+    numberOfInfluencers: Number.isFinite(numInfluencers) ? numInfluencers : 0,
+    minFollowers: Number.isFinite(minFollowers) ? minFollowers : 0,
+    maxFollowers: Number.isFinite(maxFollowers) ? maxFollowers : 0,
+
+    campaignBudget: Number.isFinite(budget) ? budget : 0,
+    budget: Number.isFinite(budget) ? budget : 0,
+    influencerBudget: Number.isFinite(toNumber(body.influencerBudget)) ? toNumber(body.influencerBudget) : 0,
+
+    paymentType: clean(body.paymentType) ? normalizePaymentType(body.paymentType) : "Milestone",
 
     platformSelection: (() => {
       const ps = toPlatformArray(body.platformSelection);
       return isDraft ? (ps.length ? ps : undefined) : ps;
     })(),
 
-    targetCountryIds: isDraft ? oidArrayOrUndef(body.targetCountryIds) : oidArray(body.targetCountryIds),
-    targetAgeRanges: isDraft ? oidArrayOrUndef(body.targetAgeRanges) : oidArray(body.targetAgeRanges),
-
-    paymentType: clean(body.paymentType) ? normalizePaymentType(body.paymentType) : undefined,
-    campaignBudget: Number.isFinite(budget) ? budget : undefined,
-    numberOfInfluencers: Number.isFinite(numInfluencers) ? numInfluencers : undefined,
-    minFollowers: Number.isFinite(minFollowers) ? minFollowers : undefined,
-    maxFollowers: Number.isFinite(maxFollowers) ? maxFollowers : undefined,
-
     additionalNotes: isDraft ? strOrUndef(body.additionalNotes) : clean(body.additionalNotes) || "",
-
-    // compatibility fields for your unchanged APIs
-    productOrServiceName: clean(body.campaignTitle),
-    images: toUnknownArray(body.productImages),
-    budget: Number.isFinite(budget) ? budget : 0,
-    influencerBudget: Number.isFinite(toNumber(body.influencerBudget)) ? toNumber(body.influencerBudget) : 0,
 
     isDraft: status === "draft" ? 1 : 0,
     isActive: status === "active" ? 1 : 0,
-    publishStatus: status === "draft" ? "draft" : status === "scheduled" ? "scheduled" : "published",
-    campaignStatus: status === "active" ? "open" : "paused",
+    publishStatus: status === "draft" ? "draft" : "published",
     statusUpdatedAt: new Date(),
-  };
 
-  if (extra.categoryName) {
-    base.campaignCategory = extra.categoryName;
-  }
-  if (Array.isArray(extra.subcategoryNames) && extra.subcategoryNames.length) {
-    base.campaignSubcategory = extra.subcategoryNames.join(", ");
-    base.categories = extra.subcategoryNames.map((subName, idx) => ({
-      categoryId: String(body.categoryId),
-      categoryName: extra.categoryName || "",
-      subcategoryId: String(normalizeObjectIdArray(body.subcategoryIds)[idx] || ""),
-      subcategoryName: subName,
-    }));
-  }
+    categories: Array.isArray(extra.subcategoryNames)
+      ? extra.subcategoryNames.map((subName, idx) => ({
+        categoryId: String(body.categoryId || ""),
+        categoryName: extra.categoryName || "",
+        subcategoryId: String(normalizeObjectIdArray(body.subcategoryIds)[idx] || ""),
+        subcategoryName: subName,
+      }))
+      : [],
+  };
 
   if (timing?.startAt) base.startAt = timing.startAt;
   if (timing?.endAt) base.endAt = timing.endAt;
 
   if (timing?.startAt || timing?.endAt) {
     base.timeline = {
-      startDate: timing?.startAt,
-      endDate: timing?.endAt,
+      startDate: timing?.startAt || null,
+      endDate: timing?.endAt || null,
     };
   }
 
   if (status === "active") base.publishedAt = new Date();
 
-  if (status === "draft") {
-    base.publishedAt = undefined;
-    base.scheduledAt = undefined;
-    base.scheduledLocation = undefined;
-  }
-
-  if (status === "scheduled") {
-    base.scheduledAt = timing?.scheduledAt;
-    base.scheduledLocation = base.createdLocation;
-    base.publishedAt = undefined;
-  }
-
   return base;
 };
 
-const notifyMatchingInfluencersForNewCampaign = async (campaignDoc, subIds = []) => {
+const buildCampaignUpdatePatch = (body, existing, status, timing, extra = {}) => {
+  const budget = toNumber(body.campaignBudget);
+  const numInfluencers = toInt(body.numberOfInfluencers);
+  const minFollowers = toInt(body.minFollowers);
+  const maxFollowers = toInt(body.maxFollowers);
+
+  const toOidOrFallback = (value, fallback) => {
+    const s = clean(value);
+    return s && isOid(s) ? toObjectId(s) : fallback;
+  };
+
+  const toOidArrayOrFallback = (value, fallback = []) => {
+    const arr = normalizeObjectIdArray(value).map((x) => toObjectId(x));
+    return arr.length ? arr : fallback;
+  };
+
+  const patch = {
+    campaignTitle: clean(body.campaignTitle) || existing.campaignTitle,
+    description: clean(body.description) || existing.description,
+    campaignType: clean(body.campaignType) || existing.campaignType || "",
+
+    categoryId: toOidOrFallback(body.categoryId, existing.categoryId),
+    subcategoryIds: toOidArrayOrFallback(body.subcategoryIds, existing.subcategoryIds || []),
+
+    productImages: toUnknownArray(body.productImages).length
+      ? toUnknownArray(body.productImages)
+      : toUnknownArray(existing.productImages),
+
+    productLink: clean(body.productLink) || existing.productLink || "",
+    videoLink: clean(body.videoLink) || existing.videoLink || "",
+
+    campaignGoals: toOidArrayOrFallback(body.campaignGoals, existing.campaignGoals || []),
+    influencerTierIds: toOidArrayOrFallback(body.influencerTierIds, existing.influencerTierIds || []),
+    contentFormats: toOidArrayOrFallback(body.contentFormats, existing.contentFormats || []),
+    contentLanguageIds: toOidArrayOrFallback(body.contentLanguageIds, existing.contentLanguageIds || []),
+    preferredHashtags: toOidArrayOrFallback(body.preferredHashtags, existing.preferredHashtags || []),
+
+    platformSelection: toPlatformArray(body.platformSelection).length
+      ? toPlatformArray(body.platformSelection)
+      : existing.platformSelection || [],
+
+    targetCountryIds: toOidArrayOrFallback(body.targetCountryIds, existing.targetCountryIds || []),
+    targetAgeRanges: toOidArrayOrFallback(body.targetAgeRanges, existing.targetAgeRanges || []),
+
+    paymentType: clean(body.paymentType)
+      ? normalizePaymentType(body.paymentType)
+      : existing.paymentType,
+
+    campaignBudget: Number.isFinite(budget) ? budget : existing.campaignBudget,
+    budget: Number.isFinite(budget) ? budget : existing.budget,
+
+    numberOfInfluencers: Number.isFinite(numInfluencers)
+      ? numInfluencers
+      : existing.numberOfInfluencers,
+
+    minFollowers:
+      Number.isFinite(minFollowers) && minFollowers >= 0
+        ? minFollowers
+        : existing.minFollowers,
+
+    maxFollowers:
+      Number.isFinite(maxFollowers) && maxFollowers >= 0
+        ? maxFollowers
+        : existing.maxFollowers,
+
+    additionalNotes: clean(body.additionalNotes) || existing.additionalNotes || "",
+
+    status,
+    campaignTimezone: clean(body.campaignTimezone) || existing.campaignTimezone || DEFAULT_CAMPAIGN_TZ,
+
+    isDraft: status === "draft" ? 1 : 0,
+    isActive: status === "active" ? 1 : 0,
+    publishStatus: status === "draft" ? "draft" : "published",
+    statusUpdatedAt: new Date(),
+  };
+
+  if (extra.categoryName) {
+    patch.campaignCategory = extra.categoryName;
+  }
+
+  if (Array.isArray(extra.subcategoryNames)) {
+    patch.campaignSubcategory = extra.subcategoryNames.join(", ");
+    patch.categories = extra.subcategoryNames.map((subName, idx) => ({
+      categoryId: String(body.categoryId || existing.categoryId || ""),
+      categoryName: extra.categoryName || "",
+      subcategoryId: String(normalizeObjectIdArray(body.subcategoryIds)[idx] || ""),
+      subcategoryName: subName,
+    }));
+  }
+
+  if (timing?.startAt) patch.startAt = timing.startAt;
+  if (timing?.endAt) patch.endAt = timing.endAt;
+
+  patch.timeline = {
+    startDate: timing?.startAt || existing.startAt || existing.timeline?.startDate || null,
+    endDate: timing?.endAt || existing.endAt || existing.timeline?.endDate || null,
+  };
+
+  if (status === "active") {
+    patch.publishedAt = existing.publishedAt || new Date();
+  }
+
+  return patch;
+};
+
+async function notifyBrandDraftReady(campaign) {
+  const title = getCampaignDisplayName(campaign);
+  const entityId = String(campaign._id);
+
+  return createAndEmit({
+    brandId: String(campaign.brandId),
+    type: "campaign.draft_review",
+    title: "Review your new campaign draft",
+    message: `Admin has drafted "${title}". Please review and confirm.`,
+    entityType: "campaign",
+    entityId,
+    actionPath: { brand: `/brand/review-campaigns/view?id=${entityId}` },
+  });
+}
+
+async function notifyBrandApproved(campaign) {
+  const title = getCampaignDisplayName(campaign);
+  const entityId = String(campaign._id);
+
+  return createAndEmit({
+    brandId: String(campaign.brandId),
+    type: "campaign.update_approved",
+    title: "Campaign update approved",
+    message: `Admin approved changes for "${title}".`,
+    entityType: "campaign",
+    entityId,
+    actionPath: { brand: `/brand/edit-review-campaign/view?id=${entityId}` },
+  });
+}
+
+async function notifyBrandRejected(campaign, note) {
+  const title = getCampaignDisplayName(campaign);
+  const entityId = String(campaign._id);
+
+  return createAndEmit({
+    brandId: String(campaign.brandId),
+    type: "campaign.update_rejected",
+    title: "Campaign update rejected",
+    message: `Admin rejected changes for "${title}". ${note ? `Reason: ${note}` : ""}`,
+    entityType: "campaign",
+    entityId,
+    actionPath: { brand: `/brand/edit-review-campaign/view?id=${entityId}` },
+  });
+}
+
+async function notifyMatchingInfluencersForNewCampaign(campaignDoc, subIds = []) {
   try {
     if (!Array.isArray(subIds) || !subIds.length) return;
 
     const influencers = await findMatchingInfluencers({ subIds, catNumIds: [] });
     if (!Array.isArray(influencers) || !influencers.length) return;
 
-    const entityId = getCampaignEntityId(campaignDoc);
+    const entityId = String(campaignDoc._id);
     const title = getCampaignDisplayName(campaignDoc);
 
     await Promise.all(
@@ -1198,67 +1057,40 @@ const notifyMatchingInfluencersForNewCampaign = async (campaignDoc, subIds = [])
   } catch (e) {
     console.warn("notifyMatchingInfluencersForNewCampaign failed:", e?.message || e);
   }
-};
-
-const buildAIPrompt = (ui) => `
-You are an expert campaign strategist for influencer marketing.
-Your job: infer missing MANUAL form fields from the given Please Fill the Required Fields.
-
-STRICT RULES:
-- Output MUST be ONLY valid JSON (no markdown, no explanations).
-- DO NOT change any source IDs (categoryId, subcategoryIds, targetCountryIds, targetAgeRanges).
-- For fields that require IDs, you MUST pick IDs ONLY from allowedOptions lists.
-- Always include ALL JSON keys listed in "Output JSON keys".
-- If unsure, pick reasonable defaults.
-
-REQUIRED MANUAL FIELDS TO FILL:
-- campaignGoals (>=1)
-- influencerTierIds (>=1)
-- contentFormats (>=1)
-- platformSelection (>=1) only from: youtube, instagram, tiktok
-- paymentType one of: Milestone, Fixed, Gifting
-- campaignBudget >= 0 (integer)
-- numberOfInfluencers >= 1 (integer)
-- startAt / endAt: ISO local datetime WITHOUT timezone offset. Example: "2026-02-04T09:00"
-  Ensure endAt > startAt. Prefer startAt tomorrow 09:00 and endAt 7-14 days later.
-
-OPTIONAL FIELDS (may be empty):
-- minFollowers
-- maxFollowers
-- contentLanguageIds
-- preferredHashtags
-- additionalNotes
-- campaignType
-
-DESCRIPTION ENHANCEMENT:
-- Create an improved, brand-friendly, clear, polished "enhancedDescription" using the source description.
-- Keep it concise, structured, and suitable for influencers.
-
-Output JSON keys (ALL of these must exist, even if empty arrays/blank strings):
-enhancedTitle,
-enhancedDescription,
-campaignGoals,
-influencerTierIds,
-contentFormats,
-contentLanguageIds,
-preferredHashtags,
-platformSelection,
-paymentType,
-campaignBudget,
-numberOfInfluencers,
-minFollowers,
-maxFollowers,
-startAt,
-endAt,
-additionalNotes
-
-INPUT:
-${JSON.stringify(ui, null, 2)}
-`.trim();
+}
 
 // ===============================
-//  Existing helpers below
+// multer
 // ===============================
+
+const storage = multer.memoryStorage();
+const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif", "image/svg+xml"]);
+const DOC_MIMES = new Set([
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "text/plain",
+]);
+
+function fileFilter(req, file, cb) {
+  if (file.fieldname === "image") return cb(null, IMAGE_MIMES.has(file.mimetype));
+  if (file.fieldname === "creativeBrief") return cb(null, DOC_MIMES.has(file.mimetype));
+  return cb(null, false);
+}
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter,
+}).fields([
+  { name: "image", maxCount: 10 },
+  { name: "creativeBrief", maxCount: 10 },
+]);
+
+// ===============================
+// unchanged utility functions
+// ===============================
+
 function toNum(v, def = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : def;
@@ -1317,9 +1149,7 @@ function isAdminRequest(req) {
   if (role.includes("admin")) return true;
   if (req.user?.isAdmin === true) return true;
   if (req.user?.adminId && !req.user?.brandId) return true;
-
   if (req.body?.adminId || req.query?.adminId) return true;
-
   return false;
 }
 
@@ -1356,131 +1186,14 @@ function mapCampaignForInfluencer(c) {
     ...c,
     budget: infBudget > 0 ? infBudget : brandBudget,
     brandBudget,
-    influencerBudget: infBudget
+    influencerBudget: infBudget,
   };
 }
 
-// ===============================
-//  Notifications
-// ===============================
-async function notifyBrandDraftReady(campaign) {
-  const title = getCampaignDisplayName(campaign);
-  const entityId = getCampaignEntityId(campaign);
-
-  return createAndEmit({
-    brandId: String(campaign.brandId),
-    type: "campaign.draft_review",
-    title: "Review your new campaign draft",
-    message: `Admin has drafted "${title}". Please review and confirm.`,
-    entityType: "campaign",
-    entityId,
-    actionPath: { brand: `/brand/review-campaigns/view?id=${entityId}` },
-  });
-}
-
-async function notifyAdminBrandConfirmed(campaign) {
-  const admins = await Admin.find({}, "adminId").lean();
-  const adminIds = admins.map((a) => String(a.adminId || "").trim()).filter(Boolean);
-  const title = getCampaignDisplayName(campaign);
-  const entityId = getCampaignEntityId(campaign);
-
-  return createAndEmit({
-    adminIds,
-    type: "campaign.brand_confirmed",
-    title: "Brand confirmed campaign readiness",
-    message: `${campaign.brandName || "Brand"} has reviewed and confirmed "${title}". It is ready to be published.`,
-    entityType: "campaign",
-    entityId,
-    actionPath: { admin: `/admin/campaigns/view?id=${entityId}` },
-  });
-}
-
-async function notifyAdminsCampaignPending(campaign, patch = null) {
-  const admins = await Admin.find({}, "adminId").lean();
-  const adminIds = (admins || []).map((a) => String(a.adminId || "").trim()).filter(Boolean);
-  const title = getCampaignDisplayName(campaign);
-  const entityId = getCampaignEntityId(campaign);
-
-  const changedKeys = patch ? Object.keys(patch) : [];
-  const changedText = changedKeys.length
-    ? ` Changes: ${changedKeys.slice(0, 8).join(", ")}${changedKeys.length > 8 ? "..." : ""}`
-    : "";
-
-  return createAndEmit({
-    adminIds,
-    type: "campaign.pending_update",
-    title: "Campaign updated (needs approval)",
-    message: `${campaign.brandName || "Brand"} updated "${title}".${changedText}`,
-    entityType: "campaign",
-    entityId,
-    actionPath: { admin: `/admin/campaigns/view?id=${entityId}` },
-  });
-}
-
-async function notifyBrandApproved(campaign) {
-  const title = getCampaignDisplayName(campaign);
-  const entityId = getCampaignEntityId(campaign);
-
-  return createAndEmit({
-    brandId: String(campaign.brandId),
-    type: "campaign.update_approved",
-    title: "Campaign update approved",
-    message: `Admin approved changes for "${title}".`,
-    entityType: "campaign",
-    entityId,
-    actionPath: { brand: `/brand/edit-review-campaign/view?id=${entityId}` },
-  });
-}
-
-async function notifyBrandRejected(campaign, note) {
-  const title = getCampaignDisplayName(campaign);
-  const entityId = getCampaignEntityId(campaign);
-
-  return createAndEmit({
-    brandId: String(campaign.brandId),
-    type: "campaign.update_rejected",
-    title: "Campaign update rejected",
-    message: `Admin rejected changes for "${title}". ${note ? `Reason: ${note}` : ""}`,
-    entityType: "campaign",
-    entityId,
-    actionPath: { brand: `/brand/edit-review-campaign/view?id=${entityId}` },
-  });
-}
-
-// ===============================
-//  Multer setup
-// ===============================
-const storage = multer.memoryStorage();
-const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif', 'image/svg+xml']);
-const DOC_MIMES = new Set([
-  'application/pdf',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'text/plain'
-]);
-
-function fileFilter(req, file, cb) {
-  if (file.fieldname === 'image') return cb(null, IMAGE_MIMES.has(file.mimetype));
-  if (file.fieldname === 'creativeBrief') return cb(null, DOC_MIMES.has(file.mimetype));
-  return cb(null, false);
-}
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
-  fileFilter
-}).fields([
-  { name: 'image', maxCount: 10 },
-  { name: 'creativeBrief', maxCount: 10 }
-]);
-
-// ===============================
-//  Subscription & Utils
-// ===============================
 async function ensureBrandQuota(brandId, featureKey, amount = 1) {
-  if (!brandId) throw new Error('brandId is required for quota checks');
-  const brand = await Brand.findOne({ brandId }, 'subscription').lean();
-  if (!brand || !brand.subscription) throw new Error('Brand subscription not configured');
+  if (!brandId) throw new Error("brandId is required for quota checks");
+  const brand = await Brand.findOne({ brandId }, "subscription").lean();
+  if (!brand || !brand.subscription) throw new Error("Brand subscription not configured");
   const feature = getFeature.getFeature(brand.subscription, featureKey);
   if (!feature) return { limit: 0, used: 0, remaining: Infinity };
   const limit = readLimit(feature);
@@ -1489,11 +1202,11 @@ async function ensureBrandQuota(brandId, featureKey, amount = 1) {
   if (used + amount > limit) {
     const remaining = Math.max(limit - used, 0);
     const err = new Error(`Quota exceeded for feature ${featureKey}`);
-    err.code = 'QUOTA_EXCEEDED';
+    err.code = "QUOTA_EXCEEDED";
     err.meta = { limit, used, requested: amount, remaining };
     throw err;
   }
-  await Brand.updateOne({ brandId, 'subscription.features.key': featureKey }, { $inc: { 'subscription.features.$.used': amount } });
+  await Brand.updateOne({ brandId, "subscription.features.key": featureKey }, { $inc: { "subscription.features.$.used": amount } });
   return { limit, used: used + amount, remaining: limit - (used + amount) };
 }
 
@@ -1504,7 +1217,9 @@ function readLimit(featureRow) {
   return Number.isFinite(num) ? num : 0;
 }
 
-async function ensureMonthlyWindow(influencerId, featureKey, featureRow) { return featureRow; }
+async function ensureMonthlyWindow(influencerId, featureKey, featureRow) {
+  return featureRow;
+}
 
 async function countActiveCollaborationsForInfluencer(influencerId) {
   if (!influencerId) return 0;
@@ -1516,7 +1231,7 @@ function activeAcceptedFilter() {
     isAccepted: 1,
     isRejected: { $ne: 1 },
     status: { $nin: [CONTRACT_STATUS.REJECTED, CONTRACT_STATUS.SUPERSEDED] },
-    $or: [{ supersededBy: { $exists: false } }, { supersededBy: null }, { supersededBy: "" }]
+    $or: [{ supersededBy: { $exists: false } }, { supersededBy: null }, { supersededBy: "" }],
   };
 }
 
@@ -1529,26 +1244,19 @@ function activeAcceptedFilter2() {
   };
 }
 
-function campaignIdFilter(campaignId) {
-  const id = String(campaignId);
-  const or = [{ campaignId: id }, { campaignsId: id }];
-  if (mongoose.Types.ObjectId.isValid(id)) or.push({ campaignId: new mongoose.Types.ObjectId(id) });
-  return { $or: or };
-}
-
 function computeIsActive(timeline) {
   if (!timeline || !timeline.endDate) return 1;
   const now = new Date();
   return timeline.endDate < now ? 0 : 1;
 }
 
-const toStr = (v) => (v == null ? '' : String(v));
+const toStr = (v) => (v == null ? "" : String(v));
 
 async function milestoneSetForInfluencer(influencerId, campaignIds = []) {
   if (!campaignIds.length) return new Set();
   const docs = await Milestone.find(
-    { 'milestoneHistory.influencerId': influencerId, 'milestoneHistory.campaignId': { $in: campaignIds } },
-    'milestoneHistory.campaignId milestoneHistory.influencerId'
+    { "milestoneHistory.influencerId": influencerId, "milestoneHistory.campaignId": { $in: campaignIds } },
+    "milestoneHistory.campaignId milestoneHistory.influencerId"
   ).lean();
   const set = new Set();
   docs.forEach((d) => {
@@ -1561,42 +1269,15 @@ async function milestoneSetForInfluencer(influencerId, campaignIds = []) {
   return set;
 }
 
-async function normalizeCategoriesPayload(raw) {
-  if (!raw) return [];
-  let items = raw;
-  if (typeof items === 'string') {
-    try { items = JSON.parse(items); } catch { throw new Error('Invalid JSON in categories.'); }
-  }
-  if (!Array.isArray(items)) throw new Error('categories must be an array.');
-
-  const catNums = [...new Set(items.map(it => Number(it?.categoryId)).filter(n => Number.isFinite(n)))];
-  if (!catNums.length) throw new Error('categories must contain numeric categoryId.');
-
-  const cats = await Category.find({ id: { $in: catNums } }, 'id name subcategories').lean();
-  const byNum = new Map(cats.map(c => [c.id, c]));
-
-  const out = [];
-  for (const it of items) {
-    const catNum = Number(it?.categoryId);
-    const subId = String(it?.subcategoryId || '');
-    if (!Number.isFinite(catNum)) throw new Error(`Invalid categoryId: ${it?.categoryId}`);
-    if (!subId) throw new Error('subcategoryId is required');
-    const catDoc = byNum.get(catNum);
-    if (!catDoc) throw new Error(`Category not found (id: ${catNum})`);
-    const sub = (catDoc.subcategories || []).find(s => String(s.subcategoryId) === subId);
-    if (!sub) throw new Error(`Subcategory ${subId} not under category id ${catNum}`);
-    out.push({ categoryId: catDoc.id, categoryName: catDoc.name, subcategoryId: sub.subcategoryId, subcategoryName: sub.name });
-  }
-  return out;
-}
-
 function buildSearchOr(term) {
   const or = [
-    { brandName: { $regex: term, $options: 'i' } },
-    { productOrServiceName: { $regex: term, $options: 'i' } },
-    { description: { $regex: term, $options: 'i' } },
-    { 'categories.subcategoryName': { $regex: term, $options: 'i' } },
-    { 'categories.categoryName': { $regex: term, $options: 'i' } }
+    { brandName: { $regex: term, $options: "i" } },
+    { campaignTitle: { $regex: term, $options: "i" } },
+    { description: { $regex: term, $options: "i" } },
+    { campaignCategory: { $regex: term, $options: "i" } },
+    { campaignSubcategory: { $regex: term, $options: "i" } },
+    { "categories.subcategoryName": { $regex: term, $options: "i" } },
+    { "categories.categoryName": { $regex: term, $options: "i" } },
   ];
   const num = Number(term);
   if (!isNaN(num)) {
@@ -1624,40 +1305,30 @@ async function findMatchingInfluencers({ subIds = [], catNumIds = [] }) {
   const or = [];
   if (subIds.length) {
     or.push(
-      { 'onboarding.subcategories.subcategoryId': { $in: subIds } },
-      { 'subcategories.subcategoryId': { $in: subIds } },
-      { 'categories.subcategoryId': { $in: subIds } },
-      { 'socialProfiles.categories.subcategoryId': { $in: subIds } },
-      { 'categories': { $in: subIds } }
+      { "onboarding.subcategories.subcategoryId": { $in: subIds } },
+      { "subcategories.subcategoryId": { $in: subIds } },
+      { "categories.subcategoryId": { $in: subIds } },
+      { "socialProfiles.categories.subcategoryId": { $in: subIds } },
+      { categories: { $in: subIds } }
     );
   }
   if (catNumIds.length) {
-    or.push(
-      { 'onboarding.categoryId': { $in: catNumIds } },
-      { 'categories.categoryId': { $in: catNumIds } }
-    );
+    or.push({ "onboarding.categoryId": { $in: catNumIds } }, { "categories.categoryId": { $in: catNumIds } });
   }
   const filter = or.length ? { $or: or } : {};
-  const influencers = await Influencer.find(filter, 'influencerId name primaryPlatform handle onboarding socialProfiles').lean();
+  const influencers = await Influencer.find(filter, "influencerId name primaryPlatform handle onboarding socialProfiles").lean();
   return influencers || [];
 }
 
 function addInfluencerOpenStatusGate(filter) {
   filter.$and = filter.$and || [];
-  filter.$and.push({ $or: [{ campaignStatus: 'open' }, { campaignStatus: { $exists: false } }] });
+  filter.$and.push({ status: "active" });
   return filter;
 }
 
-const CAMPAIGN_STATUS = Object.freeze({ OPEN: "open", PAUSED: "paused" });
-const ALLOWED_CAMPAIGN_STATUSES = new Set([CAMPAIGN_STATUS.OPEN, CAMPAIGN_STATUS.PAUSED]);
-
-function normalizeStatus(v) {
-  return String(v || "").toLowerCase().trim();
-}
-
-// =======================================================
-// UPDATED CREATE CAMPAIGN
-// =======================================================
+// ===============================
+// CREATE CAMPAIGN
+// ===============================
 exports.createCampaign = async (req, res) => {
   const requestId = getRequestId(req);
 
@@ -1675,21 +1346,15 @@ exports.createCampaign = async (req, res) => {
       String(brandDoc.brandId || brandDoc._id || req.body.brandId || "")
     );
 
-    const mode = inferMode(req.body.status, req.body.scheduledAt);
+    const mode = inferMode(req.body.status);
     const v = await validateForMode(res, requestId, mode, req.body);
     if (!v.ok) return v.resp;
 
-    const status =
-      mode === "draft" ? "draft" : mode === "schedule" ? "scheduled" : "active";
+    const status = mode === "draft" ? "draft" : "active";
 
     let timing = {};
-
     if (status === "draft") {
       timing = parseDraftWindowSoft(req.body, campaignTz);
-    } else if (status === "scheduled") {
-      const sch = parseSchedule(req.body, campaignTz, requestId, res);
-      if (!sch.ok) return sch.resp;
-      timing = sch.value;
     } else {
       const win = parseCampaignWindow(req.body, campaignTz, requestId, res, true);
       if (!win.ok) return win.resp;
@@ -1698,22 +1363,13 @@ exports.createCampaign = async (req, res) => {
 
     req.body.campaignTimezone = campaignTz;
 
-    const docToCreate = buildCampaignDoc(
-      req.body,
-      geo,
-      status,
-      0,
-      timing,
-      {
-        brandName: String(brandDoc.name || brandDoc.brandName || ""),
-        createdBy: actor,
-        approvalMode: actor.role === "admin" ? "admin_review" : "direct",
-        categoryName: v?.rel?.cat?.name || "",
-        subcategoryNames: Array.isArray(v?.rel?.subs)
-          ? v.rel.subs.map((s) => String(s.name || ""))
-          : [],
-      }
-    );
+    const docToCreate = buildCampaignDoc(req.body, geo, status, 0, timing, {
+      brandName: String(brandDoc.name || brandDoc.brandName || ""),
+      createdBy: actor,
+      approvalMode: actor.role === "admin" ? "admin_review" : "direct",
+      categoryName: v?.rel?.cat?.name || "",
+      subcategoryNames: Array.isArray(v?.rel?.subs) ? v.rel.subs.map((s) => String(s.name || "")) : [],
+    });
 
     const created = await Campaign.create(docToCreate);
 
@@ -1729,16 +1385,66 @@ exports.createCampaign = async (req, res) => {
     }
 
     const enriched = (await enrichCampaigns([created]))[0];
-
     return ApiResponse.sendOk(res, HttpStatus.CREATED, { doc: enriched }, requestId);
   } catch (err) {
     return sendControllerError(res, requestId, err);
   }
 };
 
-// =======================================================
-// NEW AI PREFILL CAMPAIGN
-// =======================================================
+// ===============================
+// AI PREFILL
+// ===============================
+const buildAIPrompt = (ui) => `
+You are an expert campaign strategist for influencer marketing.
+Return only valid JSON.
+
+STRICT RULES:
+- Output MUST be ONLY valid JSON.
+- DO NOT change source IDs.
+- For ID fields use IDs only from allowedOptions.
+- Always include all keys.
+
+REQUIRED:
+- campaignGoals
+- influencerTierIds
+- contentFormats
+- platformSelection
+- paymentType
+- campaignBudget
+- numberOfInfluencers
+- startAt
+- endAt
+
+OPTIONAL:
+- minFollowers
+- maxFollowers
+- contentLanguageIds
+- preferredHashtags
+- additionalNotes
+- campaignType
+
+OUTPUT KEYS:
+enhancedTitle,
+enhancedDescription,
+campaignGoals,
+influencerTierIds,
+contentFormats,
+contentLanguageIds,
+preferredHashtags,
+platformSelection,
+paymentType,
+campaignBudget,
+numberOfInfluencers,
+minFollowers,
+maxFollowers,
+startAt,
+endAt,
+additionalNotes
+
+INPUT:
+${JSON.stringify(ui, null, 2)}
+`.trim();
+
 exports.prefillCampaignWithAI = async (req, res) => {
   const requestId = getRequestId(req);
 
@@ -1785,26 +1491,12 @@ exports.prefillCampaignWithAI = async (req, res) => {
 
     const productLink = clean(req.body.productLink);
     if (productLink && !isValidHttpUrl(productLink)) {
-      return failField(
-        res,
-        HttpStatus.BAD_REQUEST,
-        "VALIDATION_ERROR",
-        "productLink",
-        requestId,
-        "productLink must be a valid http/https URL"
-      );
+      return failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "productLink", requestId, "productLink must be a valid http/https URL");
     }
 
     const videoLink = clean(req.body.videoLink);
     if (videoLink && !isValidHttpUrl(videoLink)) {
-      return failField(
-        res,
-        HttpStatus.BAD_REQUEST,
-        "VALIDATION_ERROR",
-        "videoLink",
-        requestId,
-        "videoLink must be a valid http/https URL"
-      );
+      return failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "videoLink", requestId, "videoLink must be a valid http/https URL");
     }
 
     const rel = await resolveCategoryAndSubcategories(catR.value, subR.value);
@@ -1875,10 +1567,6 @@ exports.prefillCampaignWithAI = async (req, res) => {
         datetimeFormat: "yyyy-MM-dd'T'HH:mm",
         platformsAllowed: ["youtube", "instagram", "tiktok"],
         paymentTypesAllowed: ["Milestone", "Fixed", "Gifting"],
-        hints: [
-          "Infer sensible influencer count based on campaign type/category/description and budget.",
-          "Pick formats/goals/tier based on description + category/Category.",
-        ],
       },
     };
 
@@ -1909,9 +1597,6 @@ exports.prefillCampaignWithAI = async (req, res) => {
       if (picked.length >= min) return picked;
       return allowedIds.slice(0, Math.min(min, allowedIds.length));
     };
-
-
-
 
     const normalizePayment = (v) => {
       const s = clean(v);
@@ -2107,31 +1792,33 @@ exports.prefillCampaignWithAI = async (req, res) => {
 };
 
 // ===============================
-//  GET ALL CAMPAIGNS
+// GET ALL
 // ===============================
 exports.getAllCampaigns = async (req, res) => {
   try {
     const filter = {};
-    if (req.query.brandId) filter.brandId = req.query.brandId;
+    if (req.query.brandId && isOid(req.query.brandId)) {
+      filter.brandId = toObjectId(req.query.brandId);
+    }
     const campaigns = await Campaign.find(filter).sort({ createdAt: -1 }).lean();
     return res.json(campaigns);
   } catch (error) {
-    return res.status(500).json({ message: 'Internal server error while fetching campaigns.' });
+    return res.status(500).json({ message: "Internal server error while fetching campaigns." });
   }
 };
 
-// =======================================
-//  GET A SINGLE CAMPAIGN BY campaignsId
-// =======================================
+// ===============================
+// GET SINGLE
+// ===============================
 exports.getCampaignById = async (req, res) => {
   try {
     const campaignId = clean(req.query.id);
     if (!campaignId || !isOid(campaignId)) {
-      return res.status(400).json({ message: 'Valid campaign id is required.' });
+      return res.status(400).json({ message: "Valid campaign id is required." });
     }
 
     const campaign = await Campaign.findById(campaignId).lean();
-    if (!campaign) return res.status(404).json({ message: 'Campaign not found.' });
+    if (!campaign) return res.status(404).json({ message: "Campaign not found." });
 
     const actorIsAdmin = isAdminRequest(req);
     const actorBrandId = String(req.user?.brandId || "");
@@ -2143,13 +1830,13 @@ exports.getCampaignById = async (req, res) => {
 
     return res.json(campaign);
   } catch (error) {
-    return res.status(500).json({ message: 'Internal server error.' });
+    return res.status(500).json({ message: "Internal server error." });
   }
 };
 
-// ================================
-//  DELETE CAMPAIGN BY campaignsId
-// ================================
+// ===============================
+// DELETE
+// ===============================
 exports.deleteCampaignByCampaignId = async (req, res) => {
   const requestId = getRequestId(req);
 
@@ -2175,15 +1862,13 @@ exports.deleteCampaignByCampaignId = async (req, res) => {
     }
 
     const contractDoc = await Contract.findOne({
-      campaignId: toObjectId(campaignId),
       brandId: toObjectId(brandId),
+      ...buildContractCampaignFilter(campaignId),
     })
       .select("_id contracts")
       .lean();
 
-    const hasAnyContract = !!(
-      contractDoc?.contracts?.length && contractDoc.contracts.length > 0
-    );
+    const hasAnyContract = !!(contractDoc?.contracts?.length && contractDoc.contracts.length > 0);
 
     if (hasAnyContract && campaign.status !== "completed") {
       return fail(
@@ -2200,9 +1885,9 @@ exports.deleteCampaignByCampaignId = async (req, res) => {
         _id: campaign._id,
         brandId: toObjectId(brandId),
       }),
-      Contract.deleteOne({
-        campaignId: toObjectId(campaignId),
+      Contract.deleteMany({
         brandId: toObjectId(brandId),
+        ...buildContractCampaignFilter(campaignId),
       }),
     ]);
 
@@ -2224,10 +1909,6 @@ exports.deleteCampaignByCampaignId = async (req, res) => {
     return sendControllerError(res, requestId, err);
   }
 };
-
-// ===============================
-//  BRAND / INFLUENCER QUERIES
-// ===============================
 
 // Get active campaigns for Brand
 exports.getActiveCampaignsByBrand = async (req, res) => {
@@ -2334,11 +2015,11 @@ exports.getCampaignsByInfluencer = async (req, res) => {
     // ✅ support both Mongo _id and custom influencerId
     const influencerLookup = mongoose.Types.ObjectId.isValid(String(influencerId))
       ? {
-          $or: [
-            { _id: influencerId },
-            { influencerId: String(influencerId) }
-          ]
-        }
+        $or: [
+          { _id: influencerId },
+          { influencerId: String(influencerId) }
+        ]
+      }
       : { influencerId: String(influencerId) };
 
     const inf = await Influencer.findOne(influencerLookup).lean();
@@ -2533,11 +2214,11 @@ exports.getAppliedCampaignsByInfluencer = async (req, res) => {
     // ✅ support both Mongo _id and custom influencerId
     const influencerLookup = mongoose.Types.ObjectId.isValid(String(influencerId))
       ? {
-          $or: [
-            { _id: influencerId },
-            { influencerId: String(influencerId) }
-          ]
-        }
+        $or: [
+          { _id: influencerId },
+          { influencerId: String(influencerId) }
+        ]
+      }
       : { influencerId: String(influencerId) };
 
     const inf = await Influencer.findOne(influencerLookup, "_id influencerId").lean();
@@ -2623,8 +2304,8 @@ exports.getAppliedCampaignsByInfluencer = async (req, res) => {
     const filter =
       search && String(search).trim()
         ? {
-            $and: [campaignIdFilter, { $or: buildSearchOr(String(search).trim()) }]
-          }
+          $and: [campaignIdFilter, { $or: buildSearchOr(String(search).trim()) }]
+        }
         : campaignIdFilter;
 
     const [total, rawCampaigns] = await Promise.all([
@@ -2931,31 +2612,38 @@ exports.getRejectedCampaignsByInfluencer = async (req, res) => {
 
 exports.getCampaignSummary = async (req, res) => {
   try {
-    const campaignsId = req.query.id || req.params?.id;
-    if (!campaignsId) return res.status(400).json({ message: 'Query parameter id is required.' });
-    if (!isOid(campaignsId)) {
-      return res.status(400).json({ message: 'Valid campaign id is required.' });
+    const campaignId = req.query.id || req.params?.id;
+    if (!campaignId) return res.status(400).json({ message: "Query parameter id is required." });
+    if (!isOid(campaignId)) {
+      return res.status(400).json({ message: "Valid campaign id is required." });
     }
 
-    const campaign = await Campaign.findById(campaignsId, 'productOrServiceName budget timeline').lean();
-    if (!campaign) return res.status(404).json({ message: 'Campaign not found.' });
-    return res.json({ campaignName: campaign.productOrServiceName, budget: campaign.budget ?? 0, timeline: campaign.timeline || {} });
+    const campaign = await Campaign.findById(campaignId, "campaignTitle campaignBudget budget timeline paymentType").lean();
+    if (!campaign) return res.status(404).json({ message: "Campaign not found." });
+
+    return res.json({
+      campaignName: campaign.campaignTitle,
+      budget: campaign.campaignBudget ?? campaign.budget ?? 0,
+      timeline: campaign.timeline || {},
+      paymentType: campaign.paymentType
+    });
   } catch (error) {
-    return res.status(500).json({ message: 'Internal server error' });
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
 exports.getDraftCampaignByBrand = async (req, res) => {
   try {
     const { brandId } = req.query;
-    if (!brandId) return res.status(400).json({ message: "brandId is required as a query param." });
-    const draft = await Campaign.findOne({ brandId, isDraft: 1 }).sort({ updatedAt: -1 }).lean();
+    if (!brandId || !isOid(brandId)) return res.status(400).json({ message: "brandId is required as a query param." });
+    const draft = await Campaign.findOne({ brandId: toObjectId(brandId), isDraft: 1 }).sort({ updatedAt: -1 }).lean();
     if (!draft) return res.status(201).json({ message: "No draft found for this brand." });
     return res.status(200).json(draft);
   } catch (error) {
     return res.status(500).json({ message: "Internal server error" });
   }
 };
+
 
 exports.getCampaignHistoryByBrand = async (req, res) => {
   try {
@@ -3356,8 +3044,8 @@ exports.getCampaignHistoryByBrand = async (req, res) => {
           !tl.startDate && !tl.endDate
             ? "none"
             : tl.endDate && new Date(tl.endDate) < startOfToday
-            ? "expired"
-            : "running";
+              ? "expired"
+              : "running";
 
         return {
           ...c,
@@ -3458,7 +3146,15 @@ exports.approveCampaignPendingUpdate = async (req, res) => {
     }
 
     Object.assign(campaign, campaign.pendingUpdate.patch);
-    campaign.pendingUpdate = { status: "approved", patch: null, updatedBy: campaign.pendingUpdate.updatedBy, updatedAt: campaign.pendingUpdate.updatedAt, reviewedBy: { role: "admin", userId: String(req.user?.id || req.user?.adminId || "") }, reviewedAt: new Date(), reviewNote: String(req.body?.note || "") };
+    campaign.pendingUpdate = {
+      status: "approved",
+      patch: null,
+      updatedBy: campaign.pendingUpdate.updatedBy,
+      updatedAt: campaign.pendingUpdate.updatedAt,
+      reviewedBy: { role: "admin", userId: String(req.user?.id || req.user?.adminId || "") },
+      reviewedAt: new Date(),
+      reviewNote: String(req.body?.note || ""),
+    };
     await campaign.save();
     await notifyBrandApproved(campaign);
 
@@ -3483,7 +3179,15 @@ exports.rejectCampaignPendingUpdate = async (req, res) => {
 
     if (campaign.pendingUpdate?.status !== "pending") return res.status(400).json({ message: "No pending update to reject." });
 
-    campaign.pendingUpdate = { status: "rejected", patch: null, updatedBy: campaign.pendingUpdate.updatedBy, updatedAt: campaign.pendingUpdate.updatedAt, reviewedBy: { role: "admin", userId: String(req.user?.id || req.user?.adminId || "") }, reviewedAt: new Date(), reviewNote: note };
+    campaign.pendingUpdate = {
+      status: "rejected",
+      patch: null,
+      updatedBy: campaign.pendingUpdate.updatedBy,
+      updatedAt: campaign.pendingUpdate.updatedAt,
+      reviewedBy: { role: "admin", userId: String(req.user?.id || req.user?.adminId || "") },
+      reviewedAt: new Date(),
+      reviewNote: note,
+    };
     await campaign.save();
     await notifyBrandRejected(campaign, note);
 
@@ -3501,26 +3205,20 @@ exports.getAdminCampaigns = async (req, res) => {
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
     const skip = (page - 1) * limit;
 
-    // optional: include old drafts if you ever need them
     const includeDrafts = String(req.query.includeDrafts || "0") === "1";
 
     const filter = {
-      ...(brandId ? { brandId: String(brandId) } : {}),
-      // admin-created (robust for old data)
+      ...(brandId && isOid(brandId) ? { brandId: toObjectId(brandId) } : {}),
       $or: [
         { "createdBy.role": "admin" },
         { "createdBy.role": { $regex: /^admin$/i } },
         { approvalMode: "admin_review" },
       ],
-      ...(includeDrafts ? {} : { isDraft: { $ne: 1 } }), // hide drafts by default
+      ...(includeDrafts ? {} : { isDraft: { $ne: 1 } }),
     };
 
     const [data, total] = await Promise.all([
-      Campaign.find(filter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
+      Campaign.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
       Campaign.countDocuments(filter),
     ]);
 
@@ -3661,10 +3359,7 @@ exports.viewCampaignByIdForBrand = async (req, res) => {
   try {
     const user = req.user || {};
 
-    const tokenBrandRaw = String(
-      user.brandId ?? user.id ?? user._id ?? user.userId ?? ""
-    ).trim();
-
+    const tokenBrandRaw = String(user.brandId ?? user.id ?? user._id ?? user.userId ?? "").trim();
     if (!tokenBrandRaw) {
       return fail(res, 401, "UNAUTHORIZED", "Invalid brand token", requestId);
     }
@@ -3697,22 +3392,23 @@ exports.viewCampaignByIdForBrand = async (req, res) => {
       return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
     }
 
-    const campaign = await Campaign.findOne(
-      buildCampaignLookupFilter(campaignId, bodyBrandDoc._id)
-    );
+    const filter = buildCampaignLookupFilter(campaignId, bodyBrandDoc._id);
+    if (!filter) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
+    }
 
-
+    const campaign = await Campaign.findOne(filter);
     if (!campaign) {
       return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
     }
 
     const enriched = (await enrichCampaigns([campaign]))[0];
-
     return ApiResponse.sendOk(res, 200, { doc: enriched }, requestId);
   } catch (err) {
     return sendControllerError(res, requestId, err);
   }
 };
+
 
 exports.getRecommendedInfluencersByCampaignId = async (req, res) => {
   const requestId = getRequestId(req);
@@ -3838,17 +3534,11 @@ exports.updateStatus = async (req, res) => {
     const allowedStatuses = ["draft", "active", "paused", "completed", "archived"];
 
     if (!statusRaw || !allowedStatuses.includes(statusRaw)) {
-      return fail(
-        res,
-        400,
-        "VALIDATION_ERROR",
-        `status must be one of: ${allowedStatuses.join(", ")}`,
-        requestId
-      );
+      return fail(res, 400, "VALIDATION_ERROR", `status must be one of: ${allowedStatuses.join(", ")}`, requestId);
     }
 
     const existing = await Campaign.findById(campaignId).select(
-      "_id status brandId publishedAt endedAt isActive isDraft publishStatus campaignStatus statusUpdatedAt"
+      "_id status brandId publishedAt endAt isActive isDraft publishStatus statusUpdatedAt pausedAt"
     );
 
     if (!existing) {
@@ -3863,33 +3553,15 @@ exports.updateStatus = async (req, res) => {
     const newStatus = statusRaw;
 
     if (currentStatus === newStatus) {
-      return fail(
-        res,
-        400,
-        "VALIDATION_ERROR",
-        `Campaign is already in '${newStatus}' status`,
-        requestId
-      );
+      return fail(res, 400, "VALIDATION_ERROR", `Campaign is already in '${newStatus}' status`, requestId);
     }
 
     if (currentStatus === "completed") {
-      return fail(
-        res,
-        400,
-        "VALIDATION_ERROR",
-        "Completed campaign status cannot be changed",
-        requestId
-      );
+      return fail(res, 400, "VALIDATION_ERROR", "Completed campaign status cannot be changed", requestId);
     }
 
     if (currentStatus === "archived") {
-      return fail(
-        res,
-        400,
-        "VALIDATION_ERROR",
-        "Archived campaign status cannot be changed",
-        requestId
-      );
+      return fail(res, 400, "VALIDATION_ERROR", "Archived campaign status cannot be changed", requestId);
     }
 
     existing.status = newStatus;
@@ -3900,49 +3572,41 @@ exports.updateStatus = async (req, res) => {
 
     if (newStatus === "draft") {
       existing.publishStatus = "draft";
-      existing.campaignStatus = "paused";
-      existing.publishedAt = undefined;
-      existing.endedAt = undefined;
+      existing.publishedAt = null;
+      existing.pausedAt = null;
     }
 
     if (newStatus === "active") {
       existing.publishStatus = "published";
-      existing.campaignStatus = "open";
       existing.publishedAt = existing.publishedAt || new Date();
-      existing.endedAt = undefined;
+      existing.pausedAt = null;
     }
 
     if (newStatus === "paused") {
       existing.publishStatus = "published";
-      existing.campaignStatus = "paused";
+      existing.pausedAt = new Date();
     }
 
     if (newStatus === "completed") {
       existing.publishStatus = "published";
-      existing.campaignStatus = "paused";
       existing.isActive = 0;
-      existing.endedAt = existing.endedAt || new Date();
+      existing.pausedAt = existing.pausedAt || new Date();
     }
 
     if (newStatus === "archived") {
-      existing.publishStatus = "archived";
-      existing.campaignStatus = "paused";
+      existing.publishStatus = "published";
       existing.isActive = 0;
-      existing.endedAt = existing.endedAt || new Date();
+      existing.pausedAt = existing.pausedAt || new Date();
     }
 
     await existing.save();
 
-    return ApiResponse.sendOk(
-      res,
-      200,
-      { message: "Status updated successfully" },
-      requestId
-    );
+    return ApiResponse.sendOk(res, 200, { message: "Status updated successfully" }, requestId);
   } catch (err) {
     return sendControllerError(res, requestId, err);
   }
 };
+
 
 exports.updateManualCampaign = async (req, res) => {
   const requestId = getRequestId(req);
@@ -3962,10 +3626,12 @@ exports.updateManualCampaign = async (req, res) => {
     if (!campaignId) {
       return failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "campaignId", requestId);
     }
+    if (!isOid(campaignId)) {
+      return failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "campaignId", requestId, "Valid campaignId is required");
+    }
 
-    const existingCampaign = await Campaign.findOne(
-      buildCampaignLookupFilter(campaignId, brandDoc._id)
-    );
+    const filter = buildCampaignLookupFilter(campaignId, brandDoc._id);
+    const existingCampaign = await Campaign.findOne(filter);
 
     if (!existingCampaign) {
       return fail(res, HttpStatus.NOT_FOUND, "NOT_FOUND", "Campaign not found", requestId);
@@ -3975,10 +3641,10 @@ exports.updateManualCampaign = async (req, res) => {
     req.body.campaignTimezone = campaignTz;
 
     const status = pickStatus(req.body.status || existingCampaign.status || "active");
-    const mode = status === "scheduled" ? "schedule" : status === "draft" ? "draft" : "publish";
+    const mode = status === "draft" ? "draft" : "publish";
 
     const v = await validateForMode(res, requestId, mode, req.body, {
-      existingProductImages: existingCampaign.productImages || existingCampaign.images || [],
+      existingProductImages: existingCampaign.productImages || [],
     });
     if (!v.ok) return v.resp;
 
@@ -3986,10 +3652,6 @@ exports.updateManualCampaign = async (req, res) => {
 
     if (status === "draft") {
       timing = parseDraftWindowSoft(req.body, campaignTz);
-    } else if (status === "scheduled") {
-      const sch = parseSchedule(req.body, campaignTz, requestId, res);
-      if (!sch.ok) return sch.resp;
-      timing = sch.value;
     } else {
       const win = parseCampaignWindowForUpdate(req.body, campaignTz, requestId, res, {
         allowPastStart: true,
@@ -3998,41 +3660,22 @@ exports.updateManualCampaign = async (req, res) => {
       timing = win.value;
     }
 
-    const rel = await resolveCategoryAndSubcategories(
-      clean(req.body.categoryId),
-      normalizeObjectIdArray(req.body.subcategoryIds)
-    );
-
+    const rel = await resolveCategoryAndSubcategories(clean(req.body.categoryId), normalizeObjectIdArray(req.body.subcategoryIds));
     if (rel.error) {
-      return failField(
-        res,
-        HttpStatus.BAD_REQUEST,
-        "VALIDATION_ERROR",
-        "subcategoryIds",
-        requestId,
-        rel.error
-      );
+      return failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "subcategoryIds", requestId, rel.error);
     }
 
     const mergedBody = {
       ...req.body,
       productImages: toUnknownArray(req.body.productImages).length
         ? req.body.productImages
-        : existingCampaign.productImages || existingCampaign.images || [],
+        : existingCampaign.productImages || [],
     };
 
-    const patch = buildCampaignUpdatePatch(
-      mergedBody,
-      existingCampaign,
-      status,
-      timing,
-      {
-        categoryName: rel?.cat?.name || "",
-        subcategoryNames: Array.isArray(rel?.subs)
-          ? rel.subs.map((s) => String(s.name || ""))
-          : [],
-      }
-    );
+    const patch = buildCampaignUpdatePatch(mergedBody, existingCampaign, status, timing, {
+      categoryName: rel?.cat?.name || "",
+      subcategoryNames: Array.isArray(rel?.subs) ? rel.subs.map((s) => String(s.name || "")) : [],
+    });
 
     Object.assign(existingCampaign, patch);
     await existingCampaign.save();
@@ -4055,17 +3698,8 @@ exports.updateManualCampaign = async (req, res) => {
 
 function buildCampaignLookupForInfluencerView(campaignId) {
   const raw = clean(campaignId);
-
-  if (isOid(raw)) {
-    return {
-      $or: [
-        { _id: toObjectId(raw) },
-        { campaignId: raw }
-      ]
-    };
-  }
-
-  return { campaignId: raw };
+  if (!isOid(raw)) return null;
+  return { _id: toObjectId(raw) };
 }
 
 exports.viewCampaignByIdForInfluencer = async (req, res) => {
@@ -4074,23 +3708,11 @@ exports.viewCampaignByIdForInfluencer = async (req, res) => {
   try {
     const influencerId = clean(req.body.influencerId);
     if (!influencerId) {
-      return fail(
-        res,
-        400,
-        "VALIDATION_ERROR",
-        "Valid influencerId is required",
-        requestId
-      );
+      return fail(res, 400, "VALIDATION_ERROR", "Valid influencerId is required", requestId);
     }
 
     if (!isOid(influencerId)) {
-      return fail(
-        res,
-        400,
-        "VALIDATION_ERROR",
-        "Valid influencerId is required",
-        requestId
-      );
+      return fail(res, 400, "VALIDATION_ERROR", "Valid influencerId is required", requestId);
     }
 
     const influencerDoc = await Influencer.findById(influencerId)
@@ -4103,31 +3725,21 @@ exports.viewCampaignByIdForInfluencer = async (req, res) => {
 
     const campaignId = clean(req.body.campaignId);
     if (!campaignId) {
-      return fail(
-        res,
-        400,
-        "VALIDATION_ERROR",
-        "campaignId is required",
-        requestId
-      );
+      return fail(res, 400, "VALIDATION_ERROR", "campaignId is required", requestId);
     }
 
-    const campaign = await Campaign.findOne(
-      buildCampaignLookupForInfluencerView(campaignId)
-    );
+    const filter = buildCampaignLookupForInfluencerView(campaignId);
+    if (!filter) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
+    }
 
+    const campaign = await Campaign.findOne(filter);
     if (!campaign) {
       return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
     }
 
     const enriched = (await enrichCampaigns([campaign]))[0];
-
-    return ApiResponse.sendOk(
-      res,
-      200,
-      { doc: enriched },
-      requestId
-    );
+    return ApiResponse.sendOk(res, 200, { doc: enriched }, requestId);
   } catch (err) {
     return sendControllerError(res, requestId, err);
   }

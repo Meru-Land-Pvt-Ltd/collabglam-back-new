@@ -1,84 +1,244 @@
-// controllers/mediakitController.js
-const Influencer = require('../models/influencer');
-const MediaKit = require('../models/mediaKit');
-const { refreshMediaKitForInfluencer } = require('../jobs/mediakitSync');
-const Modash = require('../models/modash'); 
+const { InfluencerModel: Influencer } = require("../models/influencer");
+const mongoose = require("mongoose");
+const MediaKit = require("../models/mediaKit");
+const { refreshMediaKitForInfluencer } = require("../jobs/mediakitSync");
+const Modash = require("../models/modash");
+const Language = require("../models/language");
 
 // ------------------------------- Helpers --------------------------------
 
-// Helper to pick username based on primary platform and profiles
 function pickUsername(primaryPlatform, profiles = []) {
   if (!Array.isArray(profiles) || profiles.length === 0) return null;
+
   if (primaryPlatform) {
-    const match = profiles.find(p => p.provider === primaryPlatform);
+    const match = profiles.find((p) => p.provider === primaryPlatform);
     if (match?.username) return match.username;
   }
-  return profiles.find(p => p?.username)?.username ?? null;
+
+  return profiles.find((p) => p?.username)?.username ?? null;
 }
 
-// Helper to sanitize MediaKit objects (remove sensitive fields)
 function sanitizeMediaKit(docOrObj) {
   const obj = docOrObj?.toObject ? docOrObj.toObject() : { ...docOrObj };
-  // redact sensitive snapshot fields from responses
   delete obj.password;
+  delete obj.passwordHash;
   return obj;
 }
 
-// Helper to build snapshot from Influencer document
 function buildSnapshotFromInfluencer(infDoc) {
-  const src = infDoc.toObject({ getters: false, virtuals: false, depopulate: true });
+  const src = infDoc?.toObject
+    ? infDoc.toObject({ getters: false, virtuals: false, depopulate: true })
+    : { ...infDoc };
 
-  const EXCLUDE = new Set(['_id', '__v', 'mediaKitId', 'influencerId', 'updatedAt']);
-  const MEDIAKIT_ONLY = new Set(['rateCard', 'additionalNotes', 'mediaKitPdf', 'website']);
+  const EXCLUDE = new Set([
+    "_id",
+    "__v",
+    "mediaKitId",
+    "influencerId",
+    "updatedAt",
+    "password",
+  ]);
+
+  const MEDIAKIT_ONLY = new Set([
+    "rateCard",
+    "additionalNotes",
+    "mediaKitPdf",
+    "website",
+  ]);
 
   const snapshot = {};
+
   for (const path of Object.keys(MediaKit.schema.paths)) {
     if (EXCLUDE.has(path) || MEDIAKIT_ONLY.has(path)) continue;
 
-    if (path === 'createdAt') {
+    if (path === "createdAt") {
       if (src.createdAt) snapshot.createdAt = src.createdAt;
       continue;
     }
+
     if (Object.prototype.hasOwnProperty.call(src, path)) {
       snapshot[path] = src[path];
     }
   }
+
   return snapshot;
 }
 
-// Map Modash docs → MediaKit.socialProfiles format (public-safe)
+function normalizeSnapshotForMediaKit(snapshot = {}, influencer = null) {
+  const normalized = { ...snapshot };
+
+  if (!normalized.country && influencer?.countryName) {
+    normalized.country = influencer.countryName;
+  }
+
+  delete normalized.countryName;
+  return normalized;
+}
+
+async function normalizeLanguagesForMediaKit(influencerLanguages = []) {
+  if (!Array.isArray(influencerLanguages) || influencerLanguages.length === 0) {
+    return [];
+  }
+
+  const ids = influencerLanguages
+    .map((l) => l?.languageId || l?._id)
+    .filter(Boolean);
+
+  if (ids.length === 0) return [];
+
+  const languageDocs = await Language.find({ _id: { $in: ids } })
+    .select("_id code name")
+    .lean();
+
+  const byId = new Map(languageDocs.map((l) => [String(l._id), l]));
+
+  return influencerLanguages
+    .map((l) => {
+      const id = l?.languageId || l?._id;
+      if (!id) return null;
+
+      const full = byId.get(String(id));
+      if (!full) return null;
+
+      return {
+        languageId: full._id,
+        code: full.code,
+        name: full.name,
+      };
+    })
+    .filter(Boolean);
+}
+
+function normalizeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function cleanModashDoc(docOrObj) {
+  const obj = docOrObj?.toObject
+    ? docOrObj.toObject({ getters: false, virtuals: false, depopulate: true })
+    : { ...docOrObj };
+
+  delete obj.__v;
+  return obj;
+}
+
 function mapModashToSocialProfiles(modashDocs = []) {
   if (!Array.isArray(modashDocs)) return [];
 
-  return modashDocs.map((p) => ({
-    provider: p.provider,                         // 'instagram' | 'tiktok' | 'youtube'
-    username: p.username || p.handle || null,
-    fullname: p.fullname || null,
-    url: p.url || null,
-    picture: p.picture || null,
+  return modashDocs.map((doc) => {
+    const raw = cleanModashDoc(doc);
 
-    followers: p.followers ?? null,
-    engagements: p.engagements ?? null,
-    engagementRate: p.engagementRate ?? null,
-    averageViews: p.averageViews ?? null,
+    return {
+      modashId: raw._id ? String(raw._id) : null,
 
-    // keep compact stats + categories
-    stats: p.stats || null,
-    categories: Array.isArray(p.categories) ? p.categories : [],
+      // keep everything from saved Modash report
+      ...raw,
 
-    // light-weight content & affinity
-    recentPosts: Array.isArray(p.recentPosts) ? p.recentPosts : [],
-    popularPosts: Array.isArray(p.popularPosts) ? p.popularPosts : [],
-    hashtags: Array.isArray(p.hashtags) ? p.hashtags : [],
-    mentions: Array.isArray(p.mentions) ? p.mentions : [],
-    brandAffinity: Array.isArray(p.brandAffinity) ? p.brandAffinity : [],
-    lookalikes: Array.isArray(p.lookalikes) ? p.lookalikes : [],
-    sponsoredPosts: Array.isArray(p.sponsoredPosts) ? p.sponsoredPosts : [],
+      // normalize important fields for frontend
+      provider: raw.provider || null,
+      userId: raw.userId || null,
+      username: raw.username || raw.handle || null,
+      handle: raw.handle || (raw.username ? `@${raw.username}` : null),
+      fullname: raw.fullname || null,
+      url: raw.url || null,
+      picture: raw.picture || null,
 
-    // timestamps from Modash doc
-    createdAt: p.createdAt || null,
-    updatedAt: p.updatedAt || null
-  }));
+      followers: raw.followers ?? null,
+      engagements: raw.engagements ?? null,
+      engagementRate: raw.engagementRate ?? null,
+      averageViews: raw.averageViews ?? null,
+
+      isPrivate: raw.isPrivate ?? null,
+      isVerified: raw.isVerified ?? null,
+      accountType: raw.accountType ?? null,
+      secUid: raw.secUid ?? null,
+
+      city: raw.city || null,
+      state: raw.state || null,
+      country: raw.country || null,
+      ageGroup: raw.ageGroup || null,
+      gender: raw.gender || null,
+      language: raw.language || null,
+      bio: raw.bio || null,
+
+      stats: raw.stats || null,
+      statsByContentType: raw.statsByContentType || null,
+
+      postsCount: raw.postsCount ?? null,
+      avgLikes: raw.avgLikes ?? null,
+      avgComments: raw.avgComments ?? null,
+      avgViews: raw.avgViews ?? null,
+      avgReelsPlays: raw.avgReelsPlays ?? null,
+      totalLikes: raw.totalLikes ?? null,
+      totalViews: raw.totalViews ?? null,
+
+      categories: normalizeArray(raw.categories),
+      hashtags: normalizeArray(raw.hashtags),
+      mentions: normalizeArray(raw.mentions),
+      brandAffinity: normalizeArray(raw.brandAffinity),
+
+      audience: raw.audience || null,
+      audienceCommenters: raw.audienceCommenters || null,
+      audienceExtra: raw.audienceExtra || null,
+      lookalikes: normalizeArray(raw.lookalikes),
+
+      recentPosts: normalizeArray(raw.recentPosts),
+      popularPosts: normalizeArray(raw.popularPosts),
+      sponsoredPosts: normalizeArray(raw.sponsoredPosts),
+
+      paidPostPerformance: raw.paidPostPerformance ?? null,
+      paidPostPerformanceViews: raw.paidPostPerformanceViews ?? null,
+      sponsoredPostsMedianViews: raw.sponsoredPostsMedianViews ?? null,
+      sponsoredPostsMedianLikes: raw.sponsoredPostsMedianLikes ?? null,
+      nonSponsoredPostsMedianViews: raw.nonSponsoredPostsMedianViews ?? null,
+      nonSponsoredPostsMedianLikes: raw.nonSponsoredPostsMedianLikes ?? null,
+
+      // this is the most important one if you want "everything"
+      providerRaw: raw.providerRaw || null,
+
+      createdAt: raw.createdAt || null,
+      updatedAt: raw.updatedAt || null,
+    };
+  });
+}
+
+function buildMediaKitResponse(docOrObj, socialProfilesSnapshot = []) {
+  const mediaKit = sanitizeMediaKit(docOrObj);
+
+  mediaKit.socialProfiles = socialProfilesSnapshot;
+
+  // optional alias if frontend wants a clearer field name
+  mediaKit.influencerReports = socialProfilesSnapshot;
+
+  const primaryReport =
+    socialProfilesSnapshot.find(
+      (p) => p.provider === mediaKit.primaryPlatform
+    ) || socialProfilesSnapshot[0] || null;
+
+  mediaKit.primaryInfluencerReport = primaryReport;
+
+  return mediaKit;
+}
+
+async function getModashProfilesForInfluencer(influencer) {
+  if (!influencer) return [];
+
+  const influencerObjectId = influencer?._id;
+  const influencerPublicId = influencer?.influencerId;
+
+  const orConditions = [];
+
+  if (influencerObjectId) {
+    orConditions.push({ influencer: influencerObjectId });
+  }
+
+  if (influencerPublicId) {
+    orConditions.push({ influencerId: influencerPublicId });
+  }
+
+  if (orConditions.length === 0) return [];
+
+  return Modash.find({ $or: orConditions }).lean();
 }
 
 // ------------------------------- Controllers ----------------------------
@@ -86,63 +246,98 @@ function mapModashToSocialProfiles(modashDocs = []) {
 async function createByInfluencer(req, res) {
   try {
     const { influencerId } = req.body || {};
+
     if (!influencerId) {
-      return res.status(400).json({ error: 'influencerId is required in body' });
+      return res.status(400).json({ error: "influencerId is required in body" });
     }
 
-    const influencer = await Influencer.findOne({ influencerId });
-    if (!influencer) return res.status(404).json({ error: 'Influencer not found' });
+    let influencer = null;
 
-    // 1) Fetch Modash profiles and map → socialProfiles snapshot
-    const modashProfiles = await Modash.find({ influencer: influencer._id }).lean();
+    if (mongoose.Types.ObjectId.isValid(influencerId)) {
+      influencer = await Influencer.findById(influencerId);
+    }
+
+    if (!influencer) {
+      return res.status(404).json({ error: "Influencer not found" });
+    }
+
+    const modashProfiles = await getModashProfilesForInfluencer(influencer);
     const socialProfilesSnapshot = mapModashToSocialProfiles(modashProfiles);
+    const normalizedLanguages = await normalizeLanguagesForMediaKit(influencer.languages);
 
-    // 2) If MediaKit exists, refresh + patch socialProfiles
     const existing = await MediaKit.findOne({ influencerId });
+
     if (existing) {
       const refreshed = await refreshMediaKitForInfluencer(influencerId);
       const doc = refreshed || existing;
 
       if (socialProfilesSnapshot.length) {
         doc.socialProfiles = socialProfilesSnapshot;
-        await doc.save();
+        doc.markModified("socialProfiles");
       }
+
+      doc.languages = normalizedLanguages;
+
+      if (influencer.countryName) {
+        doc.country = influencer.countryName;
+      }
+
+      if (!doc.username && influencer.primaryPlatform) {
+        doc.username = pickUsername(influencer.primaryPlatform, socialProfilesSnapshot);
+      }
+
+      await doc.save();
+
+      const responseMediaKit = buildMediaKitResponse(doc, socialProfilesSnapshot);
 
       return res.status(200).json({
         mediaKitId: doc.mediaKitId,
-        mediaKit: sanitizeMediaKit(doc),
+        mediaKit: responseMediaKit,
       });
     }
 
-    // 3) Otherwise create new MediaKit from Influencer snapshot
-    const snapshot = buildSnapshotFromInfluencer(influencer);
+    let snapshot = buildSnapshotFromInfluencer(influencer);
+    snapshot = normalizeSnapshotForMediaKit(snapshot, influencer);
+    snapshot.languages = normalizedLanguages;
+
     const mediaKit = await MediaKit.create({
       influencerId,
       ...snapshot,
+      username:
+        snapshot.username ||
+        pickUsername(influencer.primaryPlatform, socialProfilesSnapshot),
       socialProfiles: socialProfilesSnapshot,
     });
 
+    const responseMediaKit = buildMediaKitResponse(mediaKit, socialProfilesSnapshot);
+
     return res.status(201).json({
       mediaKitId: mediaKit.mediaKitId,
-      mediaKit: sanitizeMediaKit(mediaKit),
+      mediaKit: responseMediaKit,
     });
   } catch (err) {
-    console.error('Create MediaKit error:', err);
+    console.error("Create MediaKit error:", err);
+
     if (err?.code === 11000) {
-      return res.status(409).json({ error: 'Duplicate key', details: err.keyValue });
+      return res.status(409).json({
+        error: "Duplicate key",
+        details: err.keyValue,
+      });
     }
-    return res.status(500).json({ error: 'Internal server error' });
+
+    return res.status(500).json({
+      error: "Internal server error",
+      details: err.message,
+    });
   }
 }
 
-// POST /api/mediakits/update
-// Body: { mediaKitId, ...fieldsToUpdate }
-// Fully flexible update of MediaKit
 async function updateMediaKit(req, res) {
   try {
     const { mediaKitId, ...rest } = req.body || {};
+
     if (!mediaKitId) {
-      return res.status(400).json({ error: 'mediaKitId is required in body' });
+      return res.status(400).json({ error: "mediaKitId is required in body" });
     }
 
     const updated = await MediaKit.findOneAndUpdate(
@@ -151,23 +346,29 @@ async function updateMediaKit(req, res) {
       { new: true, runValidators: true }
     );
 
-    if (!updated) return res.status(404).json({ error: 'MediaKit not found' });
+    if (!updated) {
+      return res.status(404).json({ error: "MediaKit not found" });
+    }
 
     return res.json({
-      message: 'MediaKit updated successfully',
+      message: "MediaKit updated successfully",
       mediaKitId: updated.mediaKitId,
-      mediaKit: sanitizeMediaKit(updated)
+      mediaKit: sanitizeMediaKit(updated),
     });
   } catch (err) {
-    console.error('Update MediaKit error:', err);
+    console.error("Update MediaKit error:", err);
+
     if (err?.code === 11000) {
-      return res.status(409).json({ error: 'Duplicate key', details: err.keyValue });
+      return res.status(409).json({
+        error: "Duplicate key",
+        details: err.keyValue,
+      });
     }
-    return res.status(500).json({ error: 'Internal server error' });
+
+    return res.status(500).json({ error: "Internal server error" });
   }
 }
 
-// Returns array of sanitized MediaKits with trimmed socialProfiles
 async function getAllMediaKits(_req, res) {
   try {
     const docs = await MediaKit.find(
@@ -175,24 +376,29 @@ async function getAllMediaKits(_req, res) {
       {
         _id: 0,
         __v: 0,
-        password: 0
+        password: 0,
+        passwordHash: 0,
       }
     ).lean();
 
-    // If some kits don't have socialProfiles yet, we can fill them from Modash
     const items = await Promise.all(
       (docs || []).map(async (d) => {
         const kit = { ...d };
 
         if (!Array.isArray(kit.socialProfiles) || kit.socialProfiles.length === 0) {
-          if (kit.influencerId) {
-            const modashProfiles = await Modash.find({ influencerId: kit.influencerId }).lean();
-            kit.socialProfiles = mapModashToSocialProfiles(modashProfiles);
+          if (kit.influencerId && mongoose.Types.ObjectId.isValid(kit.influencerId)) {
+            const influencer = await Influencer.findById(kit.influencerId).lean();
+
+            if (influencer) {
+              const modashProfiles = await getModashProfilesForInfluencer(influencer);
+              kit.socialProfiles = mapModashToSocialProfiles(modashProfiles);
+            } else {
+              kit.socialProfiles = [];
+            }
           } else {
             kit.socialProfiles = [];
           }
         } else {
-          // in case old docs store full Modash docs, remap them to the slim form
           kit.socialProfiles = mapModashToSocialProfiles(kit.socialProfiles);
         }
 
@@ -202,35 +408,33 @@ async function getAllMediaKits(_req, res) {
 
     return res.json(items);
   } catch (err) {
-    console.error('Get all MediaKits error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error("Get all MediaKits error:", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 }
 
-
-// POST /api/mediakits/sync/by-influencer
-// Body: { influencerId }
-// Manually refreshes an existing MediaKit from the latest Influencer data
 async function syncByInfluencer(req, res) {
   try {
     const { influencerId } = req.body || {};
+
     if (!influencerId) {
-      return res.status(400).json({ error: 'influencerId is required in body' });
+      return res.status(400).json({ error: "influencerId is required in body" });
     }
 
     const updated = await refreshMediaKitForInfluencer(influencerId);
+
     if (!updated) {
-      return res.status(404).json({ error: 'MediaKit not found for this influencerId' });
+      return res.status(404).json({ error: "MediaKit not found for this influencerId" });
     }
 
     return res.json({
-      message: 'MediaKit synced from Influencer successfully',
+      message: "MediaKit synced from Influencer successfully",
       mediaKitId: updated.mediaKitId,
-      mediaKit: sanitizeMediaKit(updated)
+      mediaKit: sanitizeMediaKit(updated),
     });
   } catch (err) {
-    console.error('Sync MediaKit error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error("Sync MediaKit error:", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 }
 
@@ -238,5 +442,5 @@ module.exports = {
   createByInfluencer,
   updateMediaKit,
   getAllMediaKits,
-  syncByInfluencer
+  syncByInfluencer,
 };

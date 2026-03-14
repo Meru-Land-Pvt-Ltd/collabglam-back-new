@@ -1,4 +1,3 @@
-// src/core/http/ApiError.js
 const { HttpStatus } = require("./HttpStatus");
 const { ErrorCodes } = require("./errorCodes");
 
@@ -19,14 +18,16 @@ class ApiError extends Error {
 
     this.status = opts.status;
     this.code = opts.code;
-    this.details = opts.details;
+    this.details = opts.details ?? null;
     this.isOperational = opts.isOperational ?? true;
     this.cause = opts.cause;
+
+    Error.captureStackTrace?.(this, this.constructor);
   }
 }
 
 class ValidationError extends ApiError {
-  constructor(message = "Validation failed", details) {
+  constructor(message = "Validation failed", details = null) {
     super({
       status: HttpStatus.BAD_REQUEST,
       code: ErrorCodes.VALIDATION_FAILED,
@@ -36,8 +37,19 @@ class ValidationError extends ApiError {
   }
 }
 
+class UnauthorizedError extends ApiError {
+  constructor(message = "Unauthorized", details = null) {
+    super({
+      status: HttpStatus.UNAUTHORIZED,
+      code: ErrorCodes.AUTH_INVALID_TOKEN,
+      message,
+      details,
+    });
+  }
+}
+
 class ForbiddenError extends ApiError {
-  constructor(message = "Forbidden", details) {
+  constructor(message = "Forbidden", details = null) {
     super({
       status: HttpStatus.FORBIDDEN,
       code: ErrorCodes.AUTH_FORBIDDEN,
@@ -48,7 +60,7 @@ class ForbiddenError extends ApiError {
 }
 
 class NotFoundError extends ApiError {
-  constructor(message = "Not found", details) {
+  constructor(message = "Not found", details = null) {
     super({
       status: HttpStatus.NOT_FOUND,
       code: ErrorCodes.RESOURCE_NOT_FOUND,
@@ -59,7 +71,7 @@ class NotFoundError extends ApiError {
 }
 
 class ConflictError extends ApiError {
-  constructor(message = "Conflict", details) {
+  constructor(message = "Conflict", details = null) {
     super({
       status: HttpStatus.CONFLICT,
       code: ErrorCodes.CONFLICT,
@@ -70,7 +82,7 @@ class ConflictError extends ApiError {
 }
 
 class RateLimitError extends ApiError {
-  constructor(message = "Too many requests", details) {
+  constructor(message = "Too many requests", details = null) {
     super({
       status: HttpStatus.TOO_MANY_REQUESTS,
       code: ErrorCodes.RATE_LIMITED,
@@ -81,7 +93,7 @@ class RateLimitError extends ApiError {
 }
 
 class InternalError extends ApiError {
-  constructor(message = "Internal server error", details, cause) {
+  constructor(message = "Internal server error", details = null, cause = null) {
     super({
       status: HttpStatus.INTERNAL_SERVER_ERROR,
       code: ErrorCodes.INTERNAL_ERROR,
@@ -96,6 +108,7 @@ class InternalError extends ApiError {
 module.exports = {
   ApiError,
   ValidationError,
+  UnauthorizedError,
   ForbiddenError,
   NotFoundError,
   ConflictError,

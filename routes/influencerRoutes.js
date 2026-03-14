@@ -37,7 +37,7 @@ router.post('/save-influencer-onboarding', influencerAuth, saveQuickOnboarding);
 
 
 router.post('/login', signInInfluencer);
-router.post('/get-campaign', getCampaignsByInfluencer);
+router.post('/get-campaign', influencerAuth, getCampaignsByInfluencer);
 router.post('/getlist', influencerAuth, getList);
 router.get('/getById', influencerAuth, getById);
 

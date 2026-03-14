@@ -1497,11 +1497,26 @@ exports.getCampaignsByInfluencer = async (req, res) => {
     const skip = (pageNum - 1) * limitNum;
     const sortDirection = sortOrder === "asc" ? 1 : -1;
 
-    // ✅ support both Mongo _id and public influencerId
+    const safeSortFields = [
+      "createdAt",
+      "updatedAt",
+      "campaignTitle",
+      "brandName",
+      "campaignBudget",
+      "budget",
+      "startAt",
+      "endAt",
+      "status",
+      "publishedAt",
+    ];
+
+    const finalSortBy = safeSortFields.includes(sortBy) ? sortBy : "createdAt";
+
+    // support both Mongo _id and public influencerId
     const influencerLookup = mongoose.Types.ObjectId.isValid(String(influencerId))
       ? {
           $or: [
-            { _id: influencerId },
+            { _id: new mongoose.Types.ObjectId(String(influencerId)) },
             { influencerId: String(influencerId) },
           ],
         }
@@ -1520,7 +1535,7 @@ exports.getCampaignsByInfluencer = async (req, res) => {
     const publicInfluencerId = String(influencer.influencerId || influencer._id);
     const influencerName = influencer.name || "";
 
-    // ✅ match both internal _id and public influencerId in applicants/approved
+    // match influencer in applicants / approved
     const applyDocs = await ApplyCampaign.find({
       $or: [
         { "applicants.influencerId": internalInfluencerId },
@@ -1550,26 +1565,43 @@ exports.getCampaignsByInfluencer = async (req, res) => {
       ),
     ];
 
-    // ✅ support campaignId stored as campaignsId or _id
-    const campaignObjectIds = campaignIds.filter((id) =>
-      mongoose.Types.ObjectId.isValid(id)
-    );
+    const campaignObjectIds = campaignIds
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    if (!campaignObjectIds.length) {
+      return res.status(200).json({
+        total: 0,
+        page: pageNum,
+        pages: 0,
+        influencer: {
+          influencerId: publicInfluencerId,
+          name: influencerName,
+          email: influencer.email || "",
+        },
+        campaigns: [],
+      });
+    }
 
     const filter = {
-      $or: [
-        { campaignsId: { $in: campaignIds } },
-        ...(campaignObjectIds.length ? [{ _id: { $in: campaignObjectIds } }] : []),
-      ],
+      _id: { $in: campaignObjectIds },
     };
 
     if (search && String(search).trim()) {
       const s = String(search).trim();
+
       filter.$and = [
         {
           $or: [
-            { productOrServiceName: { $regex: s, $options: "i" } },
+            { campaignTitle: { $regex: s, $options: "i" } },
             { brandName: { $regex: s, $options: "i" } },
             { description: { $regex: s, $options: "i" } },
+            { campaignType: { $regex: s, $options: "i" } },
+            { campaignCategory: { $regex: s, $options: "i" } },
+            { campaignSubcategory: { $regex: s, $options: "i" } },
+            { hashtags: { $elemMatch: { $regex: s, $options: "i" } } },
+            { productLink: { $regex: s, $options: "i" } },
+            { videoLink: { $regex: s, $options: "i" } },
           ],
         },
       ];
@@ -1578,21 +1610,17 @@ exports.getCampaignsByInfluencer = async (req, res) => {
     const total = await Campaign.countDocuments(filter);
 
     const campaigns = await Campaign.find(filter)
-      .sort({ [sortBy]: sortDirection })
+      .sort({ [finalSortBy]: sortDirection })
       .skip(skip)
       .limit(limitNum)
       .lean();
 
     const result = campaigns.map((campaign) => {
-      const campaignKey1 = String(campaign.campaignsId || "");
-      const campaignKey2 = String(campaign._id || "");
+      const campaignId = String(campaign._id);
 
-      const related = applyDocs.find((d) => {
-        const docCampaignId = String(d.campaignId || "");
-        return docCampaignId === campaignKey1 || docCampaignId === campaignKey2;
-      });
+      const related = applyDocs.find((doc) => String(doc.campaignId || "") === campaignId);
 
-      let status = "pending";
+      let applicationStatus = "pending";
 
       if (
         related?.approved?.some((a) => {
@@ -1600,36 +1628,94 @@ exports.getCampaignsByInfluencer = async (req, res) => {
           return val === internalInfluencerId || val === publicInfluencerId;
         })
       ) {
-        status = "approved";
+        applicationStatus = "approved";
+      } else if (
+        related?.applicants?.some((a) => {
+          const val = String(a.influencerId || "");
+          return val === internalInfluencerId || val === publicInfluencerId;
+        })
+      ) {
+        applicationStatus = "applied";
       }
 
-      const campaignName = campaign.productOrServiceName || "";
-
       return {
-        id: campaign.campaignsId || String(campaign._id),
-        campaignId: campaign.campaignsId || String(campaign._id),
+        id: campaignId,
+        campaignId,
 
-        campaignName,
-        name: campaignName,
+        campaignName: campaign.campaignTitle || "",
+        name: campaign.campaignTitle || "",
+        campaignTitle: campaign.campaignTitle || "",
         brandName: campaign.brandName || "",
+
         influencerId: publicInfluencerId,
         influencerName,
 
         description: campaign.description || "",
-        goal: campaign.goal || "",
         campaignType: campaign.campaignType || "",
-        budget: campaign.budget || 0,
-        targetAudience: campaign.targetAudience || null,
+        campaignCategory: campaign.campaignCategory || "",
+        campaignSubcategory: campaign.campaignSubcategory || "",
+
+        categoryId: campaign.categoryId || null,
+        subcategoryIds: campaign.subcategoryIds || [],
         categories: campaign.categories || [],
-        timeline: campaign.timeline || {},
-        images: campaign.images || [],
+
+        productImages: campaign.productImages || [],
+        images: campaign.productImages || [], // backward-compatible alias
+        productLink: campaign.productLink || "",
+        videoLink: campaign.videoLink || "",
+        productServiceInfo: campaign.productServiceInfo || [],
+
+        campaignGoals: campaign.campaignGoals || [],
+        influencerTierIds: campaign.influencerTierIds || [],
+        contentFormats: campaign.contentFormats || [],
+        contentLanguageIds: campaign.contentLanguageIds || [],
+        preferredHashtags: campaign.preferredHashtags || [],
+        targetCountryIds: campaign.targetCountryIds || [],
+        targetAgeRanges: campaign.targetAgeRanges || [],
+
+        numberOfInfluencers: campaign.numberOfInfluencers || 0,
+        influencerTier: campaign.influencerTier || "",
+        minFollowers: campaign.minFollowers || 0,
+        maxFollowers: campaign.maxFollowers || 0,
+
+        creatorContentLanguage: campaign.creatorContentLanguage || "",
+        audienceContentLanguage: campaign.audienceContentLanguage || "",
+        targetCountry: campaign.targetCountry || "",
+
+        campaignBudget: campaign.campaignBudget || 0,
+        budget: campaign.budget || campaign.campaignBudget || 0,
+        influencerBudget: campaign.influencerBudget || 0,
+        paymentType: campaign.paymentType || "Milestone",
+
+        platformSelection: campaign.platformSelection || [],
+        hashtags: campaign.hashtags || [],
         additionalNotes: campaign.additionalNotes || "",
 
-        appliedDate: related?.createdAt || campaign.createdAt,
-        status,
+        campaignTimezone: campaign.campaignTimezone || "UTC",
+        startAt: campaign.startAt || null,
+        endAt: campaign.endAt || null,
+        publishedAt: campaign.publishedAt || null,
+        timeline: campaign.timeline || {},
+
+        createdLocation: campaign.createdLocation || null,
+
+        status: campaign.status || "draft",
+        applicationStatus,
+        publishStatus: campaign.publishStatus || "draft",
+        approvalMode: campaign.approvalMode || "direct",
+
         isActive: campaign.isActive,
         isDraft: campaign.isDraft,
+        byAi: campaign.byAi,
+        applicantCount: campaign.applicantCount || 0,
+        hasApplied: campaign.hasApplied || 0,
+
+        pendingUpdate: campaign.pendingUpdate || { status: "none" },
+        createdBy: campaign.createdBy || null,
+
+        appliedDate: related?.createdAt || campaign.createdAt,
         createdAt: campaign.createdAt,
+        updatedAt: campaign.updatedAt,
       };
     });
 
