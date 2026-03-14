@@ -3837,16 +3837,22 @@ exports.viewCampaignByIdForInfluencer = async (req, res) => {
   const requestId = getRequestId(req);
 
   try {
-    const influencerId = clean(req.body.influencerId);
-    if (!influencerId) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid influencerId is required", requestId);
+    const influencerIdRaw = clean(req.body.influencerId);
+    if (!influencerIdRaw) {
+      return fail(res, 400, "VALIDATION_ERROR", "influencerId is required", requestId);
     }
 
-    if (!isOid(influencerId)) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid influencerId is required", requestId);
-    }
+    // support both Mongo _id and custom influencerId
+    const influencerLookup = mongoose.Types.ObjectId.isValid(influencerIdRaw)
+      ? {
+          $or: [
+            { _id: influencerIdRaw },
+            { influencerId: influencerIdRaw }
+          ]
+        }
+      : { influencerId: influencerIdRaw };
 
-    const influencerDoc = await Influencer.findById(influencerId)
+    const influencerDoc = await Influencer.findOne(influencerLookup)
       .select("_id influencerId name")
       .lean();
 
@@ -3854,9 +3860,16 @@ exports.viewCampaignByIdForInfluencer = async (req, res) => {
       return fail(res, 404, "NOT_FOUND", "Influencer not found", requestId);
     }
 
+    const internalInfluencerId = String(influencerDoc._id);
+    const publicInfluencerId = String(influencerDoc.influencerId || influencerDoc._id);
+
     const campaignId = clean(req.body.campaignId);
     if (!campaignId) {
       return fail(res, 400, "VALIDATION_ERROR", "campaignId is required", requestId);
+    }
+
+    if (!isOid(campaignId)) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
     }
 
     const filter = buildCampaignLookupForInfluencerView(campaignId);
@@ -3864,13 +3877,60 @@ exports.viewCampaignByIdForInfluencer = async (req, res) => {
       return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
     }
 
-    const campaign = await Campaign.findOne(filter);
+    const campaign = await Campaign.findOne(filter).lean();
     if (!campaign) {
       return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
     }
 
+    const campaignObjectId = String(campaign._id);
+    const campaignLegacyId = String(campaign.campaignsId || "").trim();
+
+    const hasApplied = await ApplyCampaign.exists({
+      $and: [
+        {
+          $or: [
+            { campaignId: campaignObjectId },
+            ...(campaignLegacyId ? [{ campaignId: campaignLegacyId }] : [])
+          ]
+        },
+        {
+          $or: [
+            { "applicants.influencerId": internalInfluencerId },
+            { "applicants.influencerId": publicInfluencerId }
+          ]
+        }
+      ]
+    });
+
+    const contract = await Contract.findOne(
+      {
+        $and: [
+          {
+            $or: [
+              { campaignId: campaignObjectId },
+              ...(campaignLegacyId ? [{ campaignId: campaignLegacyId }] : [])
+            ]
+          },
+          {
+            influencerId: { $in: [internalInfluencerId, publicInfluencerId] }
+          }
+        ]
+      },
+      "contractId isAccepted isAssigned status"
+    ).lean();
+
     const enriched = (await enrichCampaigns([campaign]))[0];
-    return ApiResponse.sendOk(res, 200, { doc: enriched }, requestId);
+
+    const doc = {
+      ...enriched,
+      hasApplied: hasApplied ? 1 : 0,
+      hasApproved: contract?.isAssigned === 1 ? 1 : 0,
+      isContracted: contract ? 1 : 0,
+      isAccepted: contract?.isAccepted === 1 ? 1 : 0,
+      contractId: contract?.contractId || null
+    };
+
+    return ApiResponse.sendOk(res, 200, { doc }, requestId);
   } catch (err) {
     return sendControllerError(res, requestId, err);
   }
