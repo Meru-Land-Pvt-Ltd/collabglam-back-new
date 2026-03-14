@@ -1,32 +1,49 @@
 const crypto = require("crypto");
-const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 
 const BrandModelImport = require("../models/brand");
-const BrandModel = BrandModelImport.BrandModel || BrandModelImport;
-
 const VerifyOtpModelImport = require("../models/verifyOtp");
-const VerifyOtpModel = VerifyOtpModelImport.VerifyOtpModel || VerifyOtpModelImport;
-
 const OtpTemplateImport = require("../template/otpTemplate");
-const buildOtpEmailTemplate =
-  OtpTemplateImport.buildOtpEmailTemplate || OtpTemplateImport;
-
 const ResetOtpTemplateImport = require("../template/resetOtp");
-const resetOtpEmailTemplate =
-  ResetOtpTemplateImport.resetOtpEmailTemplate || ResetOtpTemplateImport;
-
 const EmailServiceImport = require("../services/emailService");
-const sendEmail = EmailServiceImport.sendEmail || EmailServiceImport;
-
 const ApiResponseImport = require("../core/http/ApiResponse");
-const ApiResponse = ApiResponseImport.ApiResponse || ApiResponseImport;
-
 const HttpStatusImport = require("../core/http/HttpStatus");
-const HttpStatus = HttpStatusImport.HttpStatus || HttpStatusImport;
-
 const ApiErrorImport = require("../core/http/ApiError");
+
+const BrandModel =
+  BrandModelImport.BrandModel || BrandModelImport.default || BrandModelImport;
+
+const VerifyOtpModel =
+  VerifyOtpModelImport.VerifyOtpModel ||
+  VerifyOtpModelImport.default ||
+  VerifyOtpModelImport;
+
+const buildOtpEmailTemplate =
+  OtpTemplateImport.buildOtpEmailTemplate ||
+  OtpTemplateImport.default ||
+  OtpTemplateImport;
+
+const resetOtpEmailTemplate =
+  ResetOtpTemplateImport.resetOtpEmailTemplate ||
+  ResetOtpTemplateImport.default ||
+  ResetOtpTemplateImport;
+
+const sendEmail =
+  EmailServiceImport.sendEmail ||
+  EmailServiceImport.default ||
+  EmailServiceImport;
+
+const ApiResponse =
+  ApiResponseImport.ApiResponse ||
+  ApiResponseImport.default ||
+  ApiResponseImport;
+
+const HttpStatus =
+  HttpStatusImport.HttpStatus ||
+  HttpStatusImport.default ||
+  HttpStatusImport;
+
 const ApiError = ApiErrorImport.ApiError || ApiErrorImport;
 const ValidationError = ApiErrorImport.ValidationError;
 const UnauthorizedError = ApiErrorImport.UnauthorizedError;
@@ -54,7 +71,6 @@ try {
   };
 }
 
-const SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS || 10);
 const OTP_TTL_MIN = Number(process.env.OTP_TTL_MINUTES || 3);
 const RESET_TTL_MIN = Number(process.env.RESET_PASSWORD_TTL_MINUTES || 15);
 
@@ -85,6 +101,16 @@ const isPasswordLenOk = (password) => {
 
 const genOtp = () => String(Math.floor(100000 + Math.random() * 900000));
 
+function assertCallable(fn, name) {
+  if (typeof fn !== "function") {
+    throw new Error(`${name} export is invalid`);
+  }
+}
+
+assertCallable(buildOtpEmailTemplate, "buildOtpEmailTemplate");
+assertCallable(resetOtpEmailTemplate, "resetOtpEmailTemplate");
+assertCallable(sendEmail, "sendEmail");
+
 const hashOtp = (email, otp) => {
   const secret = process.env.OTP_SECRET || "dev-secret";
   return crypto
@@ -92,10 +118,6 @@ const hashOtp = (email, otp) => {
     .update(`${normalizeEmail(email)}:${String(otp)}:${secret}`)
     .digest("hex");
 };
-
-async function hashPassword(password) {
-  return bcrypt.hash(String(password), SALT_ROUNDS);
-}
 
 function signJwt(payload) {
   const secret = process.env.JWT_SECRET;
@@ -139,6 +161,44 @@ function isQAArray(value) {
   });
 }
 
+function msToWaitString(ms) {
+  const sec = Math.ceil(ms / 1000);
+  if (sec <= 60) return `${sec} seconds`;
+
+  const min = Math.ceil(sec / 60);
+  if (min <= 60) return `${min} minutes`;
+
+  const hr = Math.ceil(min / 60);
+  return `${hr} hours`;
+}
+
+function buildSafeSignupPayload(body) {
+  return {
+    brandName: safeTrim(body.brandName),
+    name: safeTrim(body.name) || safeTrim(body.brandName),
+    companySize: safeTrim(body.companySize),
+    industry: safeTrim(body.industry),
+    passwordHash: String(body.password || ""),
+  };
+}
+
+function validateSignupRequest(body) {
+  const brandName = safeTrim(body.brandName);
+  const email = normalizeEmail(body.email);
+  const industry = safeTrim(body.industry);
+  const password = String(body.password || "");
+
+  if (!brandName) throw new ValidationError("Brand name is required");
+  if (!email || !isValidEmail(email)) {
+    throw new ValidationError("Valid email is required");
+  }
+  if (!industry) throw new ValidationError("Industry is required");
+  if (!password.trim()) throw new ValidationError("Password is required");
+  if (!isPasswordLenOk(password)) {
+    throw new ValidationError("Password must be 8 to 16 characters.");
+  }
+}
+
 function rethrowAsApiError(err) {
   if (err instanceof ApiError) throw err;
 
@@ -154,10 +214,10 @@ function rethrowAsApiError(err) {
       });
     }
 
-    throw new ConflictError(`${field} already exists. Please use a different value.`, {
-      field,
-      value,
-    });
+    throw new ConflictError(
+      `${field} already exists. Please use a different value.`,
+      { field, value }
+    );
   }
 
   if (err && err.name === "ValidationError") {
@@ -172,11 +232,19 @@ function rethrowAsApiError(err) {
   throw err;
 }
 
-function handleControllerError(next, err) {
+function handleControllerError(next, err, context = "brandController") {
   try {
     rethrowAsApiError(err);
   } catch (mapped) {
     err = mapped;
+  }
+
+  if (!(err instanceof ApiError)) {
+    console.error(`[${context}]`, {
+      name: err?.name,
+      message: err?.message,
+      stack: err?.stack,
+    });
   }
 
   if (err instanceof ApiError) return next(err);
@@ -246,7 +314,9 @@ async function getLatestPendingOtp(email, purpose) {
 
 function assertValidOtpDoc(otpDoc, email, otp) {
   if (!otpDoc) {
-    throw new ValidationError("OTP not requested or expired. Please request a new OTP.");
+    throw new ValidationError(
+      "OTP not requested or expired. Please request a new OTP."
+    );
   }
 
   if (otpDoc.expiresAt && Date.now() > new Date(otpDoc.expiresAt).getTime()) {
@@ -301,17 +371,6 @@ async function getSigninLimitDoc(email) {
     },
     { new: true, upsert: true }
   ).exec();
-}
-
-function msToWaitString(ms) {
-  const sec = Math.ceil(ms / 1000);
-  if (sec <= 60) return `${sec} seconds`;
-
-  const min = Math.ceil(sec / 60);
-  if (min <= 60) return `${min} minutes`;
-
-  const hr = Math.ceil(min / 60);
-  return `${hr} hours`;
 }
 
 async function enforceOtpLimitByKey(email, key) {
@@ -450,7 +509,9 @@ async function recordFailedSignin(email) {
     if (batchNo === 1) {
       doc.signinCooldownUntil = new Date(nowMs + SIGNIN_LOCK_1_MIN * 60 * 1000);
     } else if (batchNo === 2) {
-      doc.signinCooldownUntil = new Date(nowMs + SIGNIN_LOCK_15_MIN * 60 * 1000);
+      doc.signinCooldownUntil = new Date(
+        nowMs + SIGNIN_LOCK_15_MIN * 60 * 1000
+      );
     } else {
       doc.signinCooldownUntil = new Date(
         nowMs + SIGNIN_LOCK_24_HOURS * 60 * 60 * 1000
@@ -500,35 +561,9 @@ async function resetSigninLimit(email) {
   ).exec();
 }
 
-function buildSafeSignupPayload(body, hashedPassword) {
-  return {
-    brandName: safeTrim(body.brandName),
-    name: safeTrim(body.name) || safeTrim(body.brandName),
-    companySize: safeTrim(body.companySize),
-    industry: safeTrim(body.industry),
-    passwordHash: hashedPassword,
-  };
-}
-
-function validateSignupRequest(body) {
-  const brandName = safeTrim(body.brandName);
-  const email = normalizeEmail(body.email);
-  const industry = safeTrim(body.industry);
-  const password = String(body.password || "");
-
-  if (!brandName) throw new ValidationError("Brand name is required");
-  if (!email || !isValidEmail(email)) {
-    throw new ValidationError("Valid email is required");
-  }
-  if (!industry) throw new ValidationError("Industry is required");
-  if (!password.trim()) throw new ValidationError("Password is required");
-  if (!isPasswordLenOk(password)) {
-    throw new ValidationError("Password must be 8 to 16 characters.");
-  }
-}
-
 async function sendSignupOtp(req, res, next) {
   const requestId = req.requestId || "";
+  let otpDoc = null;
 
   try {
     validateSignupRequest(req.body || {});
@@ -544,10 +579,9 @@ async function sendSignupOtp(req, res, next) {
     await clearPendingOtpDocs(email, "signup");
 
     const otpPlain = genOtp();
-    const hashedPassword = await hashPassword(String(req.body.password));
-    const signupPayload = buildSafeSignupPayload(req.body, hashedPassword);
+    const signupPayload = buildSafeSignupPayload(req.body);
 
-    await createOtpDoc({
+    otpDoc = await createOtpDoc({
       email,
       purpose: "signup",
       otpPlain,
@@ -573,7 +607,18 @@ async function sendSignupOtp(req, res, next) {
       requestId
     );
   } catch (err) {
-    return handleControllerError(next, err);
+    if (otpDoc?._id) {
+      try {
+        await VerifyOtpModel.deleteOne({ _id: otpDoc._id }).exec();
+      } catch (cleanupErr) {
+        console.error("[sendSignupOtp.cleanup]", {
+          name: cleanupErr?.name,
+          message: cleanupErr?.message,
+        });
+      }
+    }
+
+    return handleControllerError(next, err, "sendSignupOtp");
   }
 }
 
@@ -599,14 +644,18 @@ async function verifyOtpSignUp(req, res, next) {
       if (existingBrand) {
         throw new ConflictError("Email already registered. Please login.");
       }
-      throw new ValidationError("OTP not requested or expired. Please request a new OTP.");
+      throw new ValidationError(
+        "OTP not requested or expired. Please request a new OTP."
+      );
     }
 
     assertValidOtpDoc(otpDoc, email, otp);
 
     const payload = otpDoc.signupPayload || {};
     if (!payload.brandName || !payload.industry || !payload.passwordHash) {
-      throw new ValidationError("Signup details missing. Please request OTP again.");
+      throw new ValidationError(
+        "Signup details missing. Please request OTP again."
+      );
     }
 
     const existingBrand = await findBrandByEmail(email);
@@ -644,7 +693,7 @@ async function verifyOtpSignUp(req, res, next) {
       requestId
     );
   } catch (err) {
-    return handleControllerError(next, err);
+    return handleControllerError(next, err, "verifyOtpSignUp");
   }
 }
 
@@ -694,10 +743,14 @@ async function saveBrandOnboarding(req, res, next) {
         update.ispage1Skip = true;
       } else {
         if (page1 === undefined) {
-          throw new ValidationError("page1 is required when ispage1Skip is false");
+          throw new ValidationError(
+            "page1 is required when ispage1Skip is false"
+          );
         }
         if (!isQAArray(page1)) {
-          throw new ValidationError("page1 must be an array of { question, answers[] }");
+          throw new ValidationError(
+            "page1 must be an array of { question, answers[] }"
+          );
         }
         update.page1 = page1;
         update.ispage1Skip = false;
@@ -714,10 +767,14 @@ async function saveBrandOnboarding(req, res, next) {
         update.ispage2Skip = true;
       } else {
         if (page2 === undefined) {
-          throw new ValidationError("page2 is required when ispage2Skip is false");
+          throw new ValidationError(
+            "page2 is required when ispage2Skip is false"
+          );
         }
         if (!isQAArray(page2)) {
-          throw new ValidationError("page2 must be an array of { question, answers[] }");
+          throw new ValidationError(
+            "page2 must be an array of { question, answers[] }"
+          );
         }
         update.page2 = page2;
         update.ispage2Skip = false;
@@ -734,10 +791,14 @@ async function saveBrandOnboarding(req, res, next) {
         update.ispage3Skip = true;
       } else {
         if (page3 === undefined) {
-          throw new ValidationError("page3 is required when ispage3Skip is false");
+          throw new ValidationError(
+            "page3 is required when ispage3Skip is false"
+          );
         }
         if (!isQAArray(page3)) {
-          throw new ValidationError("page3 must be an array of { question, answers[] }");
+          throw new ValidationError(
+            "page3 must be an array of { question, answers[] }"
+          );
         }
         update.page3 = page3;
         update.ispage3Skip = false;
@@ -796,7 +857,7 @@ async function saveBrandOnboarding(req, res, next) {
       requestId
     );
   } catch (err) {
-    return handleControllerError(next, err);
+    return handleControllerError(next, err, "saveBrandOnboarding");
   }
 }
 
@@ -853,12 +914,13 @@ async function signInBrand(req, res, next) {
       requestId
     );
   } catch (err) {
-    return handleControllerError(next, err);
+    return handleControllerError(next, err, "signInBrand");
   }
 }
 
 async function sendOtpForgotBrand(req, res, next) {
   const requestId = req.requestId || "";
+  let otpDoc = null;
 
   try {
     const email = normalizeEmail(req.body?.email);
@@ -878,7 +940,7 @@ async function sendOtpForgotBrand(req, res, next) {
 
     const otpPlain = genOtp();
 
-    await createOtpDoc({
+    otpDoc = await createOtpDoc({
       email,
       purpose: "reset_password",
       otpPlain,
@@ -904,7 +966,18 @@ async function sendOtpForgotBrand(req, res, next) {
       requestId
     );
   } catch (err) {
-    return handleControllerError(next, err);
+    if (otpDoc?._id) {
+      try {
+        await VerifyOtpModel.deleteOne({ _id: otpDoc._id }).exec();
+      } catch (cleanupErr) {
+        console.error("[sendOtpForgotBrand.cleanup]", {
+          name: cleanupErr?.name,
+          message: cleanupErr?.message,
+        });
+      }
+    }
+
+    return handleControllerError(next, err, "sendOtpForgotBrand");
   }
 }
 
@@ -954,7 +1027,7 @@ async function verifyOtpForgotBrand(req, res, next) {
       requestId
     );
   } catch (err) {
-    return handleControllerError(next, err);
+    return handleControllerError(next, err, "verifyOtpForgotBrand");
   }
 }
 
@@ -1017,7 +1090,9 @@ async function updatePasswordBrand(req, res, next) {
 
     const samePassword = await brand.comparePassword(newPassword);
     if (samePassword) {
-      throw new ValidationError("New password cannot be the same as your last password");
+      throw new ValidationError(
+        "New password cannot be the same as your last password"
+      );
     }
 
     brand.password = newPassword;
@@ -1039,7 +1114,7 @@ async function updatePasswordBrand(req, res, next) {
       requestId
     );
   } catch (err) {
-    return handleControllerError(next, err);
+    return handleControllerError(next, err, "updatePasswordBrand");
   }
 }
 
@@ -1073,7 +1148,7 @@ async function getBrandById(req, res, next) {
       requestId
     );
   } catch (err) {
-    return handleControllerError(next, err);
+    return handleControllerError(next, err, "getBrandById");
   }
 }
 

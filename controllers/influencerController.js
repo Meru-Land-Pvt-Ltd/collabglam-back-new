@@ -109,6 +109,57 @@ function uniqueValidObjectIds(ids) {
   return out;
 }
 
+const PROXY_MAIL_DOMAIN =
+  process.env.PROXY_MAIL_DOMAIN || "mail.collabglam.cloud";
+
+function slugifyInfluencerName(name = "") {
+  const base = String(name || "")
+    .trim()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "") // remove accents
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");     // remove spaces/special chars
+
+  return base || "influencer";
+}
+
+async function generateUniqueInfluencerProxyEmail(name) {
+  const base = slugifyInfluencerName(name);
+  const escapedBase = escapeRegExp(base);
+  const escapedDomain = escapeRegExp(PROXY_MAIL_DOMAIN);
+
+  const regex = new RegExp(`^${escapedBase}(\\d+)?@${escapedDomain}$`, "i");
+
+  const existing = await InfluencerModel.find(
+    { proxyEmail: regex },
+    "proxyEmail"
+  ).lean();
+
+  let baseTaken = false;
+  let maxSuffix = 1;
+
+  for (const row of existing) {
+    const email = String(row.proxyEmail || "").toLowerCase();
+    const local = email.split("@")[0];
+
+    if (local === base) {
+      baseTaken = true;
+      continue;
+    }
+
+    const match = local.match(new RegExp(`^${escapedBase}(\\d+)$`, "i"));
+    if (match) {
+      const n = Number(match[1]);
+      if (Number.isFinite(n) && n > maxSuffix) {
+        maxSuffix = n;
+      }
+    }
+  }
+
+  const localPart = baseTaken ? `${base}${maxSuffix + 1}` : base;
+  return `${localPart}@${PROXY_MAIL_DOMAIN}`;
+}
+
 function isStrongPassword(pw) {
   const s = String(pw || "");
   return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/.test(s);
@@ -634,15 +685,14 @@ function otpHtmlTemplate({
           </div>
           <div style="${SMALL}">This code expires in ${minutes} minutes.</div>
 
-          ${
-            hasCta
-              ? `
+          ${hasCta
+      ? `
             <div style="margin-top:16px;">
               <a href="${esc(ctaHref)}" style="${BTN}">${esc(ctaLabel)}</a>
               <div style="${SMALL};margin-top:8px;">If the button doesn’t work, copy &amp; paste this link:<br><span style="word-break:break-all;color:#111827;">${esc(ctaHref)}</span></div>
             </div>`
-              : ""
-          }
+      : ""
+    }
         </div>
 
         <div style="${FOOT}">
@@ -926,7 +976,7 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
   let otpClaimed = false;
 
   try {
-    const { email, otp, location } = req.body;
+    const { email, otp, location } = req.body || {};
 
     const secret = process.env.JWT_SECRET;
     if (!secret) {
@@ -934,12 +984,14 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
     }
 
     const expiresIn = process.env.JWT_EXPIRES_IN || "7d";
+    const proxyMailDomain =
+      process.env.PROXY_MAIL_DOMAIN || "mail.collabglam.cloud";
 
     if (!email || !isValidEmail(email)) {
       return res.status(400).json({ message: "Valid email is required" });
     }
 
-    if (!otp || !/^\d{6}$/.test(String(otp))) {
+    if (!otp || !/^\d{6}$/.test(String(otp).trim())) {
       return res.status(400).json({ message: "Valid 6-digit OTP is required" });
     }
 
@@ -950,7 +1002,9 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
     });
 
     if (existing) {
-      return res.status(409).json({ message: "Email already registered. Please Login." });
+      return res
+        .status(409)
+        .json({ message: "Email already registered. Please Login." });
     }
 
     otpDoc = await VerifyOtpModel.findOne({
@@ -969,7 +1023,9 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
 
     const ageMs = Date.now() - new Date(otpDoc.createdAt).getTime();
     if (ageMs > OTP_TTL_MIN * 60 * 1000) {
-      return res.status(400).json({ message: "OTP expired. Please resend otp." });
+      return res
+        .status(400)
+        .json({ message: "OTP expired. Please resend otp." });
     }
 
     const incomingHash = hashOtp(normalizedEmail, String(otp).trim());
@@ -983,15 +1039,18 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
     );
 
     if (!claim || claim.modifiedCount !== 1) {
-      return res.status(409).json({ message: "OTP already used or being processed" });
+      return res
+        .status(409)
+        .json({ message: "OTP already used or being processed" });
     }
 
     otpClaimed = true;
 
     const payload = otpDoc.signupPayload || {};
-    const countryName = payload?.country?.name;
+    const cleanName = String(payload?.name || "").trim();
+    const countryName = String(payload?.country?.name || "").trim();
 
-    if (!payload?.name || !String(payload.name).trim()) {
+    if (!cleanName) {
       await VerifyOtpModel.updateOne(
         { _id: otpDoc._id, status: 2 },
         { $set: { status: 0 } }
@@ -1023,40 +1082,117 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
 
     const cleanLanguages = Array.isArray(payload?.languages)
       ? payload.languages
-          .filter((l) => l && typeof l.name === "string" && l.name.trim().length > 0)
-          .map((l) => ({
-            _id: l._id || undefined,
-            name: String(l.name).trim(),
-          }))
+        .filter(
+          (l) => l && typeof l.name === "string" && l.name.trim().length > 0
+        )
+        .map((l) => ({
+          _id: l._id || undefined,
+          name: String(l.name).trim(),
+        }))
       : [];
 
     const cleanCategories = Array.isArray(payload?.categories)
       ? payload.categories
-          .filter((c) => c && typeof c.name === "string" && c.name.trim().length > 0)
-          .map((c) => ({
-            _id: c._id || undefined,
-            name: String(c.name).trim(),
-          }))
+        .filter(
+          (c) => c && typeof c.name === "string" && c.name.trim().length > 0
+        )
+        .map((c) => ({
+          _id: c._id || undefined,
+          name: String(c.name).trim(),
+        }))
       : [];
 
-    createdInfluencer = await InfluencerModel.create({
-      influencerId: uuidv4(),
-      email: normalizedEmail,
-      name: String(payload.name).trim(),
-      location: location || "",
-      countryId: payload?.country?._id || undefined,
-      countryName: String(countryName).trim(),
-      country: String(countryName).trim(),
-      languages: cleanLanguages,
-      categories: cleanCategories,
-      password: payload.password,
-      primaryPlatform: null,
-      page1: [],
-      page2: [],
-      page3: [],
-      ispage2Skip: false,
-      ispage3Skip: false,
-    });
+    const slugifyInfluencerName = (name = "") => {
+      const base = String(name || "")
+        .trim()
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "");
+
+      return base || "influencer";
+    };
+
+    const generateUniqueInfluencerProxyEmail = async (name) => {
+      const base = slugifyInfluencerName(name);
+      const escapedBase = escapeRegExp(base);
+      const escapedDomain = escapeRegExp(proxyMailDomain);
+
+      const regex = new RegExp(
+        `^${escapedBase}(\\d+)?@${escapedDomain}$`,
+        "i"
+      );
+
+      const rows = await InfluencerModel.find(
+        { proxyEmail: regex },
+        "proxyEmail"
+      ).lean();
+
+      let baseTaken = false;
+      let maxSuffix = 1;
+
+      for (const row of rows) {
+        const proxy = String(row?.proxyEmail || "").toLowerCase();
+        const localPart = proxy.split("@")[0];
+
+        if (localPart === base) {
+          baseTaken = true;
+          continue;
+        }
+
+        const match = localPart.match(
+          new RegExp(`^${escapedBase}(\\d+)$`, "i")
+        );
+
+        if (match) {
+          const suffixNum = Number(match[1]);
+          if (Number.isFinite(suffixNum) && suffixNum > maxSuffix) {
+            maxSuffix = suffixNum;
+          }
+        }
+      }
+
+      const localPart = baseTaken ? `${base}${maxSuffix + 1}` : base;
+      return `${localPart}@${proxyMailDomain}`;
+    };
+
+    let proxyEmail = await generateUniqueInfluencerProxyEmail(cleanName);
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        createdInfluencer = await InfluencerModel.create({
+          influencerId: uuidv4(),
+          email: normalizedEmail,
+          name: cleanName,
+          location: location || "",
+          countryId: payload?.country?._id || undefined,
+          countryName,
+          country: countryName,
+          languages: cleanLanguages,
+          categories: cleanCategories,
+          password: payload.password,
+          primaryPlatform: null,
+          page1: [],
+          page2: [],
+          page3: [],
+          ispage2Skip: false,
+          ispage3Skip: false,
+          proxyEmail,
+        });
+
+        break;
+      } catch (createErr) {
+        if (createErr?.code === 11000 && createErr?.keyPattern?.proxyEmail) {
+          proxyEmail = await generateUniqueInfluencerProxyEmail(cleanName);
+          continue;
+        }
+        throw createErr;
+      }
+    }
+
+    if (!createdInfluencer) {
+      throw new Error("Unable to allocate proxy email");
+    }
 
     await VerifyOtpModel.updateOne(
       { _id: otpDoc._id, status: 2 },
@@ -1085,6 +1221,7 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
     return res.status(201).json({
       message: "Influencer signup successful",
       influencerId: createdInfluencer._id.toString(),
+      proxyEmail: createdInfluencer.proxyEmail,
       token,
       route: routeInfo.route,
       onboarding: {
@@ -1117,10 +1254,20 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
 
     if (err?.code === 11000) {
       if (err?.keyPattern?.email) {
-        return res.status(409).json({ message: "Email already registered. Please Login." });
+        return res
+          .status(409)
+          .json({ message: "Email already registered. Please Login." });
       }
 
-      return res.status(409).json({ message: "Duplicate data found. Please try again." });
+      if (err?.keyPattern?.proxyEmail) {
+        return res.status(409).json({
+          message: "Proxy email conflict. Please try again.",
+        });
+      }
+
+      return res
+        .status(409)
+        .json({ message: "Duplicate data found. Please try again." });
     }
 
     return res.status(500).json({ message: "Internal server error" });
@@ -1515,11 +1662,11 @@ exports.getCampaignsByInfluencer = async (req, res) => {
     // support both Mongo _id and public influencerId
     const influencerLookup = mongoose.Types.ObjectId.isValid(String(influencerId))
       ? {
-          $or: [
-            { _id: new mongoose.Types.ObjectId(String(influencerId)) },
-            { influencerId: String(influencerId) },
-          ],
-        }
+        $or: [
+          { _id: new mongoose.Types.ObjectId(String(influencerId)) },
+          { influencerId: String(influencerId) },
+        ],
+      }
       : { influencerId: String(influencerId) };
 
     const influencer = await InfluencerModel.findOne(

@@ -1,6 +1,7 @@
-// src/model/influencer.js
 const mongoose = require("mongoose");
-const { Schema, model } = mongoose;
+const { Schema, model, models } = mongoose;
+
+const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const NamedRefSchema = new Schema(
   {
@@ -12,34 +13,59 @@ const NamedRefSchema = new Schema(
 
 const InfluencerSchema = new Schema(
   {
+    email: {
+      type: String,
+      required: true,
+      unique: true,
+      lowercase: true,
+      trim: true,
+      match: [emailRegex, "Invalid email"],
+    },
 
-    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-    name: { type: String, trim: true },
+    name: { type: String, trim: true, default: "" },
 
-    // ✅ country
     countryId: { type: Schema.Types.ObjectId, ref: "Country", required: false },
     countryName: { type: String, required: true, trim: true },
 
-    // ✅ multi-select language
     languages: { type: [NamedRefSchema], default: [] },
-
-    // ✅ multi-select categories
     categories: { type: [NamedRefSchema], default: [] },
 
     password: { type: String },
 
-    // ✅ onboarding pages
     page1: { type: [Schema.Types.Mixed], required: true, default: [] },
     page2: { type: [Schema.Types.Mixed], default: [] },
     page3: { type: [Schema.Types.Mixed], default: [] },
 
-    // ✅ skip flags
     ispage2Skip: { type: Boolean, default: false },
     ispage3Skip: { type: Boolean, default: false },
+
+    proxyEmail: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      default: undefined,
+      validate: {
+        validator(value) {
+          return !value || emailRegex.test(value);
+        },
+        message: "Invalid proxy email",
+      },
+    },
   },
   { timestamps: true }
 );
 
-const InfluencerModel = model("Influencer", InfluencerSchema);
+// unique only when proxyEmail exists and is not empty
+InfluencerSchema.index(
+  { proxyEmail: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      proxyEmail: { $type: "string", $ne: "" },
+    },
+  }
+);
+
+const InfluencerModel = models.Influencer || model("Influencer", InfluencerSchema);
 
 module.exports = { InfluencerModel };
