@@ -387,6 +387,8 @@ exports.updateStatus = async (req, res) => {
       });
     }
 
+
+    
     admin.status = status;
     if (role) admin.role = role;
     if (accessProvided) admin.access = access;
