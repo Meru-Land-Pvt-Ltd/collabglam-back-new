@@ -1797,13 +1797,39 @@ exports.prefillCampaignWithAI = async (req, res) => {
 exports.getAllCampaigns = async (req, res) => {
   try {
     const filter = {};
+
     if (req.query.brandId && isOid(req.query.brandId)) {
       filter.brandId = toObjectId(req.query.brandId);
     }
-    const campaigns = await Campaign.find(filter).sort({ createdAt: -1 }).lean();
-    return res.json(campaigns);
+
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
+    const skip = (page - 1) * limit;
+
+    const [campaigns, total] = await Promise.all([
+      Campaign.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Campaign.countDocuments(filter)
+    ]);
+
+    return res.json({
+      data: campaigns,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+        hasNextPage: page * limit < total,
+        hasPrevPage: page > 1
+      }
+    });
   } catch (error) {
-    return res.status(500).json({ message: "Internal server error while fetching campaigns." });
+    return res.status(500).json({
+      message: "Internal server error while fetching campaigns."
+    });
   }
 };
 
@@ -2556,8 +2582,8 @@ exports.getAcceptedInfluencers = async (req, res) => {
           primaryProfile && typeof primaryProfile.followers === "number"
             ? primaryProfile.followers
             : typeof inf.followerCount === "number"
-            ? inf.followerCount
-            : 0,
+              ? inf.followerCount
+              : 0,
         primaryPlatform: inf.primaryPlatform || null,
         primaryProvider: primaryProfile ? primaryProfile.provider : null,
       };
@@ -3845,11 +3871,11 @@ exports.viewCampaignByIdForInfluencer = async (req, res) => {
     // support both Mongo _id and custom influencerId
     const influencerLookup = mongoose.Types.ObjectId.isValid(influencerIdRaw)
       ? {
-          $or: [
-            { _id: influencerIdRaw },
-            { influencerId: influencerIdRaw }
-          ]
-        }
+        $or: [
+          { _id: influencerIdRaw },
+          { influencerId: influencerIdRaw }
+        ]
+      }
       : { influencerId: influencerIdRaw };
 
     const influencerDoc = await Influencer.findOne(influencerLookup)
@@ -3953,11 +3979,11 @@ exports.getAllActiveCampaignsForInfluencer = async (req, res) => {
     // support both Mongo _id and custom influencerId
     const influencerLookup = mongoose.Types.ObjectId.isValid(String(influencerId))
       ? {
-          $or: [
-            { _id: influencerId },
-            { influencerId: String(influencerId) }
-          ]
-        }
+        $or: [
+          { _id: influencerId },
+          { influencerId: String(influencerId) }
+        ]
+      }
       : { influencerId: String(influencerId) };
 
     const influencer = await Influencer.findOne(influencerLookup, "_id influencerId").lean();

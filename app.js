@@ -106,7 +106,7 @@ app.use('/notifications', notificationsRoutes);
 app.use('/emails', emailRoutes);
 app.use('/newinvitations', Invitationsroutes);
 app.use('/youtube', youtubeRoutes);
-app.use('/admin-invitations', campaignInvitationRoutes);
+app.use('/campaign-invitation', campaignInvitationRoutes);
 app.use('/deliverable', delieverableRoutes);
 app.use('/list', listRoutes);
 app.use('/wallet', brandWalletRoutes);
