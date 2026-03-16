@@ -2363,7 +2363,7 @@ exports.getAcceptedCampaigns = async (req, res) => {
       signedCountByCampaign.set(key, (signedCountByCampaign.get(key) || 0) + 1);
     }
 
-    const filter = { campaignsId: { $in: campaignIds } };
+    const filter = { _id: { $in: campaignIds } };
     if (search?.trim()) filter.$or = buildSearchOr(search.trim());
 
     const skip = (Math.max(1, parseInt(page, 10)) - 1) * Math.max(1, parseInt(limit, 10));
@@ -2378,7 +2378,7 @@ exports.getAcceptedCampaigns = async (req, res) => {
         ...camp, contractId: contractMap.get(String(camp.campaignsId)) || null,
         influencerId: influencerMap.get(String(camp.campaignsId)) || null, feeAmount: feeMap.get(String(camp.campaignsId)) || 0,
         contractStatus: statusMap.get(String(camp.campaignsId)) || null, isAccepted: 1,
-        totalAcceptedMembers: signedCountByCampaign.get(String(camp.campaignsId)) || 0, applicantCount: Math.max(0, (Number(camp.applicantCount) || 0)),
+        totalAcceptedMembers: signedCountByCampaign.get(String(camp._id)) || 0, applicantCount: Math.max(0, (Number(camp.applicantCount) || 0)),
       })),
     });
   } catch (err) {

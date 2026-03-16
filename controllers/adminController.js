@@ -1,8 +1,9 @@
 // controllers/adminController.js
+const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const Admin = require('../models/admin');
 const Brand = require('../models/brand'); // Assuming you have a Brand model
-const Influencer = require('../models/influencer'); // Assuming you have an Influencer model
+const { InfluencerModel: Influencer } = require('../models/influencer'); // Assuming you have an Influencer model
 const Campaign = require('../models/campaign');
 const Milestone = require('../models/milestone'); // Assuming you have a Milestone model
 const Modash = require('../models/modash');
@@ -191,12 +192,16 @@ exports.adminAssignInfluencerPlan = async (req, res) => {
       expiresAt,
     });
 
-    const updated = await Influencer.findOneAndUpdate(
-      { influencerId },
+    if (!mongoose.Types.ObjectId.isValid(influencerId)) {
+      return res.status(400).json({ message: "Valid influencer _id required" });
+    }
+
+    const updated = await Influencer.findByIdAndUpdate(
+      influencerId,
       { $set: { subscription, subscriptionExpired: false } },
       { new: true }
     )
-      .select("influencerId name email subscription subscriptionExpired")
+      .select("_id name email subscription subscriptionExpired")
       .lean();
 
     if (!updated) return res.status(404).json({ message: "Influencer not found" });
@@ -219,28 +224,50 @@ function normalizeHandle(h) {
 }
 
 exports.login = async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password)
-    return res.status(400).json({ message: 'Email & password are required' });
+  try {
+    const { email, password } = req.body;
 
-  const admin = await Admin.findOne({ email: email.toLowerCase() });
-  if (!admin || !(await admin.correctPassword(password))) {
-    return res.status(401).json({ message: 'Invalid credentials' });
+    console.log('LOGIN BODY:', req.body);
+
+    const normalizedEmail = email?.trim().toLowerCase();
+    const admin = await Admin.findOne({ email: normalizedEmail });
+
+    console.log('FOUND ADMIN:', admin ? {
+      email: admin.email,
+      adminId: admin.adminId,
+      password: admin.password
+    } : null);
+
+    if (!admin) {
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const isMatch = await admin.correctPassword(password);
+    console.log('PASSWORD MATCH:', isMatch);
+
+    if (!isMatch) {
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign(
+      { adminId: admin.adminId, email: admin.email },
+      process.env.JWT_SECRET,
+      { expiresIn: '12h' }
+    );
+
+    return res.json({
+      message: 'Login successful',
+      token,
+      admin: {
+        adminId: admin.adminId,
+        email: admin.email
+      }
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    return res.status(500).json({ message: 'Server error' });
   }
-
-  const token = jwt.sign(
-    { adminId: admin.adminId, email: admin.email },
-    process.env.JWT_SECRET,
-    { expiresIn: '12h' }
-  );
-
-  res.json({
-    message: 'Login successful',
-    token,
-    admin: { adminId: admin.adminId, email: admin.email }
-  });
 };
-
 
 exports.getAllBrands = async (req, res) => {
   try {
@@ -290,41 +317,38 @@ exports.getAllBrands = async (req, res) => {
 };
 
 
-// controllers/influencerController.js
 exports.getList = async (req, res) => {
   try {
-    // 1) Pull pagination, search & sort params from the body
     const page = Math.max(parseInt(req.body.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 10, 1), 100);
     const search = (req.body.search || '').trim();
     const sortBy = req.body.sortBy || 'name';
     const sortOrder = (req.body.sortOrder || 'asc').toLowerCase();
 
-    // 2) Build filter (searching name or email)
     const filter = {};
     if (search) {
       const re = new RegExp(search, 'i');
-      filter.$or = [{ name: re }, { email: re }];
+      filter.$or = [
+        { name: re },
+        { email: re },
+        { countryName: re },
+        { proxyEmail: re }
+      ];
     }
 
-    // 3) Get total count for pagination meta
     const total = await Influencer.countDocuments(filter);
 
-    // 4) Validate sort inputs & build sort object
-    const ALLOWED_SORT = ['name', 'email', 'createdAt'];
+    const ALLOWED_SORT = ['name', 'email', 'countryName', 'createdAt'];
     const field = ALLOWED_SORT.includes(sortBy) ? sortBy : 'name';
     const dir = sortOrder === 'desc' ? -1 : 1;
-    const sortObj = { [field]: dir };
 
-    // 5) Fetch the page
     const influencers = await Influencer.find(filter)
       .select('-password -__v')
-      .sort(sortObj)
+      .sort({ [field]: dir })
       .skip((page - 1) * limit)
       .limit(limit)
       .lean();
 
-    // 6) Return structured response
     return res.status(200).json({
       page,
       limit,
@@ -420,20 +444,31 @@ exports.getAllCampaigns = async (req, res) => {
 
 exports.getBrandById = async (req, res) => {
   try {
-    const brandId = req.query.id;
-    if (!brandId) return res.status(400).json({ message: 'Query parameter id is required.' });
+    const id = req.query.id;
 
-    // exclude password, internal fields
-    const brandDoc = await Brand.findOne({ brandId })
-      .select('-password -_id -__v')
+    if (!id) {
+      return res.status(400).json({ message: 'Query parameter id is required.' });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid brand _id.' });
+    }
+
+    const brandDoc = await Brand.findById(id)
+      .select('-password -__v')
       .lean();
-    if (!brandDoc) return res.status(404).json({ message: 'Brand not found.' });
 
-    // fetch wallet balance
-    const milestoneDoc = await Milestone.findOne({ brandId }).lean();
+    if (!brandDoc) {
+      return res.status(404).json({ message: 'Brand not found.' });
+    }
+
+    const milestoneDoc = await Milestone.findOne({ brandId: brandDoc.brandId }).lean();
     const walletBalance = milestoneDoc ? milestoneDoc.walletBalance : 0;
 
-    return res.status(200).json({ ...brandDoc, walletBalance });
+    return res.status(200).json({
+      ...brandDoc,
+      walletBalance
+    });
   } catch (error) {
     console.error('Error in getBrandById:', error);
     return res.status(500).json({ message: 'Internal server error while fetching brand.' });
@@ -443,55 +478,43 @@ exports.getBrandById = async (req, res) => {
 // controllers/influencerController.js
 exports.getByInfluencerId = async (req, res) => {
   try {
-    // 1) Pull influencerId from query
-    const influencerId = req.query.id;
-    if (!influencerId) {
-      return res
-        .status(400)
-        .json({ message: 'Query parameter id is required.' });
+    const id = req.query.id;
+
+    if (!id) {
+      return res.status(400).json({ message: 'Query parameter id is required.' });
     }
 
-    // 2) Fetch influencer (basic profile / onboarding / etc.)
-    const influencer = await Influencer.findOne(
-      { influencerId },
-      '-password -__v'
-    ).lean();
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid influencer _id.' });
+    }
+
+    const influencer = await Influencer.findById(id)
+      .select('-password -__v')
+      .lean();
 
     if (!influencer) {
       return res.status(404).json({ message: 'Influencer not found' });
     }
 
-    // 3) Fetch Modash data for this influencer
-    //    We try via ObjectId link *or* via influencerId string
     const modashProfiles = await Modash.find(
       {
         $or: [
-          { influencer: influencer._id },              // linked via ref
-          { influencerId: influencer.influencerId }    // backup by string
+          { influencer: influencer._id },
+          { influencerId: String(influencer._id) }
         ]
       },
-      '-__v -providerRaw' // optional: hide heavy/raw fields
+      '-__v -providerRaw'
     ).lean();
 
-    // If you only ever want the Modash for the primary platform:
-    // const modashProfile = await Modash.findOne(
-    //   { influencer: influencer._id, provider: influencer.primaryPlatform },
-    //   '-__v -providerRaw'
-    // ).lean();
-
-    // 4) Send combined data back
     return res.status(200).json({
       influencer,
-      modash: modashProfiles    // or `modash: modashProfile` if using single
+      modash: modashProfiles
     });
   } catch (error) {
     console.error('Error fetching influencer & Modash by ID:', error);
-    return res
-      .status(500)
-      .json({ message: 'Internal server error' });
+    return res.status(500).json({ message: 'Internal server error' });
   }
 };
-
 
 exports.getCampaignById = async (req, res) => {
   try {
@@ -617,16 +640,20 @@ exports.getCampaignsByBrandId = async (req, res) => {
   }
 };
 
-
 exports.adminGetInfluencerById = async (req, res) => {
   try {
     const id = req.body?.id || req.body?.influencerId;
+
     if (!id) {
-      return res.status(400).json({ message: 'Body parameter "id" (influencerId) is required.' });
+      return res.status(400).json({ message: 'Body parameter "id" is required.' });
     }
 
-    const influencer = await Influencer.findOne({ influencerId: id })
-      .select('-password -__v') // return full doc except sensitive/internal fields
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid influencer _id.' });
+    }
+
+    const influencer = await Influencer.findById(id)
+      .select('-password -__v')
       .lean();
 
     if (!influencer) {
@@ -640,48 +667,40 @@ exports.adminGetInfluencerById = async (req, res) => {
   }
 };
 
-
 exports.adminGetInfluencerList = async (req, res) => {
   try {
-    // 1) Parse inputs
     const page = Math.max(parseInt(req.body.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 10, 1), 100);
     const search = (req.body.search || '').trim();
     const sortBy = (req.body.sortBy || 'createdAt').trim();
     const sortOrder = String(req.body.sortOrder || 'desc').toLowerCase();
 
-    // 2) Build filter (search across name/email/phone/primaryPlatform/_ac/influencerId/planName)
     const filter = {};
     if (search) {
       const re = new RegExp(escapeRegex(search), 'i');
       filter.$or = [
         { name: re },
         { email: re },
-        { phone: re },
-        { primaryPlatform: re },
-        { influencerId: re },
-        { _ac: re }, // tokenized autocomplete array
+        { countryName: re },
+        { proxyEmail: re },
         { 'subscription.planName': re }
       ];
     }
 
-    // 3) Count total
     const total = await Influencer.countDocuments(filter);
 
-    // 4) Sorting
     const ALLOWED_SORT = new Set([
       'name',
       'email',
-      'phone',
-      'primaryPlatform',
+      'countryName',
       'createdAt',
-      'planName',     // maps to subscription.planName
-      'expiresAt'     // maps to subscription.expiresAt
+      'planName',
+      'expiresAt'
     ]);
+
     const field = ALLOWED_SORT.has(sortBy) ? sortBy : 'createdAt';
     const dir = sortOrder === 'asc' ? 1 : -1;
 
-    // Build sort object (handle nested plan fields)
     const sortObj = {};
     if (field === 'planName') {
       sortObj['subscription.planName'] = dir;
@@ -690,41 +709,37 @@ exports.adminGetInfluencerList = async (req, res) => {
     } else {
       sortObj[field] = dir;
     }
-    // tie-breaker
     sortObj.createdAt = -1;
 
-    // 5) Fetch data (only necessary fields + plan & expiry)
     const docs = await Influencer.find(filter)
-      .select('influencerId name email phone primaryPlatform subscription.planName subscription.expiresAt subscriptionExpired createdAt')
+      .select('_id name email countryName proxyEmail subscription.planName subscription.expiresAt subscriptionExpired createdAt')
       .sort(sortObj)
       .skip((page - 1) * limit)
       .limit(limit)
       .lean();
 
-    // 5a) Shape response and compute expiry flag robustly
     const now = new Date();
-    const influencers = docs.map(d => {
+
+    const influencers = docs.map((d) => {
       const planName = d.subscription?.planName ?? 'free';
       const expiresAt = d.subscription?.expiresAt ?? null;
 
-      // Treat as expired if explicit flag set OR expiry date in the past
       const isExpired =
         Boolean(d.subscriptionExpired) ||
         (expiresAt ? new Date(expiresAt) < now : false);
 
       return {
-        influencerId: d.influencerId,
+        _id: d._id,
         name: d.name || '',
         email: d.email || '',
-        phone: d.phone || '',
-        primaryPlatform: d.primaryPlatform ?? null,
+        countryName: d.countryName || '',
+        proxyEmail: d.proxyEmail || '',
         planName,
         expiresAt,
-        subscriptionExpired: isExpired
+        subscriptionExpired: isExpired,
       };
     });
 
-    // 6) Respond
     return res.status(200).json({
       page,
       limit,
@@ -1180,7 +1195,9 @@ exports.getAllPayments = async (req, res) => {
     // Fetch details in parallel
     const [brands, influencers] = await Promise.all([
       Brand.find({ brandId: { $in: brandIds } }).select('brandId name brandName email').lean(),
-      Influencer.find({ influencerId: { $in: influencerIds } }).select('influencerId name influencerName email').lean()
+      Influencer.find({ _id: { $in: influencerIds.filter(id => mongoose.Types.ObjectId.isValid(id)) } })
+  .select('_id name email')
+  .lean()
     ]);
 
     // Create lookup maps
@@ -1189,10 +1206,10 @@ exports.getAllPayments = async (req, res) => {
       brandMap[b.brandId] = b.name || b.brandName || b.email || 'Unknown Brand';
     });
 
-    const influencerMap = {};
-    influencers.forEach(i => {
-      influencerMap[i.influencerId] = i.name || i.influencerName || i.email || 'Unknown Influencer';
-    });
+const influencerMap = {};
+influencers.forEach(i => {
+  influencerMap[String(i._id)] = i.name || i.email || 'Unknown Influencer';
+});
 
     // 7) Format Response
     const data = payments.map(p => {
