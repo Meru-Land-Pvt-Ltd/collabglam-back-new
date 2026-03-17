@@ -216,7 +216,7 @@ const sendControllerError = (res, requestId, err) => {
 };
 
 const pickStatus = (v) => {
-  const allowed = ["draft", "active", "paused", "completed", "archived"];
+  const allowed = ["draft", "scheduled", "active", "paused", "completed", "archived"];
   const s = clean(v);
   return allowed.includes(s) ? s : "draft";
 };
@@ -547,6 +547,79 @@ const parseCampaignWindowForUpdate = (body, tz, requestId, res, opts = {}) => {
   return { ok: true, value: { startAt: startAtUtc, endAt: endAtUtc } };
 };
 
+const parseSchedule = (body, tz, requestId, res) => {
+  const scheduledAtStr = clean(body.scheduledAt);
+  if (!scheduledAtStr) {
+    return {
+      ok: false,
+      resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "scheduledAt", requestId),
+    };
+  }
+
+  const scheduledAtUtc = toUtcFromLocalOrAbsolute(scheduledAtStr, tz);
+  if (!scheduledAtUtc) {
+    return {
+      ok: false,
+      resp: failField(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "scheduledAt",
+        requestId,
+        "Invalid scheduledAt format"
+      ),
+    };
+  }
+
+  const chk = assertNotPastUtc(scheduledAtUtc, tz, "scheduledAt");
+  if (!chk.ok) {
+    return {
+      ok: false,
+      resp: failField(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "scheduledAt",
+        requestId,
+        chk.message
+      ),
+    };
+  }
+
+  const win = parseCampaignWindow(body, tz, requestId, res, true);
+  if (!win.ok) return win;
+
+  const startRaw = clean(body.startAt);
+  const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(startRaw);
+
+  const startLimitUtc = isDateOnly
+    ? DateTime.fromISO(startRaw, { zone: normalizeTimezone(tz) }).endOf("day").toUTC().toJSDate()
+    : win.value.startAt;
+
+  if (scheduledAtUtc.getTime() > startLimitUtc.getTime()) {
+    return {
+      ok: false,
+      resp: failField(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "scheduledAt",
+        requestId,
+        "scheduledAt must be <= startAt"
+      ),
+    };
+  }
+
+  return {
+    ok: true,
+    value: {
+      scheduledAt: scheduledAtUtc,
+      startAt: win.value.startAt,
+      endAt: win.value.endAt,
+    },
+  };
+};
+
 const parseDraftWindowSoft = (body, tz) => {
   const startAtUtc = toUtcDateFromAny(body.startAt, tz);
   const endAtUtc = toUtcDateFromAny(body.endAt, tz);
@@ -555,9 +628,16 @@ const parseDraftWindowSoft = (body, tz) => {
   return { startAt: startAtUtc, endAt: endAtUtc };
 };
 
-const inferMode = (statusRaw) => {
+const inferMode = (statusRaw, scheduledAt) => {
+  if (clean(scheduledAt)) return "schedule";
+
+  const statusStr = clean(statusRaw);
+  if (!statusStr) return "publish";
+
   const status = pickStatus(statusRaw);
-  return status === "draft" ? "draft" : "publish";
+  if (status === "draft") return "draft";
+  if (status === "scheduled") return "schedule";
+  return "publish";
 };
 
 const findBrandDocByAnyId = async (brandId) => {
@@ -745,6 +825,14 @@ const validateForMode = async (res, requestId, mode, body, opts = {}) => {
   if (!hasDateInput(body.endAt)) {
     return { ok: false, resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "endAt", requestId) };
   }
+  if (mode === "schedule") {
+    if (!hasDateInput(body.scheduledAt)) {
+      return {
+        ok: false,
+        resp: failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "scheduledAt", requestId),
+      };
+    }
+  }
 
   return {
     ok: true,
@@ -790,22 +878,23 @@ const buildCampaignDoc = (body, geo, status, byAi, timing, extra = {}) => {
   const minFollowers = toInt(body.minFollowers);
   const maxFollowers = toInt(body.maxFollowers);
 
+  const createdLocation = {
+    ip: geo?.ip,
+    timezone: geo?.timezone,
+    country: geo?.country,
+    state: geo?.state,
+    city: geo?.city,
+    latitude: typeof geo?.latitude === "number" ? geo.latitude : undefined,
+    longitude: typeof geo?.longitude === "number" ? geo.longitude : undefined,
+    source: geo?.source,
+  };
+
   const base = {
     brandId: toObjectId(body.brandId),
     brandName: clean(extra.brandName) || "",
     byAi,
 
-    createdLocation: {
-      ip: geo?.ip,
-      timezone: geo?.timezone,
-      country: geo?.country,
-      state: geo?.state,
-      city: geo?.city,
-      latitude: typeof geo?.latitude === "number" ? geo.latitude : undefined,
-      longitude: typeof geo?.longitude === "number" ? geo.longitude : undefined,
-      source: geo?.source,
-    },
-
+    createdLocation,
     createdBy: extra.createdBy || null,
     approvalMode: extra.approvalMode || "direct",
 
@@ -866,6 +955,7 @@ const buildCampaignDoc = (body, geo, status, byAi, timing, extra = {}) => {
       : [],
   };
 
+  if (timing?.scheduledAt) base.scheduledAt = timing.scheduledAt;
   if (timing?.startAt) base.startAt = timing.startAt;
   if (timing?.endAt) base.endAt = timing.endAt;
 
@@ -876,7 +966,22 @@ const buildCampaignDoc = (body, geo, status, byAi, timing, extra = {}) => {
     };
   }
 
-  if (status === "active") base.publishedAt = new Date();
+  if (status === "active") {
+    base.publishedAt = new Date();
+    base.scheduledAt = undefined;
+    base.scheduledLocation = undefined;
+  }
+
+  if (status === "draft") {
+    base.publishedAt = undefined;
+    base.scheduledAt = undefined;
+    base.scheduledLocation = undefined;
+  }
+
+  if (status === "scheduled") {
+    base.publishedAt = undefined;
+    base.scheduledLocation = createdLocation;
+  }
 
   return base;
 };
@@ -1346,15 +1451,21 @@ exports.createCampaign = async (req, res) => {
       String(brandDoc.brandId || brandDoc._id || req.body.brandId || "")
     );
 
-    const mode = inferMode(req.body.status);
+    const mode = inferMode(req.body.status, req.body.scheduledAt);
     const v = await validateForMode(res, requestId, mode, req.body);
     if (!v.ok) return v.resp;
 
-    const status = mode === "draft" ? "draft" : "active";
+    const status =
+      mode === "draft" ? "draft" : mode === "schedule" ? "scheduled" : "active";
 
     let timing = {};
+
     if (status === "draft") {
       timing = parseDraftWindowSoft(req.body, campaignTz);
+    } else if (status === "scheduled") {
+      const sch = parseSchedule(req.body, campaignTz, requestId, res);
+      if (!sch.ok) return sch.resp;
+      timing = sch.value;
     } else {
       const win = parseCampaignWindow(req.body, campaignTz, requestId, res, true);
       if (!win.ok) return win.resp;
@@ -1838,20 +1949,43 @@ exports.getAllCampaigns = async (req, res) => {
 // ===============================
 exports.getCampaignById = async (req, res) => {
   try {
-    const campaignId = clean(req.query.id);
-    if (!campaignId || !isOid(campaignId)) {
-      return res.status(400).json({ message: "Valid campaign id is required." });
+    const brandId = clean(req.body.brandId);
+    const campaignId = clean(req.body.campaignId);
+
+    if (!brandId || !isOid(brandId)) {
+      return res.status(400).json({ message: "Valid brandId is required." });
     }
 
-    const campaign = await Campaign.findById(campaignId).lean();
-    if (!campaign) return res.status(404).json({ message: "Campaign not found." });
+    if (!campaignId || !isOid(campaignId)) {
+      return res.status(400).json({ message: "Valid campaignId is required." });
+    }
+
+    const campaign = await Campaign.findOne({
+      _id: campaignId,
+      brandId: brandId,
+    }).lean();
+
+    if (!campaign) {
+      return res.status(404).json({ message: "Campaign not found." });
+    }
 
     const actorIsAdmin = isAdminRequest(req);
     const actorBrandId = String(req.user?.brandId || "");
-    const isOwnerBrand = !actorIsAdmin && actorBrandId && actorBrandId === String(campaign.brandId);
+    const isOwnerBrand =
+      !actorIsAdmin &&
+      actorBrandId &&
+      actorBrandId === String(campaign.brandId);
 
-    if ((actorIsAdmin || isOwnerBrand) && campaign.pendingUpdate?.status === "pending" && campaign.pendingUpdate?.patch) {
-      return res.json({ ...campaign, pendingApproval: 1, pendingPatch: campaign.pendingUpdate.patch });
+    if (
+      (actorIsAdmin || isOwnerBrand) &&
+      campaign.pendingUpdate?.status === "pending" &&
+      campaign.pendingUpdate?.patch
+    ) {
+      return res.json({
+        ...campaign,
+        pendingApproval: 1,
+        pendingPatch: campaign.pendingUpdate.patch,
+      });
     }
 
     return res.json(campaign);
@@ -3225,6 +3359,8 @@ exports.getCampaignHistoryByBrand = async (req, res) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 };
+
+
 exports.listApplicants = async (req, res) => {
   const { campaignId, page = 1, limit = 10, search = "", sortField = "createdAt", sortOrder = 1, audienceBucket = "all" } = req.body || {};
   if (!campaignId) return res.status(400).json({ message: "campaignId is required" });
@@ -3688,14 +3824,20 @@ exports.updateStatus = async (req, res) => {
       return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
     }
 
-    const allowedStatuses = ["draft", "active", "paused", "completed", "archived"];
+    const allowedStatuses = ["draft", "scheduled", "active", "paused", "completed", "archived"];
 
     if (!statusRaw || !allowedStatuses.includes(statusRaw)) {
-      return fail(res, 400, "VALIDATION_ERROR", `status must be one of: ${allowedStatuses.join(", ")}`, requestId);
+      return fail(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        `status must be one of: ${allowedStatuses.join(", ")}`,
+        requestId
+      );
     }
 
     const existing = await Campaign.findById(campaignId).select(
-      "_id status brandId publishedAt endAt isActive isDraft publishStatus statusUpdatedAt pausedAt"
+      "_id status brandId publishedAt endAt scheduledAt scheduledLocation endedAt isActive isDraft publishStatus statusUpdatedAt pausedAt"
     );
 
     if (!existing) {
@@ -3721,6 +3863,14 @@ exports.updateStatus = async (req, res) => {
       return fail(res, 400, "VALIDATION_ERROR", "Archived campaign status cannot be changed", requestId);
     }
 
+    if (newStatus === "scheduled" && currentStatus !== "draft") {
+      return fail(res, 400, "VALIDATION_ERROR", "Only draft campaigns can be moved to scheduled", requestId);
+    }
+
+    if (newStatus === "draft" && currentStatus !== "scheduled") {
+      return fail(res, 400, "VALIDATION_ERROR", "Only scheduled campaigns can be reverted to draft", requestId);
+    }
+
     existing.status = newStatus;
     existing.statusUpdatedAt = new Date();
 
@@ -3730,12 +3880,23 @@ exports.updateStatus = async (req, res) => {
     if (newStatus === "draft") {
       existing.publishStatus = "draft";
       existing.publishedAt = null;
+      existing.scheduledAt = null;
+      existing.scheduledLocation = null;
+      existing.pausedAt = null;
+    }
+
+    if (newStatus === "scheduled") {
+      existing.publishStatus = "published";
+      existing.publishedAt = null;
+      existing.isActive = 0;
       existing.pausedAt = null;
     }
 
     if (newStatus === "active") {
       existing.publishStatus = "published";
       existing.publishedAt = existing.publishedAt || new Date();
+      existing.scheduledAt = null;
+      existing.scheduledLocation = null;
       existing.pausedAt = null;
     }
 
@@ -3747,6 +3908,7 @@ exports.updateStatus = async (req, res) => {
     if (newStatus === "completed") {
       existing.publishStatus = "published";
       existing.isActive = 0;
+      existing.endedAt = existing.endedAt || new Date();
       existing.pausedAt = existing.pausedAt || new Date();
     }
 
@@ -4072,4 +4234,1289 @@ exports.getAllActiveCampaignsForInfluencer = async (req, res) => {
   } catch (err) {
     return sendControllerError(res, requestId, err);
   }
-};  
+};
+
+exports.getCampaignsByBrandId = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const brandId = clean(req.body.brandId);
+    if (!brandId || !isOid(brandId)) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid brandId is required", requestId);
+    }
+
+    const tz = getCampaignTimezone(req.body);
+    const nowUtc = DateTime.utc();
+
+    const page = clampInt(req.body.page, 1, 1, 1000000);
+    const limit = clampInt(req.body.limit, 20, 1, 200);
+    const skip = (page - 1) * limit;
+
+    // ---------------- helpers ----------------
+    const escapeRegexLocal = (s = "") =>
+      String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    const normalizeDateField = (value) => {
+      const raw = clean(value);
+      const allowed = ["createdAt", "updatedAt", "scheduledAt", "startAt", "endAt", "publishedAt"];
+      return allowed.includes(raw) ? raw : "createdAt";
+    };
+
+    const normalizeDatePreset = (value) => {
+      const raw = clean(value).toLowerCase().replace(/\s+/g, "");
+      const map = {
+        today: "today",
+        thisweek: "thisWeek",
+        thismonth: "thisMonth",
+        last7days: "last7days",
+        last7day: "last7days",
+        last15days: "last15days",
+        last15day: "last15days",
+        last30days: "last30days",
+        last30day: "last30days",
+        last90days: "last90days",
+        last90day: "last90days",
+        lastmonth: "lastMonth",
+        lastquarter: "lastQuarter",
+        last365days: "last365days",
+        last365day: "last365days",
+        next7days: "next7days",
+        next7day: "next7days",
+        next15days: "next15days",
+        next15day: "next15days",
+        next30days: "next30days",
+        next30day: "next30days",
+        next90days: "next90days",
+        next90day: "next90days",
+        launchingsoon: "launchingSoon",
+        launchsoon: "launchingSoon",
+      };
+      if (!raw || raw === "all" || raw === "alldates") return "";
+      return map[raw] || "";
+    };
+
+    const parseClientDateToUtc = (raw, timezone, boundary = "start") => {
+      const s = clean(raw);
+      if (!s) return null;
+
+      // dd/mm/yyyy
+      const ddmmyyyy = /^(\d{2})\/(\d{2})\/(\d{4})$/;
+      const m = s.match(ddmmyyyy);
+      if (m) {
+        const [, dd, mm, yyyy] = m;
+        const dt = DateTime.fromObject(
+          {
+            year: Number(yyyy),
+            month: Number(mm),
+            day: Number(dd),
+            hour: boundary === "end" ? 23 : 0,
+            minute: boundary === "end" ? 59 : 0,
+            second: boundary === "end" ? 59 : 0,
+            millisecond: boundary === "end" ? 999 : 0,
+          },
+          { zone: timezone }
+        );
+        return dt.isValid ? dt.toUTC().toJSDate() : null;
+      }
+
+      // yyyy-mm-dd
+      const isoDate = /^\d{4}-\d{2}-\d{2}$/;
+      if (isoDate.test(s)) {
+        const dt = DateTime.fromISO(s, { zone: timezone }).set({
+          hour: boundary === "end" ? 23 : 0,
+          minute: boundary === "end" ? 59 : 0,
+          second: boundary === "end" ? 59 : 0,
+          millisecond: boundary === "end" ? 999 : 0,
+        });
+        return dt.isValid ? dt.toUTC().toJSDate() : null;
+      }
+
+      // ISO datetime / absolute
+      const abs = toUtcFromLocalOrAbsolute(s, timezone);
+      if (!abs) return null;
+
+      if (s.length <= 10) {
+        const dt = DateTime.fromJSDate(abs, { zone: timezone }).set({
+          hour: boundary === "end" ? 23 : 0,
+          minute: boundary === "end" ? 59 : 0,
+          second: boundary === "end" ? 59 : 0,
+          millisecond: boundary === "end" ? 999 : 0,
+        });
+        return dt.isValid ? dt.toUTC().toJSDate() : null;
+      }
+
+      return abs;
+    };
+
+    const buildUtcRangeFromPreset = (preset, timezone) => {
+      const nowLocal = DateTime.now().setZone(timezone || "UTC");
+      const startOfToday = nowLocal.startOf("day");
+      const endOfToday = nowLocal.endOf("day");
+
+      const lastNDays = (n) => ({
+        from: nowLocal.minus({ days: n - 1 }).startOf("day").toUTC().toJSDate(),
+        to: endOfToday.toUTC().toJSDate(),
+      });
+
+      const nextNDays = (n) => ({
+        from: startOfToday.toUTC().toJSDate(),
+        to: nowLocal.plus({ days: n - 1 }).endOf("day").toUTC().toJSDate(),
+      });
+
+      if (preset === "today") {
+        return {
+          from: startOfToday.toUTC().toJSDate(),
+          to: endOfToday.toUTC().toJSDate(),
+        };
+      }
+
+      if (preset === "thisWeek") {
+        return {
+          from: nowLocal.startOf("week").toUTC().toJSDate(),
+          to: nowLocal.endOf("week").toUTC().toJSDate(),
+        };
+      }
+
+      if (preset === "thisMonth") {
+        return {
+          from: nowLocal.startOf("month").toUTC().toJSDate(),
+          to: nowLocal.endOf("month").toUTC().toJSDate(),
+        };
+      }
+
+      if (preset === "last7days") return lastNDays(7);
+      if (preset === "last15days") return lastNDays(15);
+      if (preset === "last30days") return lastNDays(30);
+      if (preset === "last90days") return lastNDays(90);
+      if (preset === "last365days") return lastNDays(365);
+
+      if (preset === "lastMonth") {
+        const m = nowLocal.minus({ months: 1 });
+        return {
+          from: m.startOf("month").toUTC().toJSDate(),
+          to: m.endOf("month").toUTC().toJSDate(),
+        };
+      }
+
+      if (preset === "lastQuarter") {
+        const q = Math.ceil(nowLocal.month / 3);
+        const prevQ = q === 1 ? 4 : q - 1;
+        const year = q === 1 ? nowLocal.year - 1 : nowLocal.year;
+        const startMonth = (prevQ - 1) * 3 + 1;
+
+        const start = DateTime.fromObject({ year, month: startMonth, day: 1 }, { zone: timezone }).startOf("day");
+        const end = start.plus({ months: 3 }).minus({ days: 1 }).endOf("day");
+
+        return { from: start.toUTC().toJSDate(), to: end.toUTC().toJSDate() };
+      }
+
+      if (preset === "next7days") return nextNDays(7);
+      if (preset === "next15days") return nextNDays(15);
+      if (preset === "next30days") return nextNDays(30);
+      if (preset === "next90days") return nextNDays(90);
+
+      return null;
+    };
+
+    const buildSort = (sortByRaw, sortOrderRaw, fallback = { updatedAt: -1 }) => {
+      const allowed = [
+        "createdAt",
+        "updatedAt",
+        "startAt",
+        "endAt",
+        "publishedAt",
+        "campaignTitle",
+        "campaignBudget",
+        "numberOfInfluencers",
+        "status",
+      ];
+
+      const sortBy = clean(sortByRaw);
+      const sortOrder = String(sortOrderRaw || "desc").toLowerCase() === "asc" ? 1 : -1;
+
+      if (!allowed.includes(sortBy)) return fallback;
+      return { [sortBy]: sortOrder };
+    };
+
+    const timeRemaining = (targetDate, now, expiredText = "Expired") => {
+      if (!targetDate) return { unit: null, value: null, text: null };
+
+      const target = DateTime.fromJSDate(new Date(targetDate)).toUTC();
+      if (!target.isValid) return { unit: null, value: null, text: null };
+
+      const diffMs = target.toMillis() - now.toMillis();
+      if (diffMs <= 0) {
+        return { unit: "expired", value: 0, text: expiredText };
+      }
+
+      const totalHours = Math.floor(diffMs / (1000 * 60 * 60));
+      const totalDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+      if (totalHours < 24) {
+        return { unit: "hours", value: totalHours, text: `${totalHours}h left` };
+      }
+
+      return { unit: "days", value: totalDays, text: `${totalDays}d left` };
+    };
+
+    // ---------------- Build filter ----------------
+    const filter = {
+      brandId: toObjectId(brandId),
+    };
+
+    // search
+    const search = clean(req.body.search);
+    if (search) {
+      filter.$or = buildSearchOr(search);
+    }
+
+    // byAi
+    if (req.body.byAi === 0 || req.body.byAi === 1 || req.body.byAi === "0" || req.body.byAi === "1") {
+      filter.byAi = Number(req.body.byAi);
+    }
+
+    // status
+    if (clean(req.body.status)) {
+      filter.status = pickStatus(req.body.status);
+    }
+
+    // campaignType
+    if (clean(req.body.campaignType)) {
+      filter.campaignType = {
+        $regex: new RegExp(escapeRegexLocal(clean(req.body.campaignType)), "i"),
+      };
+    }
+
+    // categoryIds / categoryId
+    const catIds = normalizeObjectIdArray(req.body.categoryIds ?? req.body.categoryId);
+    if (catIds.length) {
+      filter.categoryId = { $in: catIds.map((id) => toObjectId(id)) };
+    }
+
+    // subcategoryIds / subcategoryId
+    const subIds = normalizeObjectIdArray(req.body.subcategoryIds ?? req.body.subcategoryId);
+    if (subIds.length) {
+      filter.subcategoryIds = { $in: subIds.map((id) => toObjectId(id)) };
+    }
+
+    // date filters
+    const dateField = normalizeDateField(req.body.dateField);
+    const preset = normalizeDatePreset(req.body.datePreset);
+
+    if (preset === "launchingSoon") {
+      filter.status = "scheduled";
+      filter.scheduledAt = {
+        $exists: true,
+        $ne: null,
+        $gte: DateTime.utc().toJSDate(),
+      };
+    } else if (preset) {
+      const range = buildUtcRangeFromPreset(preset, tz);
+      if (range) {
+        filter[dateField] = { $gte: range.from, $lte: range.to };
+      }
+    } else {
+      const hasFrom = !!clean(req.body.dateFrom);
+      const hasTo = !!clean(req.body.dateTo);
+
+      const fromUtc = hasFrom ? parseClientDateToUtc(req.body.dateFrom, tz, "start") : null;
+      const toUtc = hasTo ? parseClientDateToUtc(req.body.dateTo, tz, "end") : null;
+
+      if (hasFrom && !fromUtc) {
+        return failField(
+          res,
+          400,
+          "VALIDATION_ERROR",
+          "dateFrom",
+          requestId,
+          "Invalid dateFrom. Use dd/mm/yyyy, yyyy-mm-dd, or ISO."
+        );
+      }
+
+      if (hasTo && !toUtc) {
+        return failField(
+          res,
+          400,
+          "VALIDATION_ERROR",
+          "dateTo",
+          requestId,
+          "Invalid dateTo. Use dd/mm/yyyy, yyyy-mm-dd, or ISO."
+        );
+      }
+
+      if (fromUtc || toUtc) {
+        if (fromUtc && toUtc && fromUtc.getTime() > toUtc.getTime()) {
+          return fail(res, 400, "VALIDATION_ERROR", "dateFrom must be <= dateTo", requestId);
+        }
+
+        filter[dateField] = {};
+        if (fromUtc) filter[dateField].$gte = fromUtc;
+        if (toUtc) filter[dateField].$lte = toUtc;
+      }
+    }
+
+    const sort = buildSort(req.body.sortBy, req.body.sortOrder, { updatedAt: -1 });
+
+    // ---------------- Fetch campaigns ----------------
+    const [items, total] = await Promise.all([
+      Campaign.find(filter)
+        .sort(sort)
+        .skip(skip)
+        .limit(limit)
+        .select(
+          [
+            "_id",
+            "campaignTitle",
+            "status",
+            "categoryId",
+            "subcategoryIds",
+            "numberOfInfluencers",
+            "platformSelection",
+            "productImages",
+            "createdAt",
+            "updatedAt",
+            "scheduledAt",
+            "startAt",
+            "endAt",
+            "publishedAt",
+            "campaignBudget",
+            "byAi",
+            "isActive",
+            "isDraft",
+          ].join(" ")
+        )
+        .lean(),
+      Campaign.countDocuments(filter),
+    ]);
+
+    // ---------------- Category map ----------------
+    const categoryIds = [
+      ...new Set(
+        items
+          .map((x) => String(x.categoryId || ""))
+          .filter((x) => isOid(x))
+      ),
+    ];
+
+    const cats = categoryIds.length
+      ? await Category.find({
+        _id: { $in: categoryIds.map((id) => toObjectId(id)) },
+      })
+        .select("_id name")
+        .lean()
+      : [];
+
+    const catMap = new Map(cats.map((c) => [String(c._id), c]));
+
+    // ---------------- Contract stats ----------------
+    const campaignIds = items.map((x) => String(x._id)).filter(Boolean);
+
+    const contractStatsRaw = campaignIds.length
+      ? await Contract.aggregate([
+        {
+          $match: {
+            brandId: { $in: [toObjectId(brandId), brandId] },
+            campaignId: { $in: campaignIds },
+          },
+        },
+        {
+          $group: {
+            _id: "$campaignId",
+            contractsCount: { $sum: 1 },
+            acceptedCount: {
+              $sum: {
+                $cond: [{ $eq: ["$isAccepted", 1] }, 1, 0],
+              },
+            },
+            assignedCount: {
+              $sum: {
+                $cond: [{ $eq: ["$isAssigned", 1] }, 1, 0],
+              },
+            },
+          },
+        },
+      ])
+      : [];
+
+    const contractMap = new Map(
+      contractStatsRaw.map((d) => [
+        String(d._id),
+        {
+          contractsCount: Number(d.contractsCount || 0),
+          acceptedCount: Number(d.acceptedCount || 0),
+          assignedCount: Number(d.assignedCount || 0),
+        },
+      ])
+    );
+
+    // ---------------- Build response ----------------
+    const out = items.map((c) => {
+      const cid = String(c._id);
+      const cat = isOid(String(c.categoryId || "")) ? catMap.get(String(c.categoryId)) : null;
+      const contractStats = contractMap.get(cid) || {
+        contractsCount: 0,
+        acceptedCount: 0,
+        assignedCount: 0,
+      };
+
+      return {
+        campaignId: cid,
+        campaignTitle: clean(c.campaignTitle),
+        status: c.status,
+
+        createdAt: c.createdAt ?? null,
+        updatedAt: c.updatedAt ?? null,
+        publishedAt: c.publishedAt ?? null,
+        scheduledAt: c.scheduledAt ?? null,
+        startAt: c.startAt ?? null,
+        endAt: c.endAt ?? null,
+
+        category: cat
+          ? { id: String(cat._id), name: String(cat.name || "") }
+          : null,
+
+        numberOfInfluencers:
+          typeof c.numberOfInfluencers === "number" ? c.numberOfInfluencers : null,
+
+        campaignBudget:
+          typeof c.campaignBudget === "number" ? c.campaignBudget : 0,
+
+        contractsCount: contractStats.contractsCount,
+        acceptedContracts: contractStats.acceptedCount,
+        assignedContracts: contractStats.assignedCount,
+
+        expireIn: timeRemaining(c.endAt || null, nowUtc, "Expired"),
+        scheduleIn:
+          c.status === "scheduled"
+            ? timeRemaining(c.scheduledAt || null, nowUtc, "Expired")
+            : { unit: null, value: null, text: null },
+
+        startIn: timeRemaining(c.startAt || null, nowUtc, "Started"),
+
+        platformSelection: Array.isArray(c.platformSelection) ? c.platformSelection : [],
+        productImages: Array.isArray(c.productImages) ? c.productImages : [],
+
+        byAi: Number(c.byAi || 0),
+        isActive: Number(c.isActive || 0),
+        isDraft: Number(c.isDraft || 0),
+      };
+    });
+
+    return ApiResponse.sendOk(
+      res,
+      200,
+      {
+        items: out,
+        meta: {
+          total,
+          page,
+          limit,
+          totalPages: Math.max(1, Math.ceil(total / limit)),
+        },
+      },
+      requestId
+    );
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
+  }
+};
+
+
+//edit draft campaign - only allows updating certain fields, and only if campaign is still in draft mode
+
+exports.editDraftCampaign = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const brandId = clean(req.body.brandId);
+    const campaignId = clean(req.body.campaignId);
+
+    if (!brandId || !isOid(brandId)) {
+      return fail(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "Valid brandId is required", requestId);
+    }
+
+    if (!campaignId || !isOid(campaignId)) {
+      return fail(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
+    }
+
+    const existing = await Campaign.findOne({
+      _id: toObjectId(campaignId),
+      brandId: toObjectId(brandId),
+      status: "draft",
+      isDraft: 1,
+    });
+
+    if (!existing) {
+      return fail(res, HttpStatus.NOT_FOUND, "NOT_FOUND", "Draft campaign not found (or not editable)", requestId);
+    }
+
+    const campaignTz = getCampaignTimezone(req.body, existing.campaignTimezone);
+    const geo = await detectGeoFromRequest(req);
+
+    const update = { $set: {}, $unset: {} };
+    const validateView = {}; // keep string/plain values for validateForMode
+
+    const cleanAny = (value) => {
+      if (value === undefined || value === null) return "";
+      return String(value).trim();
+    };
+
+    const setOrUnsetString = (key, value) => {
+      if (value === undefined) return;
+      const s = cleanAny(value);
+      if (!s) {
+        update.$unset[key] = 1;
+        validateView[key] = undefined;
+      } else {
+        update.$set[key] = s;
+        validateView[key] = s;
+      }
+    };
+
+    const setOrUnsetIdArray = (key, value) => {
+      if (value === undefined) return;
+      const ids = normalizeObjectIdArray(value);
+      if (!ids.length) {
+        update.$unset[key] = 1;
+        validateView[key] = [];
+      } else {
+        update.$set[key] = ids.map((id) => toObjectId(id));
+        validateView[key] = ids;
+      }
+    };
+
+    const setOrUnsetDateField = (key, value, tz) => {
+      if (value === undefined) return;
+
+      const raw = cleanAny(value);
+      if (!raw) {
+        update.$unset[key] = 1;
+        validateView[key] = undefined;
+        return;
+      }
+
+      const parsed = toUtcDateFromAny(raw, tz);
+      if (!parsed) throw new Error(`Invalid ${key}`);
+
+      update.$set[key] = parsed;
+      validateView[key] = parsed;
+    };
+
+    // campaignTitle
+    if (req.body.campaignTitle !== undefined) {
+      const s = cleanAny(req.body.campaignTitle);
+      if (!s) {
+        return failField(
+          res,
+          HttpStatus.BAD_REQUEST,
+          "VALIDATION_ERROR",
+          "campaignTitle",
+          requestId
+        );
+      }
+      update.$set.campaignTitle = s;
+      validateView.campaignTitle = s;
+    }
+
+    // optional strings
+    setOrUnsetString("description", req.body.description);
+    setOrUnsetString("campaignType", req.body.campaignType);
+    setOrUnsetString("additionalNotes", req.body.additionalNotes);
+
+    // product images
+    if (req.body.productImages !== undefined) {
+      const imgs = toUnknownArray(req.body.productImages);
+      if (!imgs.length) {
+        update.$unset.productImages = 1;
+        validateView.productImages = [];
+      } else {
+        update.$set.productImages = imgs;
+        validateView.productImages = imgs;
+      }
+    }
+
+    // productLink
+    if (req.body.productLink !== undefined) {
+      const link = cleanAny(req.body.productLink);
+      if (link && !isValidHttpUrl(link)) {
+        return failField(
+          res,
+          HttpStatus.BAD_REQUEST,
+          "VALIDATION_ERROR",
+          "productLink",
+          requestId,
+          "productLink must be a valid http/https URL"
+        );
+      }
+      if (!link) {
+        update.$unset.productLink = 1;
+        validateView.productLink = undefined;
+      } else {
+        update.$set.productLink = link;
+        validateView.productLink = link;
+      }
+    }
+
+    // videoLink
+    if (req.body.videoLink !== undefined) {
+      const link = cleanAny(req.body.videoLink);
+      if (link && !isValidHttpUrl(link)) {
+        return failField(
+          res,
+          HttpStatus.BAD_REQUEST,
+          "VALIDATION_ERROR",
+          "videoLink",
+          requestId,
+          "videoLink must be a valid http/https URL"
+        );
+      }
+      if (!link) {
+        update.$unset.videoLink = 1;
+        validateView.videoLink = undefined;
+      } else {
+        update.$set.videoLink = link;
+        validateView.videoLink = link;
+      }
+    }
+
+    // categoryId
+    if (req.body.categoryId !== undefined) {
+      const s = cleanAny(req.body.categoryId);
+
+      if (!s) {
+        update.$unset.categoryId = 1;
+        update.$unset.subcategoryIds = 1;
+        update.$unset.campaignCategory = 1;
+        update.$unset.campaignSubcategory = 1;
+        update.$unset.categories = 1;
+
+        validateView.categoryId = undefined;
+        validateView.subcategoryIds = [];
+      } else {
+        if (!isOid(s)) {
+          return failField(
+            res,
+            HttpStatus.BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "categoryId",
+            requestId,
+            "Invalid categoryId"
+          );
+        }
+
+        update.$set.categoryId = toObjectId(s);   // DB value
+        validateView.categoryId = s;              // validation value
+      }
+    }
+
+    // subcategoryIds
+    if (req.body.subcategoryIds !== undefined) {
+      const ids = normalizeObjectIdArray(req.body.subcategoryIds);
+
+      if (!ids.length) {
+        update.$unset.subcategoryIds = 1;
+        update.$unset.campaignSubcategory = 1;
+        update.$unset.categories = 1;
+        validateView.subcategoryIds = [];
+      } else {
+        update.$set.subcategoryIds = ids.map((id) => toObjectId(id)); // DB value
+        validateView.subcategoryIds = ids;                            // validation value
+      }
+    }
+
+    // object-id arrays
+    setOrUnsetIdArray("campaignGoals", req.body.campaignGoals);
+    setOrUnsetIdArray("influencerTierIds", req.body.influencerTierIds);
+    setOrUnsetIdArray("contentFormats", req.body.contentFormats);
+    setOrUnsetIdArray("contentLanguageIds", req.body.contentLanguageIds);
+    setOrUnsetIdArray("targetCountryIds", req.body.targetCountryIds);
+    setOrUnsetIdArray("targetAgeRanges", req.body.targetAgeRanges);
+    setOrUnsetIdArray("preferredHashtags", req.body.preferredHashtags);
+
+    // platformSelection
+    if (req.body.platformSelection !== undefined) {
+      const ps = toPlatformArray(req.body.platformSelection);
+      if (!ps.length) {
+        update.$unset.platformSelection = 1;
+        validateView.platformSelection = [];
+      } else {
+        update.$set.platformSelection = ps;
+        validateView.platformSelection = ps;
+      }
+    }
+
+    // paymentType
+    if (req.body.paymentType !== undefined) {
+      const p = cleanAny(req.body.paymentType);
+      if (!p) {
+        update.$unset.paymentType = 1;
+        validateView.paymentType = undefined;
+      } else {
+        const normalized = normalizePaymentType(p);
+        update.$set.paymentType = normalized;
+        validateView.paymentType = normalized;
+      }
+    }
+
+    // campaignBudget / budget
+    if (req.body.campaignBudget !== undefined) {
+      const raw = cleanAny(req.body.campaignBudget);
+
+      if (!raw) {
+        update.$unset.campaignBudget = 1;
+        update.$unset.budget = 1;
+        validateView.campaignBudget = undefined;
+      } else {
+        const n = Number(raw);
+
+        if (!Number.isFinite(n) || n < 0) {
+          return failField(
+            res,
+            HttpStatus.BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "campaignBudget",
+            requestId,
+            "campaignBudget must be >= 0"
+          );
+        }
+
+        update.$set.campaignBudget = n;
+        update.$set.budget = n;
+        validateView.campaignBudget = n;
+      }
+    }
+
+    // influencerBudget
+    if (req.body.influencerBudget !== undefined) {
+      const raw = cleanAny(req.body.influencerBudget);
+
+      if (!raw) {
+        update.$unset.influencerBudget = 1;
+        validateView.influencerBudget = undefined;
+      } else {
+        const n = Number(raw);
+
+        if (!Number.isFinite(n) || n < 0) {
+          return failField(
+            res,
+            HttpStatus.BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "influencerBudget",
+            requestId,
+            "influencerBudget must be >= 0"
+          );
+        }
+
+        update.$set.influencerBudget = n;
+        validateView.influencerBudget = n;
+      }
+    }
+
+    // numeric fields
+    const numericFields = ["numberOfInfluencers", "minFollowers", "maxFollowers"];
+    for (const field of numericFields) {
+      if (req.body[field] === undefined) continue;
+
+      const raw = cleanAny(req.body[field]);
+
+      if (!raw) {
+        update.$unset[field] = 1;
+        validateView[field] = undefined;
+        continue;
+      }
+
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0) {
+        return failField(
+          res,
+          HttpStatus.BAD_REQUEST,
+          "VALIDATION_ERROR",
+          field,
+          requestId,
+          `${field} must be a valid non-negative number`
+        );
+      }
+
+      update.$set[field] = Math.trunc(n);
+      validateView[field] = Math.trunc(n);
+    }
+
+    // dates
+    try {
+      setOrUnsetDateField("startAt", req.body.startAt, campaignTz);
+      setOrUnsetDateField("endAt", req.body.endAt, campaignTz);
+
+      if (req.body.campaignTimezone !== undefined) {
+        update.$set.campaignTimezone = campaignTz;
+        validateView.campaignTimezone = campaignTz;
+      }
+    } catch (e) {
+      return fail(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        e.message || "Invalid date",
+        requestId
+      );
+    }
+
+    // keep category display fields in sync
+    const mergedCategoryId =
+      validateView.categoryId !== undefined
+        ? String(validateView.categoryId)
+        : update.$unset.categoryId
+          ? ""
+          : existing.categoryId
+            ? String(existing.categoryId)
+            : "";
+
+    const mergedSubIds =
+      validateView.subcategoryIds !== undefined
+        ? validateView.subcategoryIds.map((x) => String(x))
+        : update.$unset.subcategoryIds
+          ? []
+          : Array.isArray(existing.subcategoryIds)
+            ? existing.subcategoryIds.map((x) => String(x))
+            : [];
+
+    if (mergedCategoryId && mergedSubIds.length) {
+      const rel = await resolveCategoryAndSubcategories(mergedCategoryId, mergedSubIds);
+
+      if (rel.error) {
+        return failField(
+          res,
+          HttpStatus.BAD_REQUEST,
+          "VALIDATION_ERROR",
+          "subcategoryIds",
+          requestId,
+          rel.error
+        );
+      }
+
+      update.$set.campaignCategory = rel?.cat?.name || "";
+      update.$set.campaignSubcategory = Array.isArray(rel?.subs)
+        ? rel.subs.map((s) => String(s.name || "")).join(", ")
+        : "";
+
+      update.$set.categories = Array.isArray(rel?.subs)
+        ? rel.subs.map((sub, idx) => ({
+            categoryId: mergedCategoryId,
+            categoryName: rel?.cat?.name || "",
+            subcategoryId: String(mergedSubIds[idx] || ""),
+            subcategoryName: String(sub.name || ""),
+          }))
+        : [];
+    } else if (update.$unset.categoryId || update.$unset.subcategoryIds) {
+      update.$unset.campaignCategory = 1;
+      update.$unset.campaignSubcategory = 1;
+      update.$unset.categories = 1;
+    }
+
+    // timeline sync
+    const mergedStartAt =
+      update.$set.startAt !== undefined
+        ? update.$set.startAt
+        : update.$unset.startAt
+          ? null
+          : existing.startAt || null;
+
+    const mergedEndAt =
+      update.$set.endAt !== undefined
+        ? update.$set.endAt
+        : update.$unset.endAt
+          ? null
+          : existing.endAt || null;
+
+    if (mergedStartAt && mergedEndAt) {
+      update.$set.timeline = {
+        startDate: mergedStartAt,
+        endDate: mergedEndAt,
+      };
+    } else if (update.$unset.startAt || update.$unset.endAt) {
+      update.$unset.timeline = 1;
+    }
+
+    const hasSetBeforeStatus = Object.keys(update.$set).length > 0;
+    const hasUnsetBeforeStatus = Object.keys(update.$unset).length > 0;
+
+    const requestedStatus = req.body.status ? pickStatus(req.body.status) : "draft";
+
+    if (requestedStatus === "active") {
+      const merged = {
+        ...existing.toObject(),
+        ...validateView, // <-- use plain/string values for validator
+        productImages:
+          validateView.productImages !== undefined
+            ? validateView.productImages
+            : existing.productImages || [],
+        categoryId:
+          validateView.categoryId !== undefined
+            ? validateView.categoryId
+            : existing.categoryId
+              ? String(existing.categoryId)
+              : undefined,
+        subcategoryIds:
+          validateView.subcategoryIds !== undefined
+            ? validateView.subcategoryIds
+            : Array.isArray(existing.subcategoryIds)
+              ? existing.subcategoryIds.map((x) => String(x))
+              : [],
+        status: "active",
+        brandId,
+      };
+
+      const v = await validateForMode(res, requestId, "publish", merged, {
+        existingProductImages: merged.productImages || [],
+      });
+      if (!v.ok) return v.resp;
+
+      const win = parseCampaignWindow(
+        {
+          ...existing.toObject(),
+          ...update.$set,
+          ...validateView,
+          status: "active",
+          brandId,
+        },
+        campaignTz,
+        requestId,
+        res,
+        true
+      );
+
+      if (!win.ok) return win.resp;
+
+      update.$set.status = "active";
+      update.$set.startAt = win.value.startAt;
+      update.$set.endAt = win.value.endAt;
+      update.$set.timeline = {
+        startDate: win.value.startAt,
+        endDate: win.value.endAt,
+      };
+      update.$set.publishedAt = existing.publishedAt || new Date();
+      update.$set.publishStatus = "published";
+      update.$set.isDraft = 0;
+      update.$set.isActive = 1;
+      update.$set.statusUpdatedAt = new Date();
+      update.$set.campaignTimezone = campaignTz;
+      update.$set.createdLocation = {
+        ip: geo?.ip,
+        timezone: geo?.timezone,
+        country: geo?.country,
+        state: geo?.state,
+        city: geo?.city,
+        latitude: typeof geo?.latitude === "number" ? geo.latitude : undefined,
+        longitude: typeof geo?.longitude === "number" ? geo.longitude : undefined,
+        source: geo?.source,
+      };
+    } else {
+      update.$set.status = "draft";
+      update.$set.publishStatus = "draft";
+      update.$set.isDraft = 1;
+      update.$set.isActive = 0;
+      update.$set.statusUpdatedAt = new Date();
+      update.$unset.publishedAt = 1;
+    }
+
+    if (!hasSetBeforeStatus && !hasUnsetBeforeStatus && !req.body.status) {
+      const enriched = (await enrichCampaigns([existing]))[0];
+      return ApiResponse.sendOk(res, HttpStatus.OK, { doc: enriched }, requestId);
+    }
+
+    if (Object.keys(update.$set).length === 0) delete update.$set;
+    if (Object.keys(update.$unset).length === 0) delete update.$unset;
+
+    const updated = await Campaign.findOneAndUpdate(
+      {
+        _id: toObjectId(campaignId),
+        brandId: toObjectId(brandId),
+        status: "draft",
+        isDraft: 1,
+      },
+      update,
+      { new: true }
+    );
+
+    if (!updated) {
+      return fail(
+        res,
+        HttpStatus.NOT_FOUND,
+        "NOT_FOUND",
+        "Draft campaign not found after update",
+        requestId
+      );
+    }
+
+    const enriched = (await enrichCampaigns([updated]))[0];
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.OK,
+      {
+        message:
+          requestedStatus === "active"
+            ? "Draft campaign published successfully."
+            : "Draft campaign updated successfully.",
+        doc: enriched,
+      },
+      requestId
+    );
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
+  }
+};
+exports.getDraftCampaigns = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const brandId = clean(req.body.brandId);
+    if (!brandId || !isOid(brandId)) {
+      return fail(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "Valid brandId is required", requestId);
+    }
+
+    const page = clampInt(req.body.page, 1, 1, 1000000);
+    const limit = clampInt(req.body.limit, 10, 1, 100);
+    const skip = (page - 1) * limit;
+
+    const normalizeDateField = (value) => {
+      const raw = clean(value);
+      const allowed = ["createdAt", "updatedAt", "startAt", "endAt", "publishedAt"];
+      return allowed.includes(raw) ? raw : "updatedAt";
+    };
+
+    const normalizeDatePreset = (value) => {
+      const raw = clean(value).toLowerCase();
+      const map = {
+        today: "today",
+        last7days: "last7days",
+        last_7_days: "last7days",
+        last30days: "last30days",
+        last_30_days: "last30days",
+        thisweek: "thisweek",
+        this_week: "thisweek",
+        thismonth: "thismonth",
+        this_month: "thismonth",
+      };
+      return map[raw] || "";
+    };
+
+    const parseClientDateToUtc = (raw, timezone, boundary = "start") => {
+      const s = clean(raw);
+      if (!s) return null;
+
+      const ddmmyyyy = /^(\d{2})\/(\d{2})\/(\d{4})$/;
+      const m = s.match(ddmmyyyy);
+      if (m) {
+        const [, dd, mm, yyyy] = m;
+        const dt = DateTime.fromObject(
+          {
+            year: Number(yyyy),
+            month: Number(mm),
+            day: Number(dd),
+            hour: boundary === "end" ? 23 : 0,
+            minute: boundary === "end" ? 59 : 0,
+            second: boundary === "end" ? 59 : 0,
+            millisecond: boundary === "end" ? 999 : 0,
+          },
+          { zone: timezone }
+        );
+        return dt.isValid ? dt.toUTC().toJSDate() : null;
+      }
+
+      const isoDate = /^\d{4}-\d{2}-\d{2}$/;
+      if (isoDate.test(s)) {
+        const dt = DateTime.fromISO(s, { zone: timezone }).set({
+          hour: boundary === "end" ? 23 : 0,
+          minute: boundary === "end" ? 59 : 0,
+          second: boundary === "end" ? 59 : 0,
+          millisecond: boundary === "end" ? 999 : 0,
+        });
+        return dt.isValid ? dt.toUTC().toJSDate() : null;
+      }
+
+      const abs = toUtcFromLocalOrAbsolute(s, timezone);
+      return abs || null;
+    };
+
+    const buildUtcRangeFromPreset = (preset, timezone) => {
+      const now = DateTime.now().setZone(timezone);
+
+      if (preset === "today") {
+        return {
+          from: now.startOf("day").toUTC().toJSDate(),
+          to: now.endOf("day").toUTC().toJSDate(),
+        };
+      }
+
+      if (preset === "last7days") {
+        return {
+          from: now.minus({ days: 6 }).startOf("day").toUTC().toJSDate(),
+          to: now.endOf("day").toUTC().toJSDate(),
+        };
+      }
+
+      if (preset === "last30days") {
+        return {
+          from: now.minus({ days: 29 }).startOf("day").toUTC().toJSDate(),
+          to: now.endOf("day").toUTC().toJSDate(),
+        };
+      }
+
+      if (preset === "thisweek") {
+        return {
+          from: now.startOf("week").toUTC().toJSDate(),
+          to: now.endOf("week").toUTC().toJSDate(),
+        };
+      }
+
+      if (preset === "thismonth") {
+        return {
+          from: now.startOf("month").toUTC().toJSDate(),
+          to: now.endOf("month").toUTC().toJSDate(),
+        };
+      }
+
+      return null;
+    };
+
+    const buildSortLocal = (sortByRaw, sortOrderRaw, fallback = { updatedAt: -1 }) => {
+      const allowed = [
+        "createdAt",
+        "updatedAt",
+        "startAt",
+        "endAt",
+        "publishedAt",
+        "campaignTitle",
+        "campaignBudget",
+        "numberOfInfluencers",
+        "status",
+      ];
+
+      const sortBy = clean(sortByRaw);
+      const sortOrder = String(sortOrderRaw || "desc").toLowerCase() === "asc" ? 1 : -1;
+
+      if (!allowed.includes(sortBy)) return fallback;
+      return { [sortBy]: sortOrder };
+    };
+
+    const tz = getCampaignTimezone(req.body);
+
+    // ---------------- Build filter ----------------
+    const filter = {
+      brandId: toObjectId(brandId),
+      status: "draft",
+      isDraft: 1,
+    };
+
+    // search
+    const search = clean(req.body.search);
+    if (search) {
+      filter.$or = buildSearchOr(search);
+    }
+
+    // byAi
+    if (req.body.byAi === 0 || req.body.byAi === 1 || req.body.byAi === "0" || req.body.byAi === "1") {
+      filter.byAi = Number(req.body.byAi);
+    }
+
+    // campaignType
+    if (clean(req.body.campaignType)) {
+      filter.campaignType = {
+        $regex: new RegExp(escapeRegex(clean(req.body.campaignType)), "i"),
+      };
+    }
+
+    // categoryIds / categoryId
+    const catIds = normalizeObjectIdArray(req.body.categoryIds ?? req.body.categoryId);
+    if (catIds.length) {
+      filter.categoryId = { $in: catIds.map((id) => toObjectId(id)) };
+    }
+
+    // subcategoryIds / subcategoryId
+    const subIds = normalizeObjectIdArray(req.body.subcategoryIds ?? req.body.subcategoryId);
+    if (subIds.length) {
+      filter.subcategoryIds = { $in: subIds.map((id) => toObjectId(id)) };
+    }
+
+    // date filters
+    const dateField = normalizeDateField(req.body.dateField);
+    const preset = normalizeDatePreset(req.body.datePreset);
+
+    if (preset) {
+      const range = buildUtcRangeFromPreset(preset, tz);
+      if (range) {
+        filter[dateField] = { $gte: range.from, $lte: range.to };
+      }
+    } else {
+      const hasFrom = !!clean(req.body.dateFrom);
+      const hasTo = !!clean(req.body.dateTo);
+
+      const fromUtc = hasFrom ? parseClientDateToUtc(req.body.dateFrom, tz, "start") : null;
+      const toUtc = hasTo ? parseClientDateToUtc(req.body.dateTo, tz, "end") : null;
+
+      if (hasFrom && !fromUtc) {
+        return failField(
+          res,
+          HttpStatus.BAD_REQUEST,
+          "VALIDATION_ERROR",
+          "dateFrom",
+          requestId,
+          "Invalid dateFrom. Use dd/mm/yyyy, yyyy-mm-dd, or ISO."
+        );
+      }
+
+      if (hasTo && !toUtc) {
+        return failField(
+          res,
+          HttpStatus.BAD_REQUEST,
+          "VALIDATION_ERROR",
+          "dateTo",
+          requestId,
+          "Invalid dateTo. Use dd/mm/yyyy, yyyy-mm-dd, or ISO."
+        );
+      }
+
+      if (fromUtc || toUtc) {
+        if (fromUtc && toUtc && fromUtc.getTime() > toUtc.getTime()) {
+          return fail(
+            res,
+            HttpStatus.BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "dateFrom must be <= dateTo",
+            requestId
+          );
+        }
+
+        filter[dateField] = {};
+        if (fromUtc) filter[dateField].$gte = fromUtc;
+        if (toUtc) filter[dateField].$lte = toUtc;
+      }
+    }
+
+    const sort = buildSortLocal(req.body.sortBy, req.body.sortOrder, { updatedAt: -1 });
+
+    const [items, total] = await Promise.all([
+      Campaign.find(filter).sort(sort).skip(skip).limit(limit),
+      Campaign.countDocuments(filter),
+    ]);
+
+    const enrichedItems = await enrichCampaigns(items);
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.OK,
+      {
+        items: enrichedItems,
+        meta: {
+          total,
+          page,
+          limit,
+          totalPages: Math.max(1, Math.ceil(total / limit)),
+        },
+      },
+      requestId
+    );
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
+  }
+};

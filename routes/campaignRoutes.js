@@ -20,7 +20,7 @@ router.post("/update-manual", brandAuth, campaignController.updateManualCampaign
 router.get("/getAll", brandAuth, campaignController.getAllCampaigns);
 
 // 4. Get one campaign by its campaignsId
-router.get("/id", campaignController.getCampaignById);
+router.post("/get-by-id", campaignController.getCampaignById);
 
 // 5. Delete a campaign by its campaignsId
 router.post("/delete", brandAuth, campaignController.deleteCampaignByCampaignId);
@@ -72,5 +72,10 @@ router.post(
   campaignController.getAllActiveCampaignsForInfluencer
 );
 
+
+router.post("/get-by-brand", brandAuth,campaignController.getCampaignsByBrandId);
+
+router.post("/edit-draft", brandAuth, campaignController.editDraftCampaign);
+router.post("/get-drafts", brandAuth, campaignController.getDraftCampaigns);
 
 module.exports = router;  

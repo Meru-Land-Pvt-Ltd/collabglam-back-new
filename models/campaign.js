@@ -1,6 +1,16 @@
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
 
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+const normalizePaymentType = (v) => {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "milestone") return "Milestone";
+  if (s === "fixed") return "Fixed";
+  if (s === "gifting") return "Gifting";
+  return "Milestone";
+};
+
 const actorSchema = new Schema(
   {
     role: { type: String, enum: ["brand", "admin"], required: true },
@@ -29,14 +39,14 @@ const pendingUpdateSchema = new Schema(
 
 const locationSchema = new Schema(
   {
-    ip: { type: String, default: "" },
-    timezone: { type: String, default: "" },
-    country: { type: String, default: "" },
-    state: { type: String, default: "" },
-    city: { type: String, default: "" },
+    ip: { type: String, trim: true, default: "" },
+    timezone: { type: String, trim: true, default: "" },
+    country: { type: String, trim: true, default: "" },
+    state: { type: String, trim: true, default: "" },
+    city: { type: String, trim: true, default: "" },
     latitude: { type: Number, default: null },
     longitude: { type: Number, default: null },
-    source: { type: String, default: "" },
+    source: { type: String, trim: true, default: "" },
   },
   { _id: false }
 );
@@ -79,7 +89,7 @@ const CampaignSchema = new Schema(
     videoLink: { type: String, trim: true, default: "" },
     productServiceInfo: { type: [Schema.Types.Mixed], default: [] },
 
-    campaignGoals: [{ type: Schema.Types.ObjectId, ref: "ProductServiceGoal" }],
+    campaignGoals: [{ type: Schema.Types.ObjectId, ref: "CampaignGoal" }],
     influencerTierIds: [{ type: Schema.Types.ObjectId, ref: "InfluencerTier" }],
     contentFormats: [{ type: Schema.Types.ObjectId, ref: "ContentFormat" }],
     contentLanguageIds: [{ type: Schema.Types.ObjectId, ref: "ContentLanguage" }],
@@ -87,8 +97,9 @@ const CampaignSchema = new Schema(
     targetCountryIds: [{ type: Schema.Types.ObjectId, ref: "Country" }],
     targetAgeRanges: [{ type: Schema.Types.ObjectId, ref: "AgeRange" }],
 
-    numberOfInfluencers: { type: Number, default: 0, min: 0 },
+    numberOfInfluencers: { type: Number, default: 1, min: 1 },
     influencerTier: { type: String, trim: true, default: "" },
+
     minFollowers: { type: Number, default: 0, min: 0 },
     maxFollowers: { type: Number, default: 0, min: 0 },
 
@@ -100,7 +111,13 @@ const CampaignSchema = new Schema(
     budget: { type: Number, default: 0, min: 0 },
     influencerBudget: { type: Number, default: 0, min: 0 },
 
-    paymentType: { type: String, trim: true, default: "Milestone" },
+    paymentType: {
+      type: String,
+      trim: true,
+      enum: ["Milestone", "Fixed", "Gifting"],
+      default: "Milestone",
+      set: normalizePaymentType,
+    },
 
     platformSelection: {
       type: [String],
@@ -112,18 +129,25 @@ const CampaignSchema = new Schema(
     hashtags: { type: [String], default: [] },
 
     campaignTimezone: { type: String, trim: true, default: "UTC" },
-    startAt: { type: Date, default: null },
-    endAt: { type: Date, default: null },
+
+    // scheduling fields
+    scheduledAt: { type: Date, default: null, index: true },
+    startAt: { type: Date, default: null, index: true },
+    endAt: { type: Date, default: null, index: true },
     publishedAt: { type: Date, default: null },
+    endedAt: { type: Date, default: null },
 
     createdLocation: { type: locationSchema, default: null },
+    scheduledLocation: { type: locationSchema, default: null },
+
+    draftExpiresAt: { type: Date, default: null, index: true },
 
     timeline: { type: timelineSchema, default: () => ({}) },
     categories: { type: [categoryPairSchema], default: [] },
 
     status: {
       type: String,
-      enum: ["draft", "active", "paused", "completed", "archived"],
+      enum: ["draft", "scheduled", "active", "paused", "completed", "archived"],
       default: "draft",
       index: true,
     },
@@ -160,6 +184,15 @@ const CampaignSchema = new Schema(
   }
 );
 
+// validation: maxFollowers must be >= minFollowers
+CampaignSchema.path("maxFollowers").validate(function (v) {
+  return Number.isFinite(v) && Number.isFinite(this.minFollowers) && v >= this.minFollowers;
+}, "maxFollowers must be >= minFollowers");
+
+// TTL index: delete only when draftExpiresAt time is reached
+CampaignSchema.index({ draftExpiresAt: 1 }, { expireAfterSeconds: 0 });
+
+// existing indexes
 CampaignSchema.index({ brandId: 1, createdAt: -1 });
 CampaignSchema.index({ brandId: 1, status: 1 });
 CampaignSchema.index({ brandId: 1, isDraft: 1, isActive: 1, createdAt: -1 });
@@ -167,6 +200,39 @@ CampaignSchema.index({ "pendingUpdate.status": 1, updatedAt: -1 });
 CampaignSchema.index({ categoryId: 1, subcategoryIds: 1 });
 CampaignSchema.index({ publishStatus: 1 });
 CampaignSchema.index({ status: 1, isDraft: 1, isActive: 1 });
+
+// schedule-related indexes
+CampaignSchema.index({ status: 1, scheduledAt: 1 });
+CampaignSchema.index({ status: 1, startAt: 1 });
+CampaignSchema.index({ status: 1, endAt: 1 });
+CampaignSchema.index({ brandId: 1, byAi: 1, createdAt: -1 });
+CampaignSchema.index({ categoryId: 1, createdAt: -1 });
+
+// auto set / unset draft expiry
+CampaignSchema.pre("save", function (next) {
+  if (this.status === "draft") {
+    this.draftExpiresAt = new Date(Date.now() + THIRTY_DAYS_MS);
+  } else {
+    this.draftExpiresAt = undefined;
+  }
+  next();
+});
+
+CampaignSchema.pre("findOneAndUpdate", function (next) {
+  const update = this.getUpdate() || {};
+  const status = update.status ?? (update.$set && update.$set.status);
+
+  if (status === "draft") {
+    update.$set = update.$set || {};
+    update.$set.draftExpiresAt = new Date(Date.now() + THIRTY_DAYS_MS);
+  } else if (status) {
+    update.$unset = update.$unset || {};
+    update.$unset.draftExpiresAt = 1;
+  }
+
+  this.setUpdate(update);
+  next();
+});
 
 module.exports =
   mongoose.models.Campaign || mongoose.model("Campaign", CampaignSchema);
