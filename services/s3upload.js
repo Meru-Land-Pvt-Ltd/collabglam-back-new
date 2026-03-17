@@ -1,14 +1,16 @@
 // services/s3upload.js
 const mongoose = require("mongoose");
-const EmailThreadModel = require("../model/emailthread");
-const EmailMessageModel = require("../model/emailMessage");
+const AdminEmailThreadModel = require("../models/adminEmailThread.js");
+const AdminEmailMessageModel = require("../models/adminEmailMessage.js");
 const { sendEmail, uploadEmailRecordToS3 } = require("./emailService");
-const { CampaignModel } = require("../model/compaign");
+const  CampaignModel  = require("../models/campaign.js");
 const { brandOutreachEmailTemplate } = require("../template/brandOutreach");
 
 function toObjectIdStrict(id, fieldName) {
   const clean = String(id || "").trim();
-  if (!mongoose.isValidObjectId(clean)) throw new Error(`Invalid ${fieldName}`);
+  if (!mongoose.isValidObjectId(clean)) {
+    throw new Error(`Invalid ${fieldName}`);
+  }
   return new mongoose.Types.ObjectId(clean);
 }
 
@@ -30,38 +32,55 @@ function getBrandEmail(brand) {
 async function sendEmailToBrandByCampaignId(input) {
   const { campaignId, subject, text, html, executiveId } = input;
 
-  if (!mongoose.isValidObjectId(String(campaignId).trim())) throw new Error("Invalid campaignId");
-  if (!subject || !String(subject).trim()) throw new Error("subject is required");
-  if (!text && !html) throw new Error("Either text or html is required");
+  if (!mongoose.isValidObjectId(String(campaignId).trim())) {
+    throw new Error("Invalid campaignId");
+  }
+  if (!subject || !String(subject).trim()) {
+    throw new Error("subject is required");
+  }
+  if (!text && !html) {
+    throw new Error("Either text or html is required");
+  }
 
   const execObj = toObjectIdStrict(executiveId, "executiveId");
   const campObj = toObjectIdStrict(campaignId, "campaignId");
 
   const from = process.env.MARKETING_EMAIL;
-  if (!from || !String(from).trim()) throw new Error("MARKETING_EMAIL is missing in env");
-
-  const campaign = await CampaignModel.findById(campaignId)
+  if (!from || !String(from).trim()) {
+    throw new Error("MARKETING_EMAIL is missing in env");
+  }
+console.log("Fetching campaign with ID:", campObj);
+  const campaign = await CampaignModel.findById(campObj)
     .select("brandId")
-    .populate({ path: "brandId", select: "email businessEmail contactEmail primaryEmail" })
+    .populate({
+      path: "brandId",
+      select: "email businessEmail contactEmail primaryEmail",
+    })
     .lean();
 
-  if (!campaign) throw new Error("Campaign not found");
+  if (!campaign) {
+    throw new Error("Campaign not found");
+  }
 
   const brand = campaign.brandId;
-  if (!brand?._id) throw new Error("brandId missing in campaign");
+  if (!brand?._id) {
+    throw new Error("brandId missing in campaign");
+  }
 
   const to = getBrandEmail(brand);
-  if (!to) throw new Error("Brand email not found");
+  if (!to) {
+    throw new Error("Brand email not found");
+  }
 
   // thread reuse ONLY when brandId + campaignId + executiveId match
-  let thread = await EmailThreadModel.findOne({
+  let thread = await AdminEmailThreadModel.findOne({
     brandId: brand._id,
     campaignId: campObj,
     executiveId: execObj,
   });
 
   if (!thread) {
-    thread = await EmailThreadModel.create({
+    thread = await AdminEmailThreadModel.create({
       brandId: brand._id,
       campaignId: campObj,
       executiveId: execObj,
@@ -76,7 +95,7 @@ async function sendEmailToBrandByCampaignId(input) {
   }
 
   // Save DB message WITHOUT body
-  const emailMsg = await EmailMessageModel.create({
+  const emailMsg = await AdminEmailMessageModel.create({
     threadId: thread._id,
     direction: "OUTBOUND",
     subject: String(subject).trim(),
@@ -89,7 +108,8 @@ async function sendEmailToBrandByCampaignId(input) {
     subject: String(subject).trim(),
     toEmail: to,
     headline: String(subject).trim(),
-    introHtml: `We’d love to collaborate with you. Please reply to this email for next steps.`,
+    introHtml:
+      "We’d love to collaborate with you. Please reply to this email for next steps.",
     bodyText: text || undefined,
     bodyHtml: html || undefined,
   });
@@ -111,11 +131,11 @@ async function sendEmailToBrandByCampaignId(input) {
       provider: "SES",
       threadId: String(thread._id),
       emailMessageId: String(emailMsg._id),
-      campaignId,
+      campaignId: String(campObj),
       brandId: String(brand._id),
       executiveId: String(execObj),
       to,
-      from,
+      from: String(from).trim().toLowerCase(),
       subject: templ.subject,
       text: templ.text,
       html: templ.html,
@@ -127,13 +147,15 @@ async function sendEmailToBrandByCampaignId(input) {
   }
 
   // Update DB pointers
-  await EmailMessageModel.updateOne(
+  await AdminEmailMessageModel.updateOne(
     { _id: emailMsg._id },
     {
       $set: {
-        messageId: messageId ?? undefined,
-        s3Key: s3Key ?? undefined,
-        s3Bucket: process.env.EMAIL_ARCHIVE_BUCKET ?? undefined,
+        ...(messageId ? { messageId } : {}),
+        ...(s3Key ? { s3Key } : {}),
+        ...(process.env.EMAIL_ARCHIVE_BUCKET
+          ? { s3Bucket: process.env.EMAIL_ARCHIVE_BUCKET }
+          : {}),
       },
     }
   );
@@ -141,11 +163,11 @@ async function sendEmailToBrandByCampaignId(input) {
   return {
     threadId: String(thread._id),
     emailMessageId: String(emailMsg._id),
-    sesMessageId: messageId,
+    sesMessageId: messageId || null,
     s3Key,
     to,
     brandId: String(brand._id),
-    campaignId,
+    campaignId: String(campObj),
     executiveId: String(execObj),
   };
 }
