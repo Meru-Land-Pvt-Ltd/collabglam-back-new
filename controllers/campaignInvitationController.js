@@ -630,3 +630,86 @@ exports.updateInvitationStatus = async (req, res) => {
     });
   }
 };
+
+exports.getInvitationsByBrandIdAndCampaignId = async (req, res) => {
+  try {
+    const brandId = String(req.body?.brandId || "").trim();
+    const campaignId = String(req.body?.campaignId || "").trim();
+
+    if (!isObjectId(brandId)) {
+      return res.status(400).json({
+        status: "error",
+        message: "Valid brandId is required",
+      });
+    }
+
+    if (!isObjectId(campaignId)) {
+      return res.status(400).json({
+        status: "error",
+        message: "Valid campaignId is required",
+      });
+    }
+
+    const filter = {
+      brandId: new mongoose.Types.ObjectId(brandId),
+      campaignId: new mongoose.Types.ObjectId(campaignId),
+    };
+
+    if (req.body?.status) {
+      filter.status = String(req.body.status).trim().toLowerCase();
+    }
+
+    if (req.body?.influencerId) {
+      const influencerId = String(req.body.influencerId).trim();
+
+      if (!isObjectId(influencerId)) {
+        return res.status(400).json({
+          status: "error",
+          message: "Invalid influencerId",
+        });
+      }
+
+      filter.influencerId = new mongoose.Types.ObjectId(influencerId);
+    }
+
+    if (req.body?.platform) {
+      filter.platform = String(req.body.platform).trim().toLowerCase();
+    }
+
+    if (req.body?.handle) {
+      const h = normalizeHandle(req.body.handle);
+
+      if (!h || !HANDLE_RX.test(h)) {
+        return res.status(400).json({
+          status: "error",
+          message: "Invalid handle format. Use @username",
+        });
+      }
+
+      filter.handle = h;
+    }
+
+    const invitations = await CampaignInvitation.find(filter)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const enriched = await enrichInvitations(invitations, {
+      includeCampaign: true,
+      includeNames: true,
+    });
+
+    return res.json({
+      status: "success",
+      total: enriched.length,
+      brandId,
+      campaignId,
+      invitations: enriched,
+    });
+  } catch (e) {
+    console.error("getInvitationsByBrandIdAndCampaignId error:", e);
+    return res.status(500).json({
+      status: "error",
+      message: "Internal server error",
+    });
+  }
+};

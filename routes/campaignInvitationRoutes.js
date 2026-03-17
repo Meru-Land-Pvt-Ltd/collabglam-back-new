@@ -20,4 +20,9 @@ router.get("/brand/:brandId", brandAuth, campaignInvitationController.getInvitat
 
 router.post("/update-status", influencerAuth,campaignInvitationController.updateInvitationStatus);
 
+router.post(
+  "/get-invitations",brandAuth,
+  campaignInvitationController.getInvitationsByBrandIdAndCampaignId
+);
+
 module.exports = router;       
