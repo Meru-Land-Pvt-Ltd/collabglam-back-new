@@ -22,6 +22,7 @@ const AdminSchema = new Schema(
     },
     name: { type: String, trim: true },
     role: { type: String, required: true },
+    proxyemail: { type: String, unique: true, sparse: true, lowercase: true, trim: true },
     status: {
       type: String,
       enum: ["pending", "active", "suspended", "inactive"],

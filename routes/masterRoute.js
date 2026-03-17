@@ -1,12 +1,24 @@
 const express = require("express");
+const multer = require("multer");
 const router = express.Router();
+
 const adminController = require("../controllers/masterController");
 const { adminAuth } = require("../middlewares/adminAuth");
+
+const upload = multer({ storage: multer.memoryStorage() });
+
 router.post("/login", adminController.adminLogin);
 router.post("/invite", adminController.inviteAdmin);
 router.post("/accept-invite", adminController.acceptInviteSetPassword);
 router.get("/list", adminController.listAdmins);
 router.put("/update-status", adminController.updateStatus);
-router.get("/me",adminAuth, adminController.adminMe);
+router.get("/me", adminAuth, adminController.adminMe);
+
+router.post(
+  "/send-bulk-csv",
+  adminAuth,
+  upload.single("file"),
+  adminController.sendBulkEmailCsv
+);
 
 module.exports = router;

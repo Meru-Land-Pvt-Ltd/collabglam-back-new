@@ -5,6 +5,7 @@ const { AdminModel } = require("../models/master");
 const INVITE_EXP_MINUTES = Number(process.env.INVITE_EXP_MINUTES || 60);
 const {sendEmail}=require("../services/emailService")
 const {adminInviteEmailTemplate} = require("../template/inviteRole")
+const { sendBulkEmailToCsvByCampaignId } =require ('../services/sendBulkEmailToCsv')
 // ======================
 // Local Helpers
 // ======================
@@ -388,7 +389,7 @@ exports.updateStatus = async (req, res) => {
     }
 
 
-    
+
     admin.status = status;
     if (role) admin.role = role;
     if (accessProvided) admin.access = access;
@@ -460,3 +461,50 @@ exports.adminMe = async (req, res) => {
     });
   }
 };
+
+exports.sendBulkEmailCsv = async (req, res) => {
+    try {
+      const admin = req.admin;
+      const executiveId = admin?.adminId;
+      console.log(req.body, req.file);
+      if (!executiveId) {
+        return res.status(401).json({
+          success: false,
+          message: "Unauthorized",
+        });
+      }
+  
+      const campaignId = String(req.body?.campaignId || "").trim();
+      const file = req.file; // multer
+      
+      if (!campaignId) {
+        return res.status(400).json({
+          success: false,
+          message: "campaignId is required",
+        });
+      }
+  
+      if (!file?.buffer) {
+        return res.status(400).json({
+          success: false,
+          message: "CSV file is required (field: file)",
+        });
+      }
+  
+      const result = await sendBulkEmailToCsvByCampaignId({
+        campaignId,
+        executiveId,
+        csvBuffer: file.buffer,
+      });
+  
+      return res.status(200).json({
+        success: true,
+        data: result,
+      });
+    } catch (e) {
+      return res.status(500).json({
+        success: false,
+        message: e?.message || "Internal error",
+      });
+    }
+  };
