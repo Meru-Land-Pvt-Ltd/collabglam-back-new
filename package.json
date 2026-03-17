@@ -19,6 +19,7 @@
     "body-parser": "^2.2.0",
     "cors": "^2.8.5",
     "country-codes-list": "^2.0.0",
+    "csv-parse": "^6.1.0",
     "docxtemplater": "^3.67.1",
     "exceljs": "^4.4.0",
     "express": "^5.1.0",
