@@ -1,4 +1,3 @@
-// src/model/adminEmailMessage.js
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
 
@@ -29,9 +28,25 @@ const adminEmailMessageSchema = new Schema(
       default: null,
       trim: true,
       lowercase: true,
+      index: true,
     },
 
     to: {
+      type: [String],
+      default: [],
+    },
+
+    cc: {
+      type: [String],
+      default: [],
+    },
+
+    bcc: {
+      type: [String],
+      default: [],
+    },
+
+    replyTo: {
       type: [String],
       default: [],
     },
@@ -42,6 +57,49 @@ const adminEmailMessageSchema = new Schema(
       index: true,
     },
 
+    inReplyTo: {
+      type: String,
+      default: null,
+      index: true,
+    },
+
+    references: {
+      type: [String],
+      default: [],
+    },
+
+    provider: {
+      type: String,
+      enum: ["SES"],
+      default: "SES",
+      index: true,
+    },
+
+    providerStatus: {
+      type: String,
+      enum: [
+        "QUEUED",
+        "SENT",
+        "DELIVERED",
+        "BOUNCED",
+        "COMPLAINED",
+        "FAILED",
+        "RECEIVED",
+      ],
+      default: "QUEUED",
+      index: true,
+    },
+
+    textPreview: {
+      type: String,
+      default: null,
+    },
+
+    htmlPreview: {
+      type: String,
+      default: null,
+    },
+
     s3Bucket: {
       type: String,
       default: null,
@@ -49,6 +107,11 @@ const adminEmailMessageSchema = new Schema(
 
     s3Key: {
       type: String,
+      default: null,
+    },
+
+    rawHeaders: {
+      type: Schema.Types.Mixed,
       default: null,
     },
   },

@@ -48,6 +48,7 @@ const brandWalletRoutes = require('./routes/brandWalletRoutes');
 const master=require('./routes/masterRoute');
 const supportRoutes = require("./routes/supportRoutes");
 const timezoneRoutes = require("./routes/timezoneRoutes");
+const adminEmailRoutes = require("./routes/adminEmailRoute");
 
 // sockets (Socket.IO + native WS)
 const sockets = require('./sockets');
@@ -115,6 +116,7 @@ app.use('/wallet', brandWalletRoutes);
 app.use('/admins', master);
 app.use("/support", supportRoutes);
 app.use('/timezone', timezoneRoutes);
+app.use("/admin-email", adminEmailRoutes);
 
 // Friendly 413 response (must be after body parsers)
 app.use((err, req, res, next) => {
