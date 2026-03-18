@@ -26,9 +26,9 @@ const FEATURE_KEYS = {
 
 function getEmitter(req, key) {
   try {
-    return req.app?.get?.(key) || (() => {});
+    return req.app?.get?.(key) || (() => { });
   } catch {
-    return () => {};
+    return () => { };
   }
 }
 
@@ -199,7 +199,10 @@ exports.applyToCampaign = async (req, res) => {
         $push: {
           applicants: {
             influencerId: String(influencerId),
-            name: inf.name || ''
+            name: inf.name || '',
+            isShortlisted: 0,
+            isUndicided: 0,
+            isRejected: 0
           }
         }
       },
@@ -707,6 +710,71 @@ exports.approveInfluencer = async (req, res) => {
     });
   } catch (err) {
     console.error('Error in approveInfluencer:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+/**
+ * POST /ApplyCampaigns/set-decision-status
+ * Body: {
+ *   campaignId,
+ *   influencerId,
+ *   field // "isShortlisted" | "isUndicided" | "isRejected"
+ * }
+ */
+exports.setApplicantDecisionStatus = async (req, res) => {
+  const { campaignId, influencerId, field } = req.body || {};
+
+  if (!campaignId || !influencerId || !field) {
+    return res.status(400).json({
+      message: 'campaignId, influencerId and field are required'
+    });
+  }
+
+  if (!isValidObjectId(campaignId) || !isValidObjectId(influencerId)) {
+    return res.status(400).json({
+      message: 'Invalid campaignId or influencerId'
+    });
+  }
+
+  if (!['isShortlisted', 'isUndicided', 'isRejected'].includes(field)) {
+    return res.status(400).json({
+      message: 'field must be one of: isShortlisted, isUndicided, isRejected'
+    });
+  }
+
+  try {
+    const updated = await ApplyCampaign.findOneAndUpdate(
+      {
+        campaignId: String(campaignId),
+        'applicants.influencerId': String(influencerId)
+      },
+      {
+        $set: {
+          'applicants.$.isShortlisted': field === 'isShortlisted' ? 1 : 0,
+          'applicants.$.isUndicided': field === 'isUndicided' ? 1 : 0,
+          'applicants.$.isRejected': field === 'isRejected' ? 1 : 0
+        }
+      },
+      { new: true }
+    ).lean();
+
+    if (!updated) {
+      return res.status(404).json({
+        message: 'Application record not found for this influencer in this campaign'
+      });
+    }
+
+    const applicant = updated.applicants.find(
+      (a) => String(a.influencerId) === String(influencerId)
+    );
+
+    return res.status(200).json({
+      message: 'Applicant status updated successfully',
+      applicant
+    });
+  } catch (err) {
+    console.error('Error in setApplicantDecisionStatus:', err);
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
