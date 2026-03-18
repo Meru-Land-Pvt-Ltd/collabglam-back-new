@@ -81,6 +81,31 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e);
 }
 
+async function loadSocialProfilesFromModashBulk(influencerIds = []) {
+  const docs = await Modash.find(
+    { influencerId: { $in: influencerIds.map((id) => String(id)) } },
+    "influencerId provider handle username followers url picture"
+  ).lean();
+
+  const grouped = {};
+
+  for (const d of docs) {
+    const key = String(d.influencerId);
+    if (!grouped[key]) grouped[key] = [];
+
+    grouped[key].push({
+      provider: d.provider,
+      handle: normalizeHandle(d.handle, d.username),
+      username: d.username || null,
+      followers: Number(d.followers) || 0,
+      url: d.url || null,
+      picture: d.picture || null,
+    });
+  }
+
+  return grouped;
+}
+
 function isValidObjectId(id) {
   return mongoose.Types.ObjectId.isValid(String(id || ""));
 }
@@ -1458,7 +1483,7 @@ exports.getById = async (req, res) => {
       return res.status(400).json({ message: 'Body parameter "id" (influencerId) is required.' });
     }
 
-    const influencer = await Influencer.findOne({ influencerId: id })
+    const influencer = await InfluencerModel.findOne({ _id: id })
       .select('-password -__v')
       .lean();
 
@@ -1474,6 +1499,59 @@ exports.getById = async (req, res) => {
   } catch (err) {
     console.error('Error in adminGetInfluencerById:', err);
     return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.getBulkByIds = async (req, res) => {
+  try {
+    const { influencerId } = req.body;
+
+    if (!Array.isArray(influencerId) || influencerId.length === 0) {
+      return res.status(400).json({
+        message: 'Body parameter "influencerId" must be a non-empty array.',
+      });
+    }
+
+    const cleanIds = [
+      ...new Set(
+        influencerId.map((id) => String(id || "").trim()).filter(Boolean)
+      ),
+    ];
+
+    const influencers = await InfluencerModel.find({
+      _id: { $in: cleanIds },
+    })
+      .select("-password -__v")
+      .lean();
+
+    const influencerMap = new Map(
+      influencers.map((inf) => [String(inf._id), inf])
+    );
+
+    const result = cleanIds.map((id) => {
+      const influencer = influencerMap.get(id);
+
+      if (!influencer) {
+        return {
+          influencerId: id,
+          found: false,
+          message: "Influencer not found",
+        };
+      }
+
+      return {
+        ...influencer,
+        found: true,
+      };
+    });
+
+    return res.status(200).json({
+      count: result.length,
+      influencers: result,
+    });
+  } catch (err) {
+    console.error("Error in getBulkByIds:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
