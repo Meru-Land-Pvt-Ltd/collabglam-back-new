@@ -70,12 +70,21 @@ const ALLOWED_BRAND_PATHS = [
   "content.scheduleA.commercial.advancePaymentTrigger",
   "content.campaign.paymentType",
   "content.scheduleA.commercial.paymentStructure",
+
   "content.scheduleA.commercial.milestones",
   "content.scheduleA.commercial.remainingPaymentTrigger",
   "content.scheduleA.commercial.paymentProcessorFeesBorneBy",
   "content.scheduleA.commercial.paymentProcessorFeesNotes",
   "content.scheduleA.commercial.laneAMarketplaceFeeNote",
-
+  "content.scheduleA.commercial.payoutMethod",
+  "content.scheduleA.commercial.payoutAccountId",
+  "content.scheduleA.commercial.taxId",
+  "content.scheduleA.commercial.milestones",
+  "content.scheduleA.commercial.paymentProcessorFeesBorneBy",
+  "content.scheduleA.commercial.paymentProcessorFeesNotes",
+  "content.scheduleA.commercial.laneAMarketplaceFeeNote",
+  "content.scheduleA.commercial.totalCampaignFee",
+  "content.scheduleA.commercial.currency",
   "content.scheduleA.rawFiles.rawSourceFileDelivery",
   "content.scheduleA.rawFiles.deliveryDue",
   "content.scheduleA.rawFiles.format",
@@ -425,7 +434,7 @@ function renderAgreementHeaderTableHTML(content = {}, tz = DEFAULT_TZ) {
   return renderKeyValueTable([
     ["Brand Legal Name", content?.brand?.legalName || ""],
     ["Brand Contact Person Name", content?.brand?.contactPersonName || ""],
-    ["Brand Notice Email / Phone", compactJoin([content?.brand?.noticeEmail, content?.brand?.noticePhone], " / ")],
+    // ["Brand Notice Email / Phone", compactJoin([content?.brand?.noticeEmail, content?.brand?.noticePhone], " / ")],
     ["Brand Billing Address", content?.brand?.billingAddress || ""],
     ["Influencer Legal Name / Entity", content?.influencer?.legalName || ""],
     ["Influencer Posting Handle URL", content?.influencer?.postingHandleUrl || ""],
@@ -590,13 +599,12 @@ function createDefaultContent({
   requestedEffectiveDateTimezone,
   contentInput = {},
 }) {
-  const effectiveDate =
-    requestedEffectiveDate
-      ? buildRequestedEffectiveDate(
-        requestedEffectiveDate,
-        requestedEffectiveDateTimezone || admin?.timezone || DEFAULT_TZ
-      )
-      : undefined;
+  const effectiveDate = requestedEffectiveDate
+    ? buildRequestedEffectiveDate(
+      requestedEffectiveDate,
+      requestedEffectiveDateTimezone || admin?.timezone || DEFAULT_TZ
+    )
+    : undefined;
 
   const paymentType = getCampaignPaymentType(campaign, contentInput);
   const totalCampaignFee =
@@ -641,7 +649,8 @@ function createDefaultContent({
         contentInput?.campaign?.productsServicesCovered || campaign?.productOrServiceName || "",
       territoryTargetCountry:
         contentInput?.campaign?.territoryTargetCountry || "Worldwide",
-      effectiveDate: effectiveDate || contentInput?.campaign?.effectiveDate || null,
+      effectiveDate:
+        effectiveDate || contentInput?.campaign?.effectiveDate || null,
       campaignTitleOrId:
         contentInput?.campaign?.campaignTitleOrId ||
         campaign?.campaignTitle ||
@@ -656,9 +665,12 @@ function createDefaultContent({
         contentInput?.scheduleA?.deliverables
       ),
 
-      minimumVideoSpecs: contentInput?.scheduleA?.minimumVideoSpecs || "",
-      preShootScriptRequired: Boolean(contentInput?.scheduleA?.preShootScriptRequired),
-      preShootScriptDue: contentInput?.scheduleA?.preShootScriptDue || "",
+      minimumVideoSpecs:
+        contentInput?.scheduleA?.minimumVideoSpecs || "",
+      preShootScriptRequired:
+        Boolean(contentInput?.scheduleA?.preShootScriptRequired),
+      preShootScriptDue:
+        contentInput?.scheduleA?.preShootScriptDue || "",
       preShootScriptReviewBusinessDays:
         contentInput?.scheduleA?.preShootScriptReviewBusinessDays || 2,
       mandatoryTagsMentionsLinksCodes:
@@ -672,7 +684,8 @@ function createDefaultContent({
         reshootObligation:
           contentInput?.scheduleA?.review?.reshootObligation ||
           "No reshoot required except for material failure to follow approved brief",
-        reshootFee: contentInput?.scheduleA?.review?.reshootFee || "",
+        reshootFee:
+          contentInput?.scheduleA?.review?.reshootFee || "",
         minimumLivePeriod:
           contentInput?.scheduleA?.review?.minimumLivePeriod || "",
       },
@@ -680,7 +693,8 @@ function createDefaultContent({
       commercial: {
         totalCampaignFee:
           paymentType === PAYMENT_TYPES.GIFTING ? 0 : Number(totalCampaignFee || 0),
-        currency: contentInput?.scheduleA?.commercial?.currency || "USD",
+        currency:
+          contentInput?.scheduleA?.commercial?.currency || "USD",
         paymentStructure:
           contentInput?.scheduleA?.commercial?.paymentStructure ||
           contentInput?.scheduleA?.commercial?.platformMilestonePaymentStructure ||
@@ -698,30 +712,28 @@ function createDefaultContent({
         laneAMarketplaceFeeNote:
           contentInput?.scheduleA?.commercial?.laneAMarketplaceFeeNote ||
           "Unless expressly stated otherwise, 10% of the applicable Influencer compensation funded through the Platform is deducted from the Influencer payout and retained by CollabGlam; the Brand-funded campaign amount remains fixed.",
+        payoutMethod: contentInput?.scheduleA?.commercial?.payoutMethod || "",
+        payoutAccountId: contentInput?.scheduleA?.commercial?.payoutAccountId || "",
+        taxId: contentInput?.scheduleA?.commercial?.taxId || "",
         milestones: Array.isArray(contentInput?.scheduleA?.commercial?.milestones)
-          ? contentInput.scheduleA.commercial.milestones.map((row, index) => ({
-            milestoneName: row?.milestoneName || `Milestone ${index + 1}`,
-            paymentAmount: Number(row?.paymentAmount || 0),
-            triggerEvent: row?.triggerEvent || "",
-            dueDate: row?.dueDate || "",
+          ? contentInput.scheduleA.commercial.milestones.map((m, i) => ({
+            milestoneName: String(m?.milestoneName || `Milestone ${i + 1}`),
+            paymentAmount: Number(m?.paymentAmount || 0),
+            triggerEvent: String(m?.triggerEvent || ""),
+            dueDate: String(m?.dueDate || ""),
           }))
           : paymentType === PAYMENT_TYPES.MILESTONE
-            ? [
-              {
-                milestoneName: "Milestone 1",
-                paymentAmount: 0,
-                triggerEvent: "",
-                dueDate: "",
-              },
-            ]
+            ? [{ milestoneName: "Milestone 1", paymentAmount: 0, triggerEvent: "", dueDate: "" }]
             : [],
       },
 
       rawFiles: {
         rawSourceFileDelivery:
           contentInput?.scheduleA?.rawFiles?.rawSourceFileDelivery || "Not included",
-        deliveryDue: contentInput?.scheduleA?.rawFiles?.deliveryDue || "",
-        format: contentInput?.scheduleA?.rawFiles?.format || "",
+        deliveryDue:
+          contentInput?.scheduleA?.rawFiles?.deliveryDue || "",
+        format:
+          contentInput?.scheduleA?.rawFiles?.format || "",
         analyticsReportingDeadline:
           contentInput?.scheduleA?.rawFiles?.analyticsReportingDeadline || "",
         analyticsReportingItems:
@@ -732,9 +744,12 @@ function createDefaultContent({
         productShippingApplicable:
           contentInput?.scheduleA?.shipping?.productShippingApplicable ||
           (paymentType === PAYMENT_TYPES.GIFTING ? "Yes" : "No"),
-        shipToName: contentInput?.scheduleA?.shipping?.shipToName || "",
-        shipToAddress: contentInput?.scheduleA?.shipping?.shipToAddress || "",
-        shipToPhone: contentInput?.scheduleA?.shipping?.shipToPhone || "",
+        shipToName:
+          contentInput?.scheduleA?.shipping?.shipToName || "",
+        shipToAddress:
+          contentInput?.scheduleA?.shipping?.shipToAddress || "",
+        shipToPhone:
+          contentInput?.scheduleA?.shipping?.shipToPhone || "",
         productReceiptConfirmationDeadline:
           contentInput?.scheduleA?.shipping?.productReceiptConfirmationDeadline || "",
         productReturnable:
@@ -758,8 +773,7 @@ function createDefaultContent({
             { usageRight: "Perpetual rights / buyout / work-made-for-hire", selected: false, duration: "", territoryNotes: "" },
           ],
         attributionRequirement:
-          contentInput?.scheduleA?.usageRights?.attributionRequirement ||
-          "No attribution required",
+          contentInput?.scheduleA?.usageRights?.attributionRequirement || "No attribution required",
         attributionText:
           contentInput?.scheduleA?.usageRights?.attributionText || "",
         editingRights:
@@ -819,7 +833,6 @@ function createDefaultContent({
   merged.campaign.paymentType = paymentType;
   merged.scheduleA.commercial.paymentStructure =
     merged.scheduleA.commercial.paymentStructure || defaultPaymentStructure;
-
   merged.scheduleA.commercial.totalCampaignFee =
     paymentType === PAYMENT_TYPES.GIFTING
       ? 0
@@ -829,16 +842,17 @@ function createDefaultContent({
     merged.scheduleA.commercial.milestones = Array.isArray(
       merged.scheduleA.commercial.milestones
     )
-      ? merged.scheduleA.commercial.milestones.map((row, index) => ({
-        milestoneName: row?.milestoneName || `Milestone ${index + 1}`,
-        paymentAmount: Number(row?.paymentAmount || 0),
-        triggerEvent: row?.triggerEvent || "",
-        dueDate: row?.dueDate || "",
+      ? merged.scheduleA.commercial.milestones.map((m, i) => ({
+        milestoneName: String(m?.milestoneName || `Milestone ${i + 1}`),
+        paymentAmount: Number(m?.paymentAmount || 0),
+        triggerEvent: String(m?.triggerEvent || ""),
+        dueDate: String(m?.dueDate || ""),
       }))
-      : [];
+      : [{ milestoneName: "Milestone 1", paymentAmount: 0, triggerEvent: "", dueDate: "" }];
   } else {
     merged.scheduleA.commercial.milestones = [];
   }
+
   return merged;
 }
 
@@ -881,7 +895,7 @@ function renderCommercialTermsTableHTML(content = {}) {
 
   const baseTable = renderKeyValueTable([
     ["Payment Type", paymentType],
-    ["Total Campaign Fee", compactJoin([commercial?.totalCampaignFee, commercial?.currency], " ")],
+    ["Total Budget", compactJoin([commercial?.totalCampaignFee, commercial?.currency], " ")],
     ["Payment Structure", commercial?.paymentStructure || ""],
     ["Custom Split", commercial?.customSplit || ""],
     ["Advance Payment Trigger", commercial?.advancePaymentTrigger || ""],
@@ -1099,6 +1113,7 @@ function legalTextToHTML(raw) {
   const lines = String(raw || "").split(/\r?\n/);
   const out = [];
   let buffer = [];
+  let inSigSection = false;
 
   const flushP = () => {
     if (!buffer.length) return;
@@ -1106,6 +1121,9 @@ function legalTextToHTML(raw) {
     out.push(`<p>${html}</p>`);
     buffer = [];
   };
+
+  // Lines to skip once inside the signature section
+  const SIG_SKIP = /^(Brand:|Influencer:|CollabGlam:|By:|Name:|Title:|Date:|_{3,}|-{3,}.*End of Agreement.*-{3,})/i;
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
@@ -1131,6 +1149,18 @@ function legalTextToHTML(raw) {
       flushP();
       out.push("<h2>Signatures</h2>");
       out.push('<div id="__SIG_PANEL__"></div>');
+      inSigSection = true;
+      continue;
+    }
+
+    // Once in sig section, skip old text-based sig blocks
+    // but keep "--- End of Agreement ---"
+    if (inSigSection) {
+      if (/^-{3,}.*End of Agreement.*-{3,}$/i.test(line)) {
+        flushP();
+        out.push(`<p style="text-align:center;margin-top:12pt;">--- End of Agreement ---</p>`);
+      }
+      // skip everything else (Brand: ..., By: ..., Name: ..., etc.)
       continue;
     }
 
@@ -1162,40 +1192,69 @@ function signaturePanelHTML(contract) {
   const influencerLabel = contract?.content?.influencer?.legalName || contract.influencerName || "—";
 
   const roles = [
-    { key: "brand", label: `Brand: ${esc(brandLabel)}` },
-    { key: "influencer", label: `Influencer: ${esc(influencerLabel)}` },
-    { key: "collabglam", label: "CollabGlam: CollabGlam LLC" },
+    {
+      key: "brand",
+      header: "BRAND",
+      entityLabel: brandLabel,
+    },
+    {
+      key: "influencer",
+      header: "INFLUENCER",
+      entityLabel: influencerLabel,
+    },
+    {
+      key: "collabglam",
+      header: "COLLABGLAM LLC",
+      entityLabel: "CollabGlam LLC",
+    },
   ];
 
-  const blocks = roles
-    .map(({ key, label }) => {
-      const s = contract.signatures?.[key] || {};
-      const when = s.at ? formatDateTZ(s.at, tz, "YYYY-MM-DD HH:mm z") : "";
-      const isCollabGlam = key === "collabglam";
-      const imgSrc = s.sigImageDataUrl || (isCollabGlam ? COLLABGLAM_FIXED_SIG_DATA_URL : null);
-      const img = imgSrc
-        ? `<img class="sigimg" alt="Signature image" src="${esc(imgSrc)}">`
-        : "";
-
-      const meta = s.signed
-        ? `<div class="sigmeta">SIGNED by ${esc(s.name || "")}${s.email ? ` &lt;${esc(s.email)}&gt;` : ""}${when ? ` on ${esc(when)}` : ""}</div>`
-        : isCollabGlam && imgSrc
-          ? `<div class="sigmeta muted">Signature on file (CollabGlam)</div>`
-          : `<div class="sigmeta muted">Pending signature</div>`;
-
-      return `
-        <div class="signature-block">
-          <div class="sigrole">${label}</div>
-          ${img}
-          ${meta}
-        </div>
-      `;
-    })
+  const headerRow = roles
+    .map(({ header }) => `<th style="text-align:center;background:#fff;font-weight:700;">${esc(header)}</th>`)
     .join("");
 
-  return `<div class="signatures">${blocks}</div>`;
-}
+  const sigCells = [];
+  const nameCells = [];
+  const titleCells = [];
+  const dateCells = [];
 
+  for (const { key, entityLabel } of roles) {
+    const s = contract.signatures?.[key] || {};
+    const isCollabGlam = key === "collabglam";
+    const imgSrc = s.sigImageDataUrl || (isCollabGlam ? COLLABGLAM_FIXED_SIG_DATA_URL : null);
+    const when = s.at
+      ? formatDateTZ(s.at, tz, "MMMM D, YYYY")
+      : contract?.content?.campaign?.effectiveDate
+        ? formatDateTZ(contract.content.campaign.effectiveDate, tz, "MMMM D, YYYY")
+        : "";
+
+    // Resolve display name: use signed name, fallback to entity label
+    const displayName = s.name || entityLabel || "";
+
+    const sigContent = imgSrc
+      ? `<img class="sigimg" alt="Signature" src="${esc(imgSrc)}" style="max-height:50pt;max-width:100%;display:block;">`
+      : `<div style="height:50pt;"></div>`;
+
+    sigCells.push(`<td style="height:60pt;vertical-align:bottom;padding:4pt;">${sigContent}</td>`);
+    nameCells.push(`<td style="padding:4pt;"><strong>Name:</strong> ${esc(displayName)}</td>`);
+    titleCells.push(`<td style="padding:4pt;"><strong>Title:</strong> ${esc(s.title || "")}</td>`);
+    dateCells.push(`<td style="padding:4pt;"><strong>Date:</strong> ${esc(when)}</td>`);
+  }
+
+  return `
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:10pt;">
+      <thead>
+        <tr>${headerRow}</tr>
+      </thead>
+      <tbody>
+        <tr>${sigCells.join("")}</tr>
+        <tr>${nameCells.join("")}</tr>
+        <tr>${titleCells.join("")}</tr>
+        <tr>${dateCells.join("")}</tr>
+      </tbody>
+    </table>
+  `;
+}
 function renderContractHTML({ contract, templateText }) {
   let legalHTML = legalTextToHTML(templateText);
   legalHTML = legalHTML.replace('<div id="__SIG_PANEL__"></div>', signaturePanelHTML(contract));
@@ -1955,15 +2014,9 @@ exports.initiate = async (req, res) => {
 
     const mongoose = require("mongoose");
 
-    if (!mongoose.Types.ObjectId.isValid(campaignId)) {
-      return respondError(res, "Invalid campaignId", 400);
-    }
-    if (!mongoose.Types.ObjectId.isValid(brandId)) {
-      return respondError(res, "Invalid brandId", 400);
-    }
-    if (!mongoose.Types.ObjectId.isValid(influencerId)) {
-      return respondError(res, "Invalid influencerId", 400);
-    }
+    if (!mongoose.Types.ObjectId.isValid(campaignId)) return respondError(res, "Invalid campaignId", 400);
+    if (!mongoose.Types.ObjectId.isValid(brandId)) return respondError(res, "Invalid brandId", 400);
+    if (!mongoose.Types.ObjectId.isValid(influencerId)) return respondError(res, "Invalid influencerId", 400);
 
     const [campaign, brandDoc, influencerDoc] = await Promise.all([
       Campaign.findById(campaignId),
@@ -1974,6 +2027,8 @@ exports.initiate = async (req, res) => {
     if (!campaign) return respondError(res, "Campaign not found", 404);
     if (!brandDoc) return respondError(res, "Brand not found", 404);
     if (!influencerDoc) return respondError(res, "Influencer not found", 404);
+
+    /* ── Supplementary profile data ── */
     const other = {
       brandProfile: {
         legalName: brandDoc.legalName || brandDoc.name || "",
@@ -1993,8 +2048,12 @@ exports.initiate = async (req, res) => {
       autoCalcs: {},
     };
 
+    /* ── Admin meta ── */
     const adminTimezone =
-      campaign?.campaignTimezone || requestedEffectiveDateTimezone || DEFAULT_TZ;
+      campaign?.campaignTimezone ||
+      requestedEffectiveDateTimezone ||
+      DEFAULT_TZ;
+
     const admin = {
       timezone: adminTimezone,
       jurisdiction: "USA",
@@ -2016,13 +2075,7 @@ exports.initiate = async (req, res) => {
       ],
     };
 
-    const requestedDateBuilt = requestedEffectiveDate
-      ? buildRequestedEffectiveDate(
-        requestedEffectiveDate,
-        requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ
-      )
-      : undefined;
-
+    /* ── Build content ── */
     const content = createDefaultContent({
       campaign,
       brandDoc,
@@ -2033,6 +2086,15 @@ exports.initiate = async (req, res) => {
       contentInput,
     });
 
+    /* ── Requested effective date ── */
+    const requestedDateBuilt = requestedEffectiveDate
+      ? buildRequestedEffectiveDate(
+        requestedEffectiveDate,
+        requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ
+      )
+      : undefined;
+
+    /* ── Shared base document ── */
     const base = {
       brandId,
       influencerId,
@@ -2050,8 +2112,10 @@ exports.initiate = async (req, res) => {
         brand: { accepted: false },
         influencer: { accepted: false },
       },
-      confirmations: { brand: { confirmed: false }, influencer: { confirmed: false } },
-
+      confirmations: {
+        brand: { confirmed: false },
+        influencer: { confirmed: false },
+      },
       signatures: {
         brand: { signed: false },
         influencer: { signed: false },
@@ -2072,6 +2136,9 @@ exports.initiate = async (req, res) => {
       influencerHandle: content.influencer.postingHandleUrl,
     };
 
+    /* ════════════════════════════════════════
+       PREVIEW — return PDF, no DB write
+    ════════════════════════════════════════ */
     if (preview && !isResend) {
       const tmp = { ...base };
       const tokens = buildTokenMap(tmp);
@@ -2090,6 +2157,9 @@ exports.initiate = async (req, res) => {
       });
     }
 
+    /* ════════════════════════════════════════
+       RESEND — supersede parent, create child
+    ════════════════════════════════════════ */
     if (isResend && resendOf) {
       const parent = await Contract.findOne({ contractId: resendOf });
       if (!parent) return respondError(res, "resendOf contract not found", 404);
@@ -2157,11 +2227,11 @@ exports.initiate = async (req, res) => {
         meta: { campaignId, influencerId, resendOf: parent.contractId },
       });
 
-      const infEmail = getEmailForRole({ contract: child, role: "influencer", influencerDoc });
+      const infEmailResend = getEmailForRole({ contract: child, role: "influencer", influencerDoc });
       await safeSendEmail({
         contract: child,
         templateKey: "contract_new_received_influencer",
-        to: infEmail,
+        to: infEmailResend,
         recipientRole: "influencer",
         recipientName: getNameForRole({ contract: child, role: "influencer", influencerDoc }),
       });
@@ -2172,6 +2242,9 @@ exports.initiate = async (req, res) => {
       return respondOK(res, { message: "Resent contract created", contract: child }, 201);
     }
 
+    /* ════════════════════════════════════════
+       NORMAL SEND — create new contract
+    ════════════════════════════════════════ */
     const contract = new Contract({
       ...base,
       lastSentAt: new Date(),
@@ -2181,7 +2254,11 @@ exports.initiate = async (req, res) => {
       currency: content?.scheduleA?.commercial?.currency || "USD",
     });
 
-    addAudit(contract, "system", "INITIATED", { campaignId, status: contract.status });
+    addAudit(contract, "system", "INITIATED", {
+      campaignId,
+      status: contract.status,
+    });
+
     await contract.save();
 
     await Campaign.updateOne(campaignQuery(campaignId), {
@@ -2224,7 +2301,11 @@ exports.initiate = async (req, res) => {
     await safeStartReminder(contract, "influencer");
     await safeClearReminder(contract.contractId, "brand");
 
-    return respondOK(res, { message: "Contract initialized successfully", contract }, 201);
+    return respondOK(
+      res,
+      { message: "Contract initialized successfully", contract },
+      201
+    );
   } catch (err) {
     return respondError(res, err.message || "initiate error", err.status || 500, err);
   }
@@ -2983,6 +3064,9 @@ exports.brandUpdateFields = async (req, res) => {
       ALLOWED_BRAND_PATHS
     );
 
+    // ✅ Force Mongoose to detect nested subdocument changes
+    contract.markModified("content.scheduleA.commercial");
+
     if (requestedEffectiveDate) {
       const builtDate = buildRequestedEffectiveDate(
         requestedEffectiveDate,
@@ -3177,7 +3261,153 @@ exports.getContract = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    return respondOK(res, { contracts: contracts || [] });
+    // Normalize each contract so newly added fields always have
+    // a value even on documents created before the schema update
+    const normalized = (contracts || []).map((c) => {
+      const sA = c?.content?.scheduleA || {};
+      const comm = sA?.commercial || {};
+
+      return {
+        ...c,
+        content: {
+          ...c.content,
+
+          brand: {
+            legalName: c.content?.brand?.legalName || "",
+            contactPersonName: c.content?.brand?.contactPersonName || "",
+            noticeEmail: c.content?.brand?.noticeEmail || "",
+            noticePhone: c.content?.brand?.noticePhone || "",
+            billingAddress: c.content?.brand?.billingAddress || "",
+          },
+
+          influencer: {
+            legalName: c.content?.influencer?.legalName || "",
+            contactName: c.content?.influencer?.contactName || "",
+            postingHandleUrl: c.content?.influencer?.postingHandleUrl || "",
+            contactEmail: c.content?.influencer?.contactEmail || "",
+            contactPhone: c.content?.influencer?.contactPhone || "",
+            whatsApp: c.content?.influencer?.whatsApp || "",
+            address: c.content?.influencer?.address || "",
+          },
+
+          campaign: {
+            campaignTitleOrId: c.content?.campaign?.campaignTitleOrId || "",
+            productsServicesCovered: c.content?.campaign?.productsServicesCovered || "",
+            territoryTargetCountry: c.content?.campaign?.territoryTargetCountry || "Worldwide",
+            effectiveDate: c.content?.campaign?.effectiveDate || null,
+            paymentType: c.content?.campaign?.paymentType || "Fixed",
+          },
+
+          scheduleA: {
+            ...sA,
+
+            deliverables: Array.isArray(sA.deliverables)
+              ? sA.deliverables.map((d) => ({
+                srNo: d.srNo ?? 1,
+                platform: d.platform || d.platformHandle || "",
+                Handle:
+                  Array.isArray(d.Handle) && d.Handle.length
+                    ? d.Handle
+                    : d.platformHandle
+                      ? [d.platformHandle]
+                      : d.platform
+                        ? [d.platform]
+                        : [],
+                deliverableFormat: d.deliverableFormat || "",
+                qty: d.qty ?? 1,
+                draftDue: d.draftDue || "",
+                liveDate: d.liveDate || "",
+              }))
+              : [],
+
+            review: {
+              includedRevisionRounds: sA.review?.includedRevisionRounds ?? 1,
+              additionalRevisionFee: sA.review?.additionalRevisionFee || "",
+              reshootObligation: sA.review?.reshootObligation || "",
+              reshootFee: sA.review?.reshootFee || "",
+              minimumLivePeriod: sA.review?.minimumLivePeriod || "",
+            },
+
+            commercial: {
+              totalCampaignFee: comm.totalCampaignFee ?? 0,
+              currency: comm.currency || "USD",
+              paymentStructure: comm.paymentStructure || comm.platformMilestonePaymentStructure || "",
+              customSplit: comm.customSplit || "",
+              advancePaymentTrigger: comm.advancePaymentTrigger || "",
+              remainingPaymentTrigger: comm.remainingPaymentTrigger || "",
+              paymentProcessorFeesBorneBy: comm.paymentProcessorFeesBorneBy || "",
+              paymentProcessorFeesNotes: comm.paymentProcessorFeesNotes || "",
+              laneAMarketplaceFeeNote: comm.laneAMarketplaceFeeNote || "",
+              milestones: Array.isArray(comm.milestones)
+                ? comm.milestones.map((m, i) => ({
+                  milestoneName: m.milestoneName || `Milestone ${i + 1}`,
+                  paymentAmount: m.paymentAmount ?? 0,
+                  triggerEvent: m.triggerEvent || "",
+                  dueDate: m.dueDate || "",
+                }))
+                : [],
+              payoutMethod: comm.payoutMethod || "",
+              payoutAccountId: comm.payoutAccountId || "",
+              taxId: comm.taxId || "",
+            },
+
+            rawFiles: {
+              rawSourceFileDelivery: sA.rawFiles?.rawSourceFileDelivery || "",
+              deliveryDue: sA.rawFiles?.deliveryDue || "",
+              format: sA.rawFiles?.format || "",
+              analyticsReportingDeadline: sA.rawFiles?.analyticsReportingDeadline || "",
+              analyticsReportingItems: sA.rawFiles?.analyticsReportingItems || "",
+            },
+
+            shipping: {
+              productShippingApplicable: sA.shipping?.productShippingApplicable || "No",
+              shipToName: sA.shipping?.shipToName || "",
+              shipToAddress: sA.shipping?.shipToAddress || "",
+              shipToPhone: sA.shipping?.shipToPhone || "",
+              productReceiptConfirmationDeadline: sA.shipping?.productReceiptConfirmationDeadline || "",
+              productReturnable: sA.shipping?.productReturnable || "",
+              returnWindowMethod: sA.shipping?.returnWindowMethod || "",
+              riskOfLossNotes: sA.shipping?.riskOfLossNotes || "",
+            },
+
+            usageRights: {
+              rows: Array.isArray(sA.usageRights?.rows) ? sA.usageRights.rows : [],
+              attributionRequirement: sA.usageRights?.attributionRequirement || "",
+              attributionText: sA.usageRights?.attributionText || "",
+              editingRights: sA.usageRights?.editingRights || "",
+              musicStockAssetResponsibility: sA.usageRights?.musicStockAssetResponsibility || "",
+            },
+
+            compliance: {
+              creativeBriefMandatoryTalkingPoints: sA.compliance?.creativeBriefMandatoryTalkingPoints || "",
+              restrictedStatements: sA.compliance?.restrictedStatements || "",
+            },
+
+            exclusivity: {
+              competitorBlackout: sA.exclusivity?.competitorBlackout || "None",
+              categoryCompetitorList: sA.exclusivity?.categoryCompetitorList || "",
+              blackoutPeriod: sA.exclusivity?.blackoutPeriod || "",
+              optionalMoralsClause: sA.exclusivity?.optionalMoralsClause || "Not included",
+            },
+
+            cancellation: {
+              killFeeOrProrata: sA.cancellation?.killFeeOrProrata || "",
+              refundOfUnearnedAdvance: sA.cancellation?.refundOfUnearnedAdvance || "",
+            },
+
+            dispute: {
+              governingLaw: sA.dispute?.governingLaw || "Nevada, USA",
+              disputeResolutionMethod: sA.dispute?.disputeResolutionMethod || "AAA arbitration",
+              disputeVenue: sA.dispute?.disputeVenue || "",
+              arbitrationSeat: sA.dispute?.arbitrationSeat || "Las Vegas, Nevada, USA",
+              attorneysFees: sA.dispute?.attorneysFees || "",
+            },
+          },
+        },
+      };
+    });
+
+    return respondOK(res, { contracts: normalized });
   } catch (err) {
     return respondError(res, "Error fetching contracts", 500, err);
   }
