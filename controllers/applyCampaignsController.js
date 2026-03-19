@@ -437,13 +437,44 @@ ${dashboardLink}
  * POST /ApplyCampaigns/list
  * Body: { campaignId, page, limit, search, sortField, createdPage, sortOrder }
  */
+/**
+ * POST /ApplyCampaigns/list
+ * Body: {
+ *   campaignId,
+ *   page,
+ *   limit,
+ *   search,
+ *   sortField,
+ *   createdPage,
+ *   sortOrder,
+ *   isShortlisted, // optional: 1
+ *   isUndicided,   // optional: 1
+ *   isRejected     // optional: 1
+ * }
+ */
 exports.getListByCampaign = async (req, res) => {
-  const { campaignId, page = 1, limit = 10, search, sortField, createdPage, sortOrder = 0 } =
-    req.body || {};
+  const {
+    campaignId,
+    page = 1,
+    limit = 10,
+    search,
+    sortField,
+    createdPage,
+    sortOrder = 0,
+    isShortlisted,
+    isUndicided,
+    isRejected
+  } = req.body || {};
 
   if (!campaignId) {
     return res.status(400).json({ message: 'campaignId is required' });
   }
+
+  const parseFlag = (value) => {
+    if (value === 1 || value === '1' || value === true || value === 'true') return 1;
+    if (value === 0 || value === '0' || value === false || value === 'false') return 0;
+    return undefined;
+  };
 
   try {
     const record = await ApplyCampaign.findOne({ campaignId: String(campaignId) }).lean();
@@ -458,7 +489,39 @@ exports.getListByCampaign = async (req, res) => {
       });
     }
 
-    const influencerIds = (record.applicants || [])
+    const applicantStatusMap = new Map();
+    for (const applicant of record.applicants || []) {
+      if (!applicant?.influencerId) continue;
+
+      applicantStatusMap.set(String(applicant.influencerId), {
+        isShortlisted: applicant.isShortlisted === 1 ? 1 : 0,
+        isUndicided: applicant.isUndicided === 1 ? 1 : 0,
+        isRejected: applicant.isRejected === 1 ? 1 : 0
+      });
+    }
+
+    const decisionFilters = {};
+    const shortlistedFlag = parseFlag(isShortlisted);
+    const undecidedFlag = parseFlag(isUndicided);
+    const rejectedFlag = parseFlag(isRejected);
+
+    if (shortlistedFlag !== undefined) decisionFilters.isShortlisted = shortlistedFlag;
+    if (undecidedFlag !== undefined) decisionFilters.isUndicided = undecidedFlag;
+    if (rejectedFlag !== undefined) decisionFilters.isRejected = rejectedFlag;
+
+    const hasDecisionFilter = Object.keys(decisionFilters).length > 0;
+
+    const filteredApplicants = (record.applicants || []).filter((applicant) => {
+      if (!applicant?.influencerId || !isValidObjectId(applicant.influencerId)) return false;
+
+      if (!hasDecisionFilter) return true;
+
+      return Object.entries(decisionFilters).every(([key, expected]) => {
+        return Number(applicant?.[key] || 0) === expected;
+      });
+    });
+
+    const influencerIds = filteredApplicants
       .map((a) => a.influencerId)
       .filter((id) => id && isValidObjectId(id))
       .map(String);
@@ -466,7 +529,7 @@ exports.getListByCampaign = async (req, res) => {
     if (!influencerIds.length) {
       return res.status(200).json({
         meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
-        applicantCount: record.applicants?.length || 0,
+        applicantCount: hasDecisionFilter ? 0 : (record.applicants?.length || 0),
         isContracted: 0,
         contractId: null,
         influencers: []
@@ -488,7 +551,7 @@ exports.getListByCampaign = async (req, res) => {
     if (!influencersRaw.length) {
       return res.status(200).json({
         meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
-        applicantCount: record.applicants?.length || 0,
+        applicantCount: hasDecisionFilter ? 0 : (record.applicants?.length || 0),
         isContracted: 0,
         contractId: null,
         influencers: []
@@ -511,7 +574,9 @@ exports.getListByCampaign = async (req, res) => {
     const contracts = await Contract.find({ campaignId: String(campaignId) }).lean();
     const isContractedCampaign = contracts.length > 0 ? 1 : 0;
     const contractByInf = new Map(contracts.map((c) => [String(c.influencerId), c]));
-    const approvedId = record.approved?.[0]?.influencerId ? String(record.approved[0].influencerId) : null;
+    const approvedId = record.approved?.[0]?.influencerId
+      ? String(record.approved[0].influencerId)
+      : null;
     const applicationCreatedAt = record.createdAt || record._id?.getTimestamp?.() || null;
 
     const condensed = influencersRaw.map((inf) => {
@@ -534,11 +599,17 @@ exports.getListByCampaign = async (req, res) => {
         categoryName = inf.categories[0]?.name || null;
       }
 
+      const decision = applicantStatusMap.get(infIdStr) || {
+        isShortlisted: 0,
+        isUndicided: 0,
+        isRejected: 0
+      };
+
       const c = contractByInf.get(infIdStr);
       const isAssigned = approvedId === infIdStr ? 1 : 0;
       const isContracted = c ? 1 : 0;
       const isAccepted = c?.isAccepted === 1 ? 1 : 0;
-      const isRejected = c?.isRejected === 1 ? 1 : 0;
+      const isRejectedContract = c?.isRejected === 1 ? 1 : 0;
 
       return {
         influencerId: infIdStr,
@@ -549,13 +620,17 @@ exports.getListByCampaign = async (req, res) => {
         audienceSize,
         createdAt: applicationCreatedAt,
 
+        isShortlisted: decision.isShortlisted,
+        isUndicided: decision.isUndicided,
+        isRejected: decision.isRejected,
+
         isAssigned,
         isContracted,
         contractId: c?.contractId || null,
         feeAmount: c?.feeAmount || 0,
         isAccepted,
-        isRejected,
-        rejectedReason: isRejected ? c?.rejectedReason || '' : ''
+        isContractRejected: isRejectedContract,
+        rejectedReason: isRejectedContract ? c?.rejectedReason || '' : ''
       };
     });
 
@@ -576,7 +651,15 @@ exports.getListByCampaign = async (req, res) => {
 
     const dir = sortOrder === 1 ? -1 : 1;
     if (sortField) {
-      const allowed = new Set(['name', 'primaryPlatform', 'category', 'audienceSize', 'handle', 'createdAt']);
+      const allowed = new Set([
+        'name',
+        'primaryPlatform',
+        'category',
+        'audienceSize',
+        'handle',
+        'createdAt'
+      ]);
+
       if (allowed.has(sortField)) {
         filtered.sort((a, b) => {
           const av = a[sortField];
@@ -606,8 +689,13 @@ exports.getListByCampaign = async (req, res) => {
     const paged = filtered.slice(start, end);
 
     return res.status(200).json({
-      meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) },
-      applicantCount: createdPage === true || createdPage === 'true' ? total : record.applicants.length,
+      meta: {
+        total,
+        page: pageNum,
+        limit: limNum,
+        totalPages: Math.ceil(total / limNum)
+      },
+      applicantCount: total,
       isContracted: isContractedCampaign,
       contractId: null,
       influencers: paged
