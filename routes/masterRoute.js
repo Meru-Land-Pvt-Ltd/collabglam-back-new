@@ -14,6 +14,12 @@ router.post("/accept-invite", adminController.acceptInviteSetPassword);
 router.get("/list", adminAuth, adminController.listAdmins);
 router.put("/update-status", adminController.updateStatus);
 router.get("/me", adminAuth, adminController.adminMe);
+router.get("/fully-manged-brand-list", adminAuth, adminController.fullyManagedBrandList);
+router.post("/assign-brand", adminAuth, superOrRevenueHead, adminController.assignBrand);
+router.put("/update-status", adminAuth, superOrRevenueHead, adminController.updateBrandAssignment);
+router.put("/update-rhId", adminAuth, superOrRevenueHead, adminController.updateBrandAssignmentStatusAndRH);
+router.get("/get-executive-list", adminAuth, adminController.listExecutiveAdmin);
+
 
 router.post(
   "/send-bulk-csv",
