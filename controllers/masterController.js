@@ -638,7 +638,7 @@ exports.fullyManagedBrandList = async (req, res) => {
           ].filter(Boolean);
 
           if (masterIds.length > 0) {
-            const masters = await Master.find({ _id: { $in: masterIds } })
+            const masters = await AdminModel.find({ _id: { $in: masterIds } })
               .select("_id name")
               .lean();
 
