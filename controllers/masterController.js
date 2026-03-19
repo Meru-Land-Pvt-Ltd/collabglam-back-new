@@ -685,7 +685,7 @@ console.log("assignedData for brand", item._id, assignedData);
   try {
     const { brandId, RHId, bdmId, idmId } = req.body;
 
-    if (!brandId || !RHId) {
+    if (!brandId) {
       return res.status(400).json({
         success: false,
         message: "brandId and RHId are required",
