@@ -11,7 +11,7 @@ const { sendEmail } = require("../services/emailService");
 const { adminInviteEmailTemplate } = require("../template/inviteRole");
 const brand = require("../models/brand");
 const BrandAssigned = require("../models/brandAssigned");
-
+const mongoose = require("mongoose");
 const INVITE_EXP_MINUTES = Number(process.env.INVITE_EXP_MINUTES || 60);
 
 // ======================
@@ -632,9 +632,9 @@ exports.fullyManagedBrandList = async (req, res) => {
 
         if (assignedData) {
           const masterIds = [
-            assignedData.rmId,
-            assignedData.bmId,
-            assignedData.imId,
+            assignedData.RHId,
+            assignedData.bdmId,
+            assignedData.idmId,
           ].filter(Boolean);
 
           if (masterIds.length > 0) {
