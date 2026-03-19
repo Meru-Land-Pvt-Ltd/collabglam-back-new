@@ -1,30 +1,42 @@
-// src/services/sendBulkEmailToCsv.js
 const mongoose = require("mongoose");
 const { parse } = require("csv-parse/sync");
 
-const AdminEmailThreadModel = require("../models/adminEmailThread.js");
-const AdminEmailMessageModel = require("../models/adminEmailMessage.js");
+const AdminEmailThreadModel = require("../models/adminEmailThread");
+const AdminEmailMessageModel = require("../models/adminEmailMessage");
 const { sendEmail, uploadEmailRecordToS3 } = require("./emailService");
-const CampaignImport = require("../models/campaign.js");
-const AdminImport = require("../models/master.js");
+const { AdminModel, ROLES } = require("../models/master");
+const CampaignImport = require("../models/campaign");
 const { collabOpportunityBulkTemplate } = require("../template/collabOpportunityBulk");
 
 const CampaignModel =
   CampaignImport?.CampaignModel || CampaignImport?.default || CampaignImport;
 
-const AdminModel =
-  AdminImport?.AdminModel || AdminImport?.default || AdminImport;
-
-const cleanStr = (v) => String(v ?? "").trim();
-const cleanEmail = (v) => cleanStr(v).toLowerCase();
+const cleanStr = (value) => String(value ?? "").trim();
+const cleanEmail = (value) => cleanStr(value).toLowerCase();
 
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
-const getCampaignTitle = (c) =>
-  cleanStr(c?.title) ||
-  cleanStr(c?.name) ||
-  cleanStr(c?.campaignTitle) ||
-  "our campaign";
+function toObjectIdStrict(id, fieldName) {
+  const clean = cleanStr(id);
+  if (!mongoose.isValidObjectId(clean)) {
+    throw new Error(`Invalid ${fieldName}`);
+  }
+  return new mongoose.Types.ObjectId(clean);
+}
+
+function getCampaignTitle(campaign) {
+  return (
+    cleanStr(campaign?.title) ||
+    cleanStr(campaign?.name) ||
+    cleanStr(campaign?.campaignTitle) ||
+    "our campaign"
+  );
+}
+
+function buildThreadReplyAddress(threadId) {
+  const domain = process.env.INBOUND_REPLY_DOMAIN || "mail.collabglam.cloud";
+  return `reply+t_${threadId}@${domain}`.toLowerCase();
+}
 
 function parseRecipientsFromCsv(csvBuffer) {
   const text = csvBuffer.toString("utf-8");
@@ -36,7 +48,7 @@ function parseRecipientsFromCsv(csvBuffer) {
       skip_empty_lines: true,
       trim: true,
     });
-  } catch (err) {
+  } catch (error) {
     rows = [];
   }
 
@@ -72,20 +84,30 @@ function parseRecipientsFromCsv(csvBuffer) {
     ]);
 
     if (!email) continue;
-    recipients.push({ name, email });
+
+    recipients.push({
+      name,
+      email,
+    });
   }
 
   if (!recipients.length) {
-    const rows2 = parse(text, {
+    const rawRows = parse(text, {
       columns: false,
       skip_empty_lines: true,
       trim: true,
     });
 
-    for (const row of rows2) {
+    for (const row of rawRows) {
       const name = cleanStr(row?.[0]);
       const email = cleanStr(row?.[1]);
-      if (email) recipients.push({ name, email });
+
+      if (!email) continue;
+
+      recipients.push({
+        name,
+        email,
+      });
     }
   }
 
@@ -104,11 +126,57 @@ function parseRecipientsFromCsv(csvBuffer) {
     });
 }
 
+async function createOrGetThread({
+  brandId,
+  campaignId,
+  executiveId,
+  role,
+  senderEmail,
+  recipientEmail,
+  subject,
+}) {
+  let thread = await AdminEmailThreadModel.findOne({
+    campaignId,
+    executiveId,
+    recipientEmail,
+  });
+
+  if (!thread) {
+    thread = await AdminEmailThreadModel.create({
+      brandId,
+      campaignId,
+      executiveId,
+      role,
+      senderEmail,
+      recipientEmail,
+      replyToEmail: "temp@temp.local",
+      subject,
+      lastMessageAt: new Date(),
+      lastMessageDirection: "OUTBOUND",
+    });
+
+    thread.replyToEmail = buildThreadReplyAddress(thread._id);
+    await thread.save();
+  } else {
+    thread.senderEmail = senderEmail;
+    thread.recipientEmail = recipientEmail;
+    thread.subject = subject;
+    thread.lastMessageAt = new Date();
+    thread.lastMessageDirection = "OUTBOUND";
+
+    if (!thread.replyToEmail) {
+      thread.replyToEmail = buildThreadReplyAddress(thread._id);
+    }
+
+    await thread.save();
+  }
+
+  return thread;
+}
+
 async function sendBulkEmailToCsvByCampaignId(input) {
   const campaignId = cleanStr(input?.campaignId);
   const executiveId = cleanStr(input?.executiveId);
-
-  console.log("campaignId:", campaignId, "executiveId:", executiveId);
 
   if (!mongoose.isValidObjectId(campaignId)) {
     throw new Error("Invalid campaignId");
@@ -122,25 +190,25 @@ async function sendBulkEmailToCsvByCampaignId(input) {
     throw new Error("CSV file is required");
   }
 
-  if (!AdminModel || typeof AdminModel.findById !== "function") {
-    throw new Error("AdminModel import is invalid");
-  }
-
-  if (!CampaignModel || typeof CampaignModel.findById !== "function") {
-    throw new Error("CampaignModel import is invalid");
-  }
-
   const admin = await AdminModel.findById(executiveId)
-    .select("name proxyemail email")
+    .select("name email proxyEmail role status")
     .lean();
 
   if (!admin) {
     throw new Error("Admin not found");
   }
 
-  const from = cleanEmail(  "khushikumari@collabglam.com" ||admin.proxyemail || admin.email);
+  if (!admin.role || ![ROLES.IME, ROLES.BME].includes(admin.role)) {
+    throw new Error("Only IME or BME can send bulk emails");
+  }
+
+  if (admin.status !== "active") {
+    throw new Error("Admin account is not active");
+  }
+
+  const from = cleanEmail(admin.proxyEmail || admin.email);
   if (!from) {
-    throw new Error("proxyemail missing for this admin/executive");
+    throw new Error("Sender email missing for this admin");
   }
 
   const executiveName = cleanStr(admin.name) || "Team CollabGlam";
@@ -157,9 +225,9 @@ async function sendBulkEmailToCsvByCampaignId(input) {
     throw new Error("brandId missing in campaign");
   }
 
-  const brandObj = new mongoose.Types.ObjectId(String(campaign.brandId));
-  const campObj = new mongoose.Types.ObjectId(String(campaignId));
-  const execObj = new mongoose.Types.ObjectId(String(executiveId));
+  const brandObj = toObjectIdStrict(campaign.brandId, "brandId");
+  const campObj = toObjectIdStrict(campaignId, "campaignId");
+  const execObj = toObjectIdStrict(executiveId, "executiveId");
   const campaignTitle = getCampaignTitle(campaign);
 
   const recipients = parseRecipientsFromCsv(input.csvBuffer);
@@ -174,56 +242,36 @@ async function sendBulkEmailToCsvByCampaignId(input) {
     const influencerName = cleanStr(recipient.name) || "there";
 
     try {
-      let thread = await AdminEmailThreadModel.findOne({
+      const subject = "Collab Opportunity";
+
+      const thread = await createOrGetThread({
+        brandId: brandObj,
         campaignId: campObj,
         executiveId: execObj,
-        executiveEmail: to,
-      });
-
-      if (!thread) {
-        try {
-          thread = await AdminEmailThreadModel.create({
-            brandId: brandObj,
-            campaignId: campObj,
-            executiveId: execObj,
-            executiveEmail: to,
-            subject: "Collab Opportunity",
-            lastMessageAt: new Date(),
-          });
-        } catch (e) {
-          if (e?.code === 11000) {
-            thread = await AdminEmailThreadModel.findOne({
-              campaignId: campObj,
-              executiveId: execObj,
-              executiveEmail: to,
-            });
-          } else {
-            throw e;
-          }
-        }
-      } else {
-        thread.lastMessageAt = new Date();
-        thread.subject = "Collab Opportunity";
-        await thread.save();
-      }
-
-      if (!thread?._id) {
-        throw new Error("Thread create failed");
-      }
-
-      const emailMsg = await AdminEmailMessageModel.create({
-        threadId: thread._id,
-        direction: "OUTBOUND",
-        subject: "Collab Opportunity",
-        from,
-        to: [to],
+        role: admin.role,
+        senderEmail: from,
+        recipientEmail: to,
+        subject,
       });
 
       const templ = collabOpportunityBulkTemplate({
         influencerName,
         campaignTitle,
-        replyToEmail: from,
+        replyToEmail: thread.replyToEmail,
         executiveName,
+      });
+
+      const emailMessage = await AdminEmailMessageModel.create({
+        threadId: thread._id,
+        direction: "OUTBOUND",
+        subject: templ.subject || subject,
+        from,
+        to: [to],
+        replyTo: [thread.replyToEmail],
+        provider: "SES",
+        providerStatus: "QUEUED",
+        textPreview: templ.text ? templ.text.slice(0, 1000) : null,
+        htmlPreview: templ.html ? String(templ.html).slice(0, 2000) : null,
       });
 
       const { messageId } = await sendEmail({
@@ -232,6 +280,15 @@ async function sendBulkEmailToCsvByCampaignId(input) {
         text: templ.text,
         html: templ.html,
         from,
+        replyTo: [thread.replyToEmail],
+        configurationSetName: process.env.SES_CONFIGURATION_SET,
+        emailTags: [
+          { Name: "threadId", Value: String(thread._id) },
+          { Name: "campaignId", Value: String(campObj) },
+          { Name: "executiveId", Value: String(execObj) },
+          { Name: "role", Value: String(admin.role) },
+          { Name: "source", Value: "CSV" },
+        ],
       });
 
       let s3Key = null;
@@ -241,12 +298,13 @@ async function sendBulkEmailToCsvByCampaignId(input) {
           type: "OUTBOUND_EMAIL",
           provider: "SES",
           threadId: String(thread._id),
-          emailMessageId: String(emailMsg._id),
+          emailMessageId: String(emailMessage._id),
           campaignId: String(campObj),
           brandId: String(brandObj),
           executiveId: String(execObj),
           to,
           from,
+          replyTo: thread.replyToEmail,
           subject: templ.subject,
           text: templ.text,
           html: templ.html,
@@ -255,21 +313,21 @@ async function sendBulkEmailToCsvByCampaignId(input) {
           meta: {
             source: "CSV",
             influencerName,
+            role: admin.role,
           },
         });
-      } catch (e) {
-        console.error("S3 upload failed:", e?.message || e);
+      } catch (error) {
+        console.error("S3 upload failed:", error?.message || error);
       }
 
       await AdminEmailMessageModel.updateOne(
-        { _id: emailMsg._id },
+        { _id: emailMessage._id },
         {
           $set: {
-            ...(messageId ? { messageId } : {}),
-            ...(s3Key ? { s3Key } : {}),
-            ...(process.env.EMAIL_ARCHIVE_BUCKET
-              ? { s3Bucket: process.env.EMAIL_ARCHIVE_BUCKET }
-              : {}),
+            messageId: messageId || null,
+            providerStatus: messageId ? "SENT" : "FAILED",
+            s3Key: s3Key || null,
+            s3Bucket: process.env.EMAIL_ARCHIVE_BUCKET || null,
           },
         }
       );
@@ -278,17 +336,18 @@ async function sendBulkEmailToCsvByCampaignId(input) {
         email: to,
         name: influencerName,
         threadId: String(thread._id),
-        emailMessageId: String(emailMsg._id),
+        emailMessageId: String(emailMessage._id),
         sesMessageId: messageId || null,
+        replyToEmail: thread.replyToEmail,
         s3Key,
         success: true,
       });
-    } catch (err) {
+    } catch (error) {
       results.push({
         email: to,
         name: influencerName,
         success: false,
-        error: err?.message || "Failed",
+        error: error?.message || "Failed",
       });
     }
   }
@@ -297,10 +356,11 @@ async function sendBulkEmailToCsvByCampaignId(input) {
   const failed = results.length - sent;
 
   return {
-    campaignId,
-    executiveId,
+    campaignId: String(campObj),
+    executiveId: String(execObj),
     from,
     campaignTitle,
+    role: admin.role,
     total: results.length,
     sent,
     failed,
@@ -310,4 +370,5 @@ async function sendBulkEmailToCsvByCampaignId(input) {
 
 module.exports = {
   sendBulkEmailToCsvByCampaignId,
+  parseRecipientsFromCsv,
 };

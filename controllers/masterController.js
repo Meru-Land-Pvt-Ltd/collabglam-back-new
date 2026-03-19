@@ -113,6 +113,8 @@ function normalizeRole(role) {
 
 function resolveHierarchyFields(inviter, targetRole, explicitParentAdmin) {
   const role = normalizeRole(targetRole);
+  const inviterId = inviter?._id || inviter?.adminId || null;
+  const inviterRootAdmin = inviter?.rootAdmin || inviterId || null;
 
   if (role === ROLES.SUPER_ADMIN) {
     return {
@@ -124,8 +126,8 @@ function resolveHierarchyFields(inviter, targetRole, explicitParentAdmin) {
 
   if (inviter.role === ROLES.SUPER_ADMIN && role === ROLES.REVENUE_HEAD) {
     return {
-      parentAdmin: inviter._id,
-      rootAdmin: inviter._id,
+      parentAdmin: inviterId,
+      rootAdmin: inviterId,
       teamType: "sales",
     };
   }
@@ -133,22 +135,22 @@ function resolveHierarchyFields(inviter, targetRole, explicitParentAdmin) {
   if (inviter.role === ROLES.SUPER_ADMIN && [ROLES.IME, ROLES.BME].includes(role)) {
     return {
       parentAdmin: explicitParentAdmin || null,
-      rootAdmin: inviter._id,
+      rootAdmin: inviterId,
       teamType: "execution",
     };
   }
 
   if (inviter.role === ROLES.REVENUE_HEAD && [ROLES.IME, ROLES.BME].includes(role)) {
     return {
-      parentAdmin: inviter._id,
-      rootAdmin: inviter.rootAdmin || inviter._id,
+      parentAdmin: inviterId,
+      rootAdmin: inviterRootAdmin,
       teamType: "execution",
     };
   }
 
   return {
     parentAdmin: null,
-    rootAdmin: inviter.rootAdmin || inviter._id || null,
+    rootAdmin: inviterRootAdmin,
     teamType: null,
   };
 }
@@ -450,9 +452,15 @@ exports.updateStatus = async (req, res) => {
   try {
     const actor = req.admin;
 
+    if (!actor?.adminId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
     const adminId = clean(req.body?.adminId);
-    const status = clean(req.body?.status);
+    const status = clean(req.body?.status).toLowerCase();
     const role = normalizeRole(req.body?.role);
+    const hasNameField = Object.prototype.hasOwnProperty.call(req.body, "name");
+    const name = clean(req.body?.name);
 
     const accessProvided = Array.isArray(req.body?.access);
     const access = parseAccess(req.body?.access);
@@ -460,6 +468,12 @@ exports.updateStatus = async (req, res) => {
     if (!adminId || !status) {
       return res.status(400).json({
         message: "adminId and status are required",
+      });
+    }
+
+    if (!["pending", "active", "inactive", "suspended"].includes(status)) {
+      return res.status(400).json({
+        message: "Invalid status",
       });
     }
 
@@ -482,17 +496,34 @@ exports.updateStatus = async (req, res) => {
       });
     }
 
-    if (role) {
+    const currentRole = normalizeRole(admin.role);
+    const roleChanged = Boolean(role) && role !== currentRole;
+
+    if (roleChanged) {
+      if (!Object.values(ROLES).includes(role)) {
+        return res.status(400).json({
+          message: "Invalid role",
+        });
+      }
+
       if (!canInviteRole(actor.role, role)) {
         return res.status(403).json({
           message: "You are not allowed to assign this role",
         });
       }
+
       admin.role = role;
     }
 
+    if (hasNameField) {
+      admin.name = name || undefined;
+    }
+
     admin.status = status;
-    if (accessProvided) admin.access = access;
+
+    if (accessProvided) {
+      admin.access = access;
+    }
 
     await admin.save();
 

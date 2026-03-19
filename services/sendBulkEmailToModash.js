@@ -1,62 +1,120 @@
-// src/services/sendBulkEmailToModash.js
 const mongoose = require("mongoose");
 
-const AdminEmailThreadModel = require("../model/adminEmailThread");
-const AdminEmailMessageModel = require("../model/adminEmailMessage");
+const AdminEmailThreadModel = require("../models/adminEmailThread");
+const AdminEmailMessageModel = require("../models/adminEmailMessage");
 const { sendEmail, uploadEmailRecordToS3 } = require("./emailService");
-const { CampaignModel } = require("../model/compaign");
-const { AdminModel } = require("../model/admin");
-const ModashModel = require("../model/modash");
+const CampaignImport = require("../models/campaign");
+const { AdminModel, ROLES } = require("../models/master");
+const ModashModel = require("../models/modash");
 const { collabOpportunityBulkTemplate } = require("../template/collabOpportunityBulk");
 
-const cleanStr = (v) => String(v ?? "").trim();
+const CampaignModel =
+  CampaignImport?.CampaignModel || CampaignImport?.default || CampaignImport;
 
-const toObjectIdStrict = (id, fieldName) => {
+const cleanStr = (value) => String(value ?? "").trim();
+const cleanEmail = (value) => cleanStr(value).toLowerCase();
+
+function toObjectIdStrict(id, fieldName) {
   const clean = cleanStr(id);
   if (!mongoose.isValidObjectId(clean)) {
     throw new Error(`Invalid ${fieldName}`);
   }
   return new mongoose.Types.ObjectId(clean);
-};
+}
 
-const getModashEmail = (m) => {
+function getCampaignTitle(campaign) {
+  return (
+    cleanStr(campaign?.title) ||
+    cleanStr(campaign?.name) ||
+    cleanStr(campaign?.campaignTitle) ||
+    "our campaign"
+  );
+}
+
+function getModashEmail(modash) {
   const email =
-    m?.email ||
-    m?.contactEmail ||
-    m?.businessEmail ||
-    m?.primaryEmail ||
-    m?.contact?.email ||
-    m?.profile?.email;
+    modash?.email ||
+    modash?.contactEmail ||
+    modash?.businessEmail ||
+    modash?.primaryEmail ||
+    modash?.contact?.email ||
+    modash?.profile?.email;
 
   return typeof email === "string" && email.trim()
     ? email.trim().toLowerCase()
     : null;
-};
+}
 
-const getInfluencerName = (m) => {
+function getInfluencerName(modash) {
   return (
-    cleanStr(m?.name) ||
-    cleanStr(m?.fullName) ||
-    cleanStr(m?.displayName) ||
-    cleanStr(m?.profile?.name) ||
-    cleanStr(m?.username) ||
+    cleanStr(modash?.name) ||
+    cleanStr(modash?.fullName) ||
+    cleanStr(modash?.displayName) ||
+    cleanStr(modash?.profile?.name) ||
+    cleanStr(modash?.username) ||
     "there"
   );
-};
+}
 
-const getCampaignTitle = (c) => {
-  return (
-    cleanStr(c?.title) ||
-    cleanStr(c?.name) ||
-    cleanStr(c?.campaignTitle) ||
-    "our campaign"
-  );
-};
+function buildThreadReplyAddress(threadId) {
+  const domain = process.env.INBOUND_REPLY_DOMAIN || "mail.collabglam.cloud";
+  return `reply+t_${threadId}@${domain}`.toLowerCase();
+}
+
+async function createOrGetThread({
+  brandId,
+  campaignId,
+  executiveId,
+  role,
+  senderEmail,
+  recipientEmail,
+  modashId,
+  subject,
+}) {
+  let thread = await AdminEmailThreadModel.findOne({
+    campaignId,
+    executiveId,
+    recipientEmail,
+  });
+
+  if (!thread) {
+    thread = await AdminEmailThreadModel.create({
+      brandId,
+      campaignId,
+      executiveId,
+      role,
+      senderEmail,
+      recipientEmail,
+      replyToEmail: "temp@temp.local",
+      modashId,
+      subject,
+      lastMessageAt: new Date(),
+      lastMessageDirection: "OUTBOUND",
+    });
+
+    thread.replyToEmail = buildThreadReplyAddress(thread._id);
+    await thread.save();
+  } else {
+    thread.senderEmail = senderEmail;
+    thread.recipientEmail = recipientEmail;
+    thread.modashId = modashId;
+    thread.subject = subject;
+    thread.lastMessageAt = new Date();
+    thread.lastMessageDirection = "OUTBOUND";
+
+    if (!thread.replyToEmail) {
+      thread.replyToEmail = buildThreadReplyAddress(thread._id);
+    }
+
+    await thread.save();
+  }
+
+  return thread;
+}
 
 async function sendBulkEmailToModashByCampaignId(input) {
   const campaignId = cleanStr(input?.campaignId);
   const executiveId = cleanStr(input?.executiveId);
-  const from = cleanStr(input?.from).toLowerCase();
   const modashIds = Array.isArray(input?.modashIds)
     ? input.modashIds.map(cleanStr).filter(Boolean)
     : [];
@@ -67,10 +125,6 @@ async function sendBulkEmailToModashByCampaignId(input) {
 
   if (!mongoose.isValidObjectId(executiveId)) {
     throw new Error("Invalid executiveId");
-  }
-
-  if (!from) {
-    throw new Error("from is required");
   }
 
   if (!modashIds.length) {
@@ -92,20 +146,39 @@ async function sendBulkEmailToModashByCampaignId(input) {
     throw new Error("brandId missing in campaign");
   }
 
-  const brandObj = new mongoose.Types.ObjectId(String(campaign.brandId));
+  const brandObj = toObjectIdStrict(campaign.brandId, "brandId");
   const campaignTitle = getCampaignTitle(campaign);
 
   const admin = await AdminModel.findById(executiveId)
-    .select("name proxyEmail proxyemail")
+    .select("name email proxyEmail role status")
     .lean();
 
-  const executiveName = cleanStr(admin?.name) || "Team CollabGlam";
+  if (!admin) {
+    throw new Error("Admin not found");
+  }
 
-  const modashObjIds = modashIds
+  if (!admin.role || ![ROLES.IME, ROLES.BME].includes(admin.role)) {
+    throw new Error("Only IME or BME can send bulk emails");
+  }
+
+  if (admin.status !== "active") {
+    throw new Error("Admin account is not active");
+  }
+
+  const from = cleanEmail(input?.from || admin.proxyEmail || admin.email);
+  if (!from) {
+    throw new Error("Sender email missing for this admin");
+  }
+
+  const executiveName = cleanStr(admin.name) || "Team CollabGlam";
+
+  const validModashObjIds = modashIds
     .filter((id) => mongoose.isValidObjectId(id))
     .map((id) => new mongoose.Types.ObjectId(id));
 
-  const modashDocs = await ModashModel.find({ _id: { $in: modashObjIds } })
+  const modashDocs = await ModashModel.find({
+    _id: { $in: validModashObjIds },
+  })
     .select(
       "_id email contactEmail businessEmail primaryEmail contact profile name fullName displayName username"
     )
@@ -118,104 +191,90 @@ async function sendBulkEmailToModashByCampaignId(input) {
 
   const results = [];
 
-  for (const mid of modashIds) {
+  for (const modashId of modashIds) {
     try {
-      if (!mongoose.isValidObjectId(mid)) {
+      if (!mongoose.isValidObjectId(modashId)) {
         results.push({
-          modashId: mid,
+          modashId,
           success: false,
           error: "Invalid modashId",
         });
         continue;
       }
 
-      const doc = modashMap.get(mid);
+      const modashDoc = modashMap.get(modashId);
 
-      if (!doc) {
+      if (!modashDoc) {
         results.push({
-          modashId: mid,
+          modashId,
           success: false,
           error: "Modash record not found",
         });
         continue;
       }
 
-      const to = getModashEmail(doc);
-
+      const to = getModashEmail(modashDoc);
       if (!to) {
         results.push({
-          modashId: mid,
+          modashId,
           success: false,
-          error: "Email not found for this modashId",
+          error: "Email not found for this modash record",
         });
         continue;
       }
 
-      const influencerName = getInfluencerName(doc);
-      const modashObj = new mongoose.Types.ObjectId(mid);
+      const influencerName = getInfluencerName(modashDoc);
+      const modashObj = new mongoose.Types.ObjectId(modashId);
+      const subject = "Collab Opportunity";
 
-      let thread = await AdminEmailThreadModel.findOne({
+      const thread = await createOrGetThread({
+        brandId: brandObj,
         campaignId: campObj,
         executiveId: execObj,
+        role: admin.role,
+        senderEmail: from,
+        recipientEmail: to,
         modashId: modashObj,
+        subject,
       });
-
-      if (!thread) {
-        try {
-          thread = await AdminEmailThreadModel.create({
-            brandId: brandObj,
-            campaignId: campObj,
-            executiveId: execObj,
-            modashId: modashObj,
-            executiveEmail: to,
-            subject: "Collab Opportunity",
-            lastMessageAt: new Date(),
-          });
-        } catch (e) {
-          if (e?.code === 11000) {
-            thread = await AdminEmailThreadModel.findOne({
-              campaignId: campObj,
-              executiveId: execObj,
-              modashId: modashObj,
-            });
-          } else {
-            throw e;
-          }
-        }
-      } else {
-        thread.executiveEmail = to;
-        thread.lastMessageAt = new Date();
-        await thread.save();
-      }
-
-      if (!thread?._id) {
-        throw new Error("Thread create failed");
-      }
 
       const templ = collabOpportunityBulkTemplate({
         influencerName,
         campaignTitle,
-        replyToEmail: from,
+        replyToEmail: thread.replyToEmail,
         executiveName,
       });
 
-      const emailMsg = await AdminEmailMessageModel.create({
+      const emailMessage = await AdminEmailMessageModel.create({
         threadId: thread._id,
         direction: "OUTBOUND",
-        subject: templ.subject,
+        subject: templ.subject || subject,
         from,
         to: [to],
+        replyTo: [thread.replyToEmail],
+        provider: "SES",
+        providerStatus: "QUEUED",
+        textPreview: templ.text ? templ.text.slice(0, 1000) : null,
+        htmlPreview: templ.html ? String(templ.html).slice(0, 2000) : null,
       });
 
-      const emailResp = await sendEmail({
+      const { messageId } = await sendEmail({
         to,
         subject: templ.subject,
         text: templ.text,
         html: templ.html,
         from,
+        replyTo: [thread.replyToEmail],
+        configurationSetName: process.env.SES_CONFIGURATION_SET,
+        emailTags: [
+          { Name: "threadId", Value: String(thread._id) },
+          { Name: "campaignId", Value: String(campObj) },
+          { Name: "executiveId", Value: String(execObj) },
+          { Name: "modashId", Value: String(modashObj) },
+          { Name: "role", Value: String(admin.role) },
+          { Name: "source", Value: "MODASH" },
+        ],
       });
-
-      const messageId = emailResp?.messageId || null;
 
       let s3Key = null;
 
@@ -224,60 +283,69 @@ async function sendBulkEmailToModashByCampaignId(input) {
           type: "OUTBOUND_EMAIL",
           provider: "SES",
           threadId: String(thread._id),
-          emailMessageId: String(emailMsg._id),
-          campaignId,
+          emailMessageId: String(emailMessage._id),
+          campaignId: String(campObj),
           brandId: String(brandObj),
           executiveId: String(execObj),
           modashId: String(modashObj),
           to,
           from,
+          replyTo: thread.replyToEmail,
           subject: templ.subject,
           text: templ.text,
           html: templ.html,
-          sesMessageId: messageId,
+          sesMessageId: messageId || null,
           createdAt: new Date().toISOString(),
+          meta: {
+            source: "MODASH",
+            influencerName,
+            role: admin.role,
+          },
         });
-      } catch (e) {
-        console.error("S3 upload failed:", e?.message || e);
+      } catch (error) {
+        console.error("S3 upload failed:", error?.message || error);
       }
 
       await AdminEmailMessageModel.updateOne(
-        { _id: emailMsg._id },
+        { _id: emailMessage._id },
         {
           $set: {
-            messageId: messageId || undefined,
-            s3Key: s3Key || undefined,
-            s3Bucket: process.env.EMAIL_ARCHIVE_BUCKET || undefined,
+            messageId: messageId || null,
+            providerStatus: messageId ? "SENT" : "FAILED",
+            s3Key: s3Key || null,
+            s3Bucket: process.env.EMAIL_ARCHIVE_BUCKET || null,
           },
         }
       );
 
       results.push({
-        modashId: mid,
+        modashId,
         to,
         threadId: String(thread._id),
-        emailMessageId: String(emailMsg._id),
-        sesMessageId: messageId,
+        emailMessageId: String(emailMessage._id),
+        sesMessageId: messageId || null,
+        replyToEmail: thread.replyToEmail,
         s3Key,
         success: true,
       });
-    } catch (err) {
+    } catch (error) {
       results.push({
-        modashId: mid,
+        modashId,
         success: false,
-        error: err?.message || "Failed",
+        error: error?.message || "Failed",
       });
     }
   }
 
-  const sent = results.filter((r) => r.success).length;
+  const sent = results.filter((item) => item.success).length;
   const failed = results.length - sent;
 
   return {
-    campaignId,
-    executiveId,
+    campaignId: String(campObj),
+    executiveId: String(execObj),
     from,
     campaignTitle,
+    role: admin.role,
     total: results.length,
     sent,
     failed,

@@ -78,7 +78,9 @@ const ConfirmationSchema = new mongoose.Schema(
 const DeliverableRowSchema = new mongoose.Schema(
   {
     srNo: { type: Number, default: 1 },
-    platformHandle: { type: String, default: "" },
+    platform: { type: String, default: "" },         
+    Handle: { type: [String], default: [] },          
+    platformHandle: { type: String, default: "" },    
     deliverableFormat: { type: String, default: "" },
     qty: { type: Number, default: 1 },
     draftDue: { type: String, default: "" },
@@ -159,7 +161,15 @@ const ReviewSchema = new mongoose.Schema(
   },
   { _id: false }
 );
-
+const CommercialMilestoneSchema = new mongoose.Schema(
+  {
+    milestoneName: { type: String, default: "" },
+    paymentAmount: { type: Number, default: 0 },
+    triggerEvent:  { type: String, default: "" },
+    dueDate:       { type: String, default: "" },
+  },
+  { _id: false }
+);
 const CommercialSchema = new mongoose.Schema(
   {
     totalCampaignFee: { type: Number, default: 0 },
@@ -175,6 +185,10 @@ const CommercialSchema = new mongoose.Schema(
       default:
         "Unless expressly stated otherwise, 10% of the applicable Influencer compensation funded through the Platform is deducted from the Influencer payout and retained by CollabGlam; the Brand-funded campaign amount remains fixed.",
     },
+    milestones: { type: [CommercialMilestoneSchema], default: [] },
+    payoutMethod:    { type: String, default: "" },
+    payoutAccountId: { type: String, default: "" },
+    taxId:           { type: String, default: "" },
   },
   { _id: false }
 );
