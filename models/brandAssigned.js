@@ -12,18 +12,18 @@ const brandAssignedSchema = new mongoose.Schema(
     RHId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Master", 
-      required: true,
+      default: null,
     },
 
     bdmId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Master",
-      required: true,
+      default: null,
     },
     idmId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Master",
-      required: true,
+      default: null,
     },
 
     status: {
