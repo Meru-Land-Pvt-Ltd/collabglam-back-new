@@ -681,83 +681,129 @@ console.log("assignedData for brand", item._id, assignedData);
   }
 };
 
- exports.assignBrand = async (req, res) => {
+exports.assignBrand = async (req, res) => {
   try {
     const { brandId, RHId, bdmId, idmId } = req.body;
 
     if (!brandId) {
       return res.status(400).json({
         success: false,
-        message: "brandId and RHId are required",
+        message: "brandId is required",
       });
     }
 
-    // 1) If brand already has ACTIVE assignment, don't create new
-    const activeAssign = await BrandAssigned.findOne({
-      brandId,
-      status: "active",
-    }).exec();
+    const wantsRH = RHId !== undefined && RHId !== null && String(RHId).trim() !== "";
+    const wantsBDMorIDM = bdmId !== undefined || idmId !== undefined;
 
-    if (activeAssign) {
-      // if different RHId is trying to assign -> conflict
-      if (String(activeAssign.RHId) !== String(RHId)) {
-        return res.status(409).json({
-          success: false,
-          message: "Brand already has an active assignment with a different RHId",
-          data: activeAssign,
+    if (!wantsRH && !wantsBDMorIDM) {
+      return res.status(400).json({
+        success: false,
+        message: "Send RHId to assign RH OR send bdmId/idmId to assign BDM/IDM",
+      });
+    }
+
+    // ---------------------------
+    // CASE A: RH assignment (RHId present)
+    // ---------------------------
+    if (wantsRH) {
+      const set = { RHId, status: "active" };
+      if (bdmId !== undefined) set.bdmId = bdmId;
+      if (idmId !== undefined) set.idmId = idmId;
+
+      // 1) Update active doc if exists
+      let doc = await BrandAssigned.findOneAndUpdate(
+        { brandId, status: "active" },
+        { $set: set },
+        { new: true }
+      ).exec();
+
+      if (doc) {
+        return res.status(200).json({
+          success: true,
+          message: "RH assigned successfully (updated active assignment)",
+          data: doc,
         });
       }
 
-      // same RHId -> update only (no new doc)
-      if (bdmId !== undefined) activeAssign.bdmId = bdmId;
-      if (idmId !== undefined) activeAssign.idmId = idmId;
+      // 2) Reactivate/update latest old doc if exists
+      doc = await BrandAssigned.findOneAndUpdate(
+        { brandId },
+        { $set: set },
+        { new: true, sort: { updatedAt: -1, createdAt: -1 } }
+      ).exec();
 
-      await activeAssign.save();
+      if (doc) {
+        return res.status(200).json({
+          success: true,
+          message: "RH assigned successfully (reactivated previous assignment)",
+          data: doc,
+        });
+      }
 
-      return res.status(200).json({
+      // 3) Create new if none exists
+      const created = await BrandAssigned.create({
+        brandId,
+        RHId,
+        bdmId: bdmId ?? null,
+        idmId: idmId ?? null,
+        status: "active",
+      });
+
+      return res.status(201).json({
         success: true,
-        message: "Brand assignment updated successfully",
-        data: activeAssign,
+        message: "RH assigned successfully (created new assignment)",
+        data: created,
       });
     }
 
-    // 2) No active assignment:
-    // If there is an old assignment for same brandId + RHId (status not active) -> update it to active
-    const existingInactive = await BrandAssigned.findOne({
-      brandId,
-      RHId,
-      status: { $ne: "active" },
-    })
-      .sort({ updatedAt: -1, createdAt: -1 })
-      .exec();
+    // ---------------------------
+    // CASE B: Only BDM/IDM assignment (RHId NOT present)
+    // RH must already exist in DB
+    // ---------------------------
+    const set = {};
+    if (bdmId !== undefined) set.bdmId = bdmId;
+    if (idmId !== undefined) set.idmId = idmId;
 
-    if (existingInactive) {
-      existingInactive.status = "active";
-      if (bdmId !== undefined) existingInactive.bdmId = bdmId;
-      if (idmId !== undefined) existingInactive.idmId = idmId;
+    // 1) Update active doc ONLY if RH is already assigned
+    let updated = await BrandAssigned.findOneAndUpdate(
+      {
+        brandId,
+        status: "active",
+        RHId: { $exists: true, $ne: null },
+      },
+      { $set: set },
+      { new: true }
+    ).exec();
 
-      await existingInactive.save();
-
+    if (updated) {
       return res.status(200).json({
         success: true,
-        message: "Previous assignment re-activated and updated",
-        data: existingInactive,
+        message: "BDM/IDM assigned successfully (updated active RH assignment)",
+        data: updated,
       });
     }
 
-    // 3) Nothing exists -> create new
-    const newAssign = await BrandAssigned.create({
-      brandId,
-      RHId,
-      bdmId: bdmId ?? null,
-      idmId: idmId ?? null,
-      status: "active",
-    });
+    // 2) If no active doc, update latest doc where RH exists (reactivate)
+    updated = await BrandAssigned.findOneAndUpdate(
+      {
+        brandId,
+        RHId: { $exists: true, $ne: null },
+      },
+      { $set: { ...set, status: "active" } },
+      { new: true, sort: { updatedAt: -1, createdAt: -1 } }
+    ).exec();
 
-    return res.status(201).json({
+    if (!updated) {
+      return res.status(400).json({
+        success: false,
+        message: "RH is not assigned for this brand. Assign RH first, then add BDM/IDM.",
+      });
+    }
+
+    return res.status(200).json({
       success: true,
-      message: "Brand assigned successfully",
-      data: newAssign,
+      message: "BDM/IDM assigned successfully (updated existing RH assignment)",
+      data: updated,
     });
   } catch (e) {
     console.error("assignBrand error:", e);
