@@ -19,6 +19,7 @@ router.post("/assign-brand", adminAuth, superOrRevenueHead, adminController.assi
 router.put("/update-status", adminAuth, superOrRevenueHead, adminController.updateBrandAssignment);
 router.put("/update-rhId", adminAuth, superOrRevenueHead, adminController.updateBrandAssignmentStatusAndRH);
 router.get("/get-executive-list", adminAuth, adminController.listExecutiveAdmin);
+router.get("/get-rm-list", adminAuth, adminController.rmlist);
 
 
 router.post(

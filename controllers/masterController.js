@@ -933,7 +933,24 @@ exports.fullyManagedBrandList = async (req, res) => {
     }
   };
 
-  
+  exports.rmlist= async(req,res)=>{
+    try{
+      const rms = await AdminModel.find({role:"revenue_head",status:"active"})
+      .select("-passwordHash -inviteTokenHash")
+      .sort({ createdAt: -1 });
+
+      return res.status(200).json({
+        success: true,
+        count: rms.length,
+        data: rms,
+      });
+    }catch(e){
+      return res.status(500).json({
+        success: false,
+        message: e?.message || "Internal error",
+      });
+    }
+  }
 
 
 
