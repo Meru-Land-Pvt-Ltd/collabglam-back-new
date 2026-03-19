@@ -12,13 +12,18 @@ function toObjectIdStrict(id, fieldName) {
 }
 
 function buildThreadReplyAddress(threadId) {
-  const domain = process.env.INBOUND_REPLY_DOMAIN || "reply.mail.collabglam.cloud";
+  const domain = process.env.INBOUND_REPLY_DOMAIN || "reply.collabglam.cloud";
   return `t_${threadId}@${domain}`.toLowerCase();
 }
 
 function extractThreadIdFromReplyAddress(email) {
   const clean = cleanEmail(email);
-  const match = clean.match(/^reply\+t_([a-f0-9]{24})@/i);
+  const escapedDomain = (process.env.INBOUND_REPLY_DOMAIN || "reply.collabglam.cloud")
+    .replace(/\./g, "\\.");
+
+  const regex = new RegExp(`^t_([a-f0-9]{24})@${escapedDomain}$`, "i");
+  const match = clean.match(regex);
+
   return match ? match[1] : null;
 }
 

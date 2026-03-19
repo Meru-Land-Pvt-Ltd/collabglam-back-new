@@ -36,7 +36,7 @@ async function adminAuth(req, res, next) {
     }
 
     const admin = await AdminModel.findById(decoded.adminId).select(
-      "email role status access proxyEmail"
+      "email name role status access proxyEmail parentAdmin rootAdmin"
     );
 
     if (!admin) {
@@ -52,7 +52,7 @@ async function adminAuth(req, res, next) {
       });
     }
 
-    const roleKey = String(admin.role || "").trim();
+    const roleKey = String(admin.role || "").trim().toLowerCase();
     if (!roleKey) {
       return res.status(403).json({
         message: "Role not assigned",
@@ -70,10 +70,15 @@ async function adminAuth(req, res, next) {
       : [];
 
     req.admin = {
+      _id: String(admin._id),
       adminId: String(admin._id),
       email: admin.email || decoded.email,
+      name: admin.name || "",
       proxyEmail: admin.proxyEmail || "",
       role: roleKey,
+      status: String(admin.status || "").toLowerCase(),
+      parentAdmin: admin.parentAdmin ? String(admin.parentAdmin) : null,
+      rootAdmin: admin.rootAdmin ? String(admin.rootAdmin) : null,
       access,
       iat: decoded.iat,
       exp: decoded.exp,
