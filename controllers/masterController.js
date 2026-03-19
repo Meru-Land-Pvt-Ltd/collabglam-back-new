@@ -683,7 +683,7 @@ exports.fullyManagedBrandList = async (req, res) => {
 
   exports.assignBrand = async (req, res) => {
     try {
-      const { brandId, RHId, bdmId } = req.body;
+      const { brandId, RHId, bdmId,idmId } = req.body;
   
       if (!brandId || !RHId ) {
         return res.status(400).json({
@@ -692,16 +692,7 @@ exports.fullyManagedBrandList = async (req, res) => {
         });
       }
   
-      if (
-        !mongoose.isValidObjectId(brandId) ||
-        !mongoose.isValidObjectId(RHId) ||
-        !mongoose.isValidObjectId(bdmId)
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid IDs",
-        });
-      }
+     
   
       // 🔥 Check if brand already has active assignment
       const existing = await BrandAssigned.findOne({
@@ -720,6 +711,7 @@ exports.fullyManagedBrandList = async (req, res) => {
         brandId,
         RHId,
         bdmId,
+        idmId,
         status: "active",
       });
   
