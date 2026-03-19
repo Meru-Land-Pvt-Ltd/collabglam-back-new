@@ -681,53 +681,92 @@ console.log("assignedData for brand", item._id, assignedData);
   }
 };
 
-  exports.assignBrand = async (req, res) => {
-    try {
-      const { brandId, RHId, bdmId,idmId } = req.body;
-  
-      if (!brandId || !RHId ) {
-        return res.status(400).json({
-          success: false,
-          message: "brandId, RHId and bdmId are required",
-        });
-      }
-  
-     
-  
-      // 🔥 Check if brand already has active assignment
-      const existing = await BrandAssigned.findOne({
-        brandId,
-        status: "active",
-      });
-  
-      if (existing) {
-        return res.status(409).json({
-          success: false,
-          message: "Brand already has an active assignment",
-        });
-      }
-  
-      const newAssign = await BrandAssigned.create({
-        brandId,
-        RHId,
-        bdmId,
-        idmId,
-        status: "active",
-      });
-  
-      return res.status(201).json({
-        success: true,
-        message: "Brand assigned successfully",
-        data: newAssign,
-      });
-    } catch (e) {
-      return res.status(500).json({
+ exports.assignBrand = async (req, res) => {
+  try {
+    const { brandId, RHId, bdmId, idmId } = req.body;
+
+    if (!brandId || !RHId) {
+      return res.status(400).json({
         success: false,
-        message: e?.message || "Internal error",
+        message: "brandId and RHId are required",
       });
     }
-  };
 
+    // 1) If brand already has ACTIVE assignment, don't create new
+    const activeAssign = await BrandAssigned.findOne({
+      brandId,
+      status: "active",
+    }).exec();
+
+    if (activeAssign) {
+      // if different RHId is trying to assign -> conflict
+      if (String(activeAssign.RHId) !== String(RHId)) {
+        return res.status(409).json({
+          success: false,
+          message: "Brand already has an active assignment with a different RHId",
+          data: activeAssign,
+        });
+      }
+
+      // same RHId -> update only (no new doc)
+      if (bdmId !== undefined) activeAssign.bdmId = bdmId;
+      if (idmId !== undefined) activeAssign.idmId = idmId;
+
+      await activeAssign.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Brand assignment updated successfully",
+        data: activeAssign,
+      });
+    }
+
+    // 2) No active assignment:
+    // If there is an old assignment for same brandId + RHId (status not active) -> update it to active
+    const existingInactive = await BrandAssigned.findOne({
+      brandId,
+      RHId,
+      status: { $ne: "active" },
+    })
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .exec();
+
+    if (existingInactive) {
+      existingInactive.status = "active";
+      if (bdmId !== undefined) existingInactive.bdmId = bdmId;
+      if (idmId !== undefined) existingInactive.idmId = idmId;
+
+      await existingInactive.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Previous assignment re-activated and updated",
+        data: existingInactive,
+      });
+    }
+
+    // 3) Nothing exists -> create new
+    const newAssign = await BrandAssigned.create({
+      brandId,
+      RHId,
+      bdmId: bdmId ?? null,
+      idmId: idmId ?? null,
+      status: "active",
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Brand assigned successfully",
+      data: newAssign,
+    });
+  } catch (e) {
+    console.error("assignBrand error:", e);
+    return res.status(500).json({
+      success: false,
+      message: e?.message || "Internal error",
+    });
+  }
+};
 
   exports.updateBrandAssignment = async (req, res) => {
     try {
@@ -804,7 +843,7 @@ console.log("assignedData for brand", item._id, assignedData);
       });
     }
   };
-
+//
 
   exports.updateBrandAssignmentStatusAndRH = async (req, res) => {
     try {
