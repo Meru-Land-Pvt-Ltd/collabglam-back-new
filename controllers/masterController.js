@@ -1029,66 +1029,56 @@ exports.assignBrand = async (req, res) => {
     }
   }
 
-  exports.getAllocatedBrands = async (req, res) => {
+  exports.allocateBrand = async (req, res) => {
     try {
-      // ✅ token middleware should set req.user
-      const adminIdRaw = req.user?.adminId || req.user?.id || req.user?._id;
+      const admin = req.admin;
+      const adminId = admin?.adminId;
   
-      if (!adminIdRaw) {
+      if (!adminId) {
         return res.status(401).json({
           success: false,
-          message: "Unauthorized: adminId not found in token",
+          message: "Unauthorized: adminId not found",
         });
       }
   
-      // if stored as ObjectId in DB, convert safely
-      const adminId = mongoose.Types.ObjectId.isValid(String(adminIdRaw))
-        ? new mongoose.Types.ObjectId(String(adminIdRaw))
-        : String(adminIdRaw);
+      const adminIdStr = String(adminId);
   
-      // ✅ Find allocations where this admin is BDM or IDM
+      // support both string and ObjectId storage in DB
+      const isObjId = mongoose.Types.ObjectId.isValid(adminIdStr);
+      const adminObjId = isObjId ? new mongoose.Types.ObjectId(adminIdStr) : null;
+  
+      const orConditions = [
+        { bdmId: adminIdStr },
+        { idmId: adminIdStr },
+      ];
+      if (adminObjId) {
+        orConditions.push({ bdmId: adminObjId }, { idmId: adminObjId });
+      }
+  
       const allocations = await BrandAssigned.find({
         status: "active",
-        $or: [{ bdmId: adminId }, { idmId: adminId }],
+        $or: orConditions,
       })
-        .populate("brandId") // assumes brandId is ref to Brand model
+        .populate("brandId") // if brandId is ref; otherwise it will just return brandId as stored
         .sort({ updatedAt: -1, createdAt: -1 })
         .lean();
   
-      if (!allocations || allocations.length === 0) {
-        return res.status(200).json({
-          success: true,
-          message: "No brands allocated to this admin",
-          count: 0,
-          data: [],
-        });
-      }
-  
-      // ✅ Optional: return unique brand list also
-      const uniqueBrandMap = new Map();
-      for (const a of allocations) {
-        const b = a.brandId;
-        if (b && b._id) uniqueBrandMap.set(String(b._id), b);
-      }
-      const uniqueBrands = Array.from(uniqueBrandMap.values());
-  
       return res.status(200).json({
         success: true,
-        message: "Allocated brands fetched successfully",
+        message: allocations.length
+          ? "Allocated brands fetched successfully"
+          : "No brands allocated to this admin",
         count: allocations.length,
-        uniqueBrandsCount: uniqueBrands.length,
-        data: allocations,       // includes assignment + populated brand
-        brands: uniqueBrands,    // just brands list (unique)
+        data: allocations,
       });
     } catch (e) {
-      console.error("getAllocatedBrands error:", e);
+      console.error("allocateBrand error:", e);
       return res.status(500).json({
         success: false,
         message: e?.message || "Internal server error",
       });
     }
   };
-
 
 
 
