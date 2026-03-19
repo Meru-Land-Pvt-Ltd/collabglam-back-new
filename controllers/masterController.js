@@ -629,7 +629,7 @@ exports.fullyManagedBrandList = async (req, res) => {
         let assignedRm = "";
         let assignedBm = "";
         let assignedIm = "";
-
+console.log("assignedData for brand", item._id, assignedData);
         if (assignedData) {
           const masterIds = [
             assignedData.RHId,
@@ -647,14 +647,14 @@ exports.fullyManagedBrandList = async (req, res) => {
               masterMap[String(m._id)] = m.name || "";
             });
 
-            assignedRm = assignedData.rmId
-              ? masterMap[String(assignedData.rmId)] || ""
+            assignedRm = assignedData.RHId
+              ? masterMap[String(assignedData.RHId)] || ""
               : "";
-            assignedBm = assignedData.bmId
-              ? masterMap[String(assignedData.bmId)] || ""
+            assignedBm = assignedData.bdmId
+              ? masterMap[String(assignedData.bdmId)] || ""
               : "";
-            assignedIm = assignedData.imId
-              ? masterMap[String(assignedData.imId)] || ""
+            assignedIm = assignedData.idmId
+              ? masterMap[String(assignedData.idmId)] || ""
               : "";
           }
         }
