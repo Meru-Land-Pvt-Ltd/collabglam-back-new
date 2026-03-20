@@ -51,7 +51,7 @@ const milestoneHistorySchema = new Schema(
   {
     timestamps: true,
   }
-);
+);   
 
 const milestoneSchema = new Schema(
   {

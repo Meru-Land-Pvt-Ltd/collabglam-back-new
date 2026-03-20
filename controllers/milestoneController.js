@@ -35,11 +35,14 @@ const syncUsableBalance = (wallet) => {
   };
 };
 
-const getOrCreateBrandWallet = async (brandId) => {
-  let wallet = await BrandWalletModel.findOne({ brandId });
+const getOrCreateBrandWallet = async (brandId, session = null) => {
+  let query = BrandWalletModel.findOne({ brandId });
+  if (session) query = query.session(session);
+
+  let wallet = await query;
 
   if (!wallet) {
-    wallet = await BrandWalletModel.create({
+    wallet = new BrandWalletModel({
       brandId,
       walletBalance: 0,
       usableBalance: 0,
@@ -49,7 +52,13 @@ const getOrCreateBrandWallet = async (brandId) => {
   }
 
   syncUsableBalance(wallet);
-  await wallet.save();
+
+  if (session) {
+    await wallet.save({ session });
+  } else {
+    await wallet.save();
+  }
+
   return wallet;
 };
 
@@ -81,238 +90,303 @@ const getWalletSnapshotByBrandId = async (brandId) => {
 // body: { brandId, influencerId, campaignId, milestoneTitle, amount, milestoneDescription }
 // ======================================================================
 exports.createMilestone = async (req, res) => {
-  const {
-    brandId,
-    influencerId,
-    campaignId,
-    milestoneTitle,
-    amount,
-    milestoneDescription = "",
-  } = req.body;
+  const session = await mongoose.startSession();
 
-  const amountNum = Number(amount);
-
-  if (!brandId || !influencerId || !campaignId || !milestoneTitle || amount == null) {
-    return res.status(400).json({
-      message:
-        "brandId, influencerId, campaignId, milestoneTitle and amount are required",
-    });
-  }
-
-  if (isNaN(amountNum) || amountNum <= 0) {
-    return res.status(400).json({ message: "amount must be a valid number > 0" });
-  }
+  const abort = (status, message, extra = {}) => {
+    const err = new Error(message);
+    err.status = status;
+    err.extra = extra;
+    throw err;
+  };
 
   try {
-    // 1) Verify campaign
-    const camp = await Campaign.findById(campaignId).lean();
-    if (!camp) {
-      return res.status(404).json({ message: "Campaign not found" });
-    }
-
-    // 2) Contract check before doing any mutation
-    let contractDoc = null;
-
-    if (camp.contractId) {
-      try {
-        contractDoc = await Contract.findById(camp.contractId);
-      } catch {
-        contractDoc = null;
-      }
-    }
-
-    if (!contractDoc) {
-      contractDoc = await Contract.findOne({
-        brandId,
-        influencerId,
-        campaignId,
-      }).sort({ createdAt: -1 });
-    }
-
-    if (contractDoc) {
-      const st = String(contractDoc.status || "").toUpperCase();
-      const canCreateMilestone =
-        st === CONTRACT_STATUS.CONTRACT_SIGNED ||
-        st === CONTRACT_STATUS.MILESTONES_CREATED;
-
-      if (!canCreateMilestone) {
-        return res.status(400).json({
-          message: "Contract must be fully signed before creating milestones.",
-        });
-      }
-    }
-
-    // 3) milestone doc
-    let doc = await Milestone.findOne({ brandId });
-    if (!doc) {
-      doc = new Milestone({ brandId, totalAmount: 0, milestoneHistory: [] });
-    }
-
-    doc.totalAmount = Number(doc.totalAmount || 0);
-
-    // 4) Previous milestone check for same influencer + campaign
-    const prev = (doc.milestoneHistory || []).filter(
-      (e) =>
-        String(e.influencerId) === String(influencerId) &&
-        String(e.campaignId) === String(campaignId)
-    );
-
-    if (prev.length > 0) {
-      prev.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      const last = prev[0];
-      if (!last.released) {
-        return res.status(400).json({
-          message: "Cannot create new milestone until the previous milestone is released",
-        });
-      }
-    }
-
-    // 5) Campaign budget check
-    const campaignBudget = Number(camp.budget);
-    const hasBudget = !isNaN(campaignBudget) && campaignBudget > 0;
-
-    if (hasBudget) {
-      const existingTotalForCampaign = (doc.milestoneHistory || [])
-        .filter((e) => String(e.campaignId) === String(campaignId))
-        .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
-
-      if (existingTotalForCampaign >= campaignBudget) {
-        return res.status(400).json({
-          message:
-            "You have added milestone equal to campaign now not able to add now milestone",
-        });
-      }
-
-      if (existingTotalForCampaign + amountNum > campaignBudget) {
-        return res.status(400).json({
-          message: "Total milestone amount cannot exceed campaign budget",
-        });
-      }
-    }
-
-    // 6) Wallet check from BrandWallet only
-    const wallet = await getOrCreateBrandWallet(brandId);
-    const walletSnapBefore = syncUsableBalance(wallet);
-
-    if (walletSnapBefore.usableBalance < amountNum) {
-      const needToAdd = Math.max(0, amountNum - walletSnapBefore.usableBalance);
-
-      return res.status(400).json({
-        message: `Insufficient wallet balance. Please add $${needToAdd.toFixed(2)} to your wallet.`,
-        walletBalance: walletSnapBefore.walletBalance,
-        frozenBalance: walletSnapBefore.frozenBalance,
-        usableBalance: walletSnapBefore.usableBalance,
-        needToAdd,
-      });
-    }
-
-    // 7) Freeze this amount in BrandWallet for brand + campaign + influencer
-    const freezeIndex = (wallet.freezes || []).findIndex(
-      (f) =>
-        String(f.brandId) === String(brandId) &&
-        String(f.campaignId) === String(campaignId) &&
-        String(f.influencerId) === String(influencerId)
-    );
-
-    if (freezeIndex >= 0) {
-      wallet.freezes[freezeIndex].freezeAmount =
-        Number(wallet.freezes[freezeIndex].freezeAmount || 0) + amountNum;
-    } else {
-      wallet.freezes.push({
-        brandId,
-        campaignId,
-        influencerId,
-        freezeAmount: amountNum,
-      });
-    }
-
-    const walletSnapAfter = syncUsableBalance(wallet);
-    await wallet.save();
-
-    // 8) Create milestone entry
-    doc.milestoneHistory.push({
+    const {
+      brandId,
       influencerId,
       campaignId,
       milestoneTitle,
-      amount: amountNum,
-      milestoneDescription,
-      released: false,
-      payoutStatus: "pending",
-    });
+      amount,
+      milestoneDescription = "",
+    } = req.body;
 
-    doc.totalAmount = doc.totalAmount + amountNum;
-    await doc.save();
+    const amountNum = Number(amount);
 
-    const createdEntry = doc.milestoneHistory[doc.milestoneHistory.length - 1];
-
-    // 9) Update contract status
-    let updatedContract = null;
-
-    if (contractDoc) {
-      const alreadyMilestonesLocked =
-        String(contractDoc.status || "").toUpperCase() ===
-        CONTRACT_STATUS.MILESTONES_CREATED;
-
-      if (!alreadyMilestonesLocked) {
-        contractDoc.status = CONTRACT_STATUS.MILESTONES_CREATED;
-        contractDoc.milestonesCreatedAt = contractDoc.milestonesCreatedAt || new Date();
-        contractDoc.awaitingRole = null;
-
-        contractDoc.statusFlags = contractDoc.statusFlags || {};
-        contractDoc.statusFlags.awaitingCollabglam = false;
-
-        contractDoc.audit = contractDoc.audit || [];
-        contractDoc.audit.push({
-          type: "MILESTONES_CREATED",
-          role: "system",
-          details: { brandId, influencerId, campaignId },
-          at: new Date(),
-        });
-
-        await contractDoc.save();
-      }
-
-      updatedContract = contractDoc;
-
-      await Campaign.updateOne(
-        { _id: campaignId },
-        {
-          $set: {
-            contractId: contractDoc._id || contractDoc.contractId,
-            isContracted: 1,
-            contractStatus: contractDoc.status,
-            milestonesCreatedAt: contractDoc.milestonesCreatedAt || new Date(),
-          },
-        }
-      );
+    if (!brandId || !influencerId || !campaignId || !milestoneTitle || amount == null) {
+      return res.status(400).json({
+        message:
+          "brandId, influencerId, campaignId, milestoneTitle and amount are required",
+      });
     }
 
-    // 10) Notifications
+    if (isNaN(amountNum) || amountNum <= 0) {
+      return res.status(400).json({ message: "amount must be a valid number > 0" });
+    }
+
+    let responsePayload = null;
+    let emailData = null;
+
+    await session.withTransaction(async () => {
+      // 1) Verify campaign
+      const camp = await Campaign.findById(campaignId).session(session).lean();
+      if (!camp) {
+        abort(404, "Campaign not found");
+      }
+
+      // 2) Contract check before any mutation
+      let contractDoc = null;
+
+      if (camp.contractId) {
+        try {
+          contractDoc = await Contract.findById(camp.contractId).session(session);
+        } catch {
+          contractDoc = null;
+        }
+      }
+
+      if (!contractDoc) {
+        contractDoc = await Contract.findOne({
+          brandId,
+          influencerId,
+          campaignId,
+        })
+          .sort({ createdAt: -1 })
+          .session(session);
+      }
+
+      if (contractDoc) {
+        const st = String(contractDoc.status || "").toUpperCase();
+        const canCreateMilestone =
+          st === CONTRACT_STATUS.CONTRACT_SIGNED ||
+          st === CONTRACT_STATUS.MILESTONES_CREATED;
+
+        if (!canCreateMilestone) {
+          abort(400, "Contract must be fully signed before creating milestones.");
+        }
+      }
+
+      // 3) milestone doc
+      let doc = await Milestone.findOne({ brandId }).session(session);
+      if (!doc) {
+        doc = new Milestone({
+          brandId,
+          totalAmount: 0,
+          milestoneHistory: [],
+        });
+      }
+
+      doc.totalAmount = Number(doc.totalAmount || 0);
+
+      // 4) Previous milestone check for same influencer + campaign
+      const prev = (doc.milestoneHistory || []).filter(
+        (e) =>
+          String(e.influencerId) === String(influencerId) &&
+          String(e.campaignId) === String(campaignId)
+      );
+
+      if (prev.length > 0) {
+        prev.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        const last = prev[0];
+
+        if (!last.released) {
+          abort(
+            400,
+            "Cannot create new milestone until the previous milestone is released"
+          );
+        }
+      }
+
+      // 5) Campaign budget check
+      const campaignBudget = Number(camp.budget);
+      const hasBudget = !isNaN(campaignBudget) && campaignBudget > 0;
+
+      if (hasBudget) {
+        const existingTotalForCampaign = (doc.milestoneHistory || [])
+          .filter((e) => String(e.campaignId) === String(campaignId))
+          .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+
+        if (existingTotalForCampaign >= campaignBudget) {
+          abort(
+            400,
+            "You have added milestone equal to campaign now not able to add now milestone"
+          );
+        }
+
+        if (existingTotalForCampaign + amountNum > campaignBudget) {
+          abort(400, "Total milestone amount cannot exceed campaign budget");
+        }
+      }
+
+      // 6) Wallet check only
+      const wallet = await getOrCreateBrandWallet(brandId, session);
+      const walletSnapBefore = syncUsableBalance(wallet);
+
+      if (walletSnapBefore.usableBalance < amountNum) {
+        const needToAdd = Math.max(0, amountNum - walletSnapBefore.usableBalance);
+
+        abort(
+          400,
+          `Insufficient wallet balance. Please add $${needToAdd.toFixed(2)} to your wallet.`,
+          {
+            walletBalance: walletSnapBefore.walletBalance,
+            frozenBalance: walletSnapBefore.frozenBalance,
+            usableBalance: walletSnapBefore.usableBalance,
+            needToAdd,
+          }
+        );
+      }
+
+      // 7) First create milestone entry
+      doc.milestoneHistory.push({
+        influencerId,
+        campaignId,
+        milestoneTitle,
+        amount: amountNum,
+        milestoneDescription,
+        released: false,
+        payoutStatus: "pending",
+      });
+
+      doc.totalAmount = doc.totalAmount + amountNum;
+      await doc.save({ session });
+
+      const createdEntry = doc.milestoneHistory[doc.milestoneHistory.length - 1];
+
+      // 8) Freeze only AFTER milestone save succeeds
+      const freezeIndex = (wallet.freezes || []).findIndex(
+        (f) =>
+          String(f.brandId) === String(brandId) &&
+          String(f.campaignId) === String(campaignId) &&
+          String(f.influencerId) === String(influencerId)
+      );
+
+      if (freezeIndex >= 0) {
+        wallet.freezes[freezeIndex].freezeAmount =
+          Number(wallet.freezes[freezeIndex].freezeAmount || 0) + amountNum;
+      } else {
+        wallet.freezes.push({
+          brandId,
+          campaignId,
+          influencerId,
+          freezeAmount: amountNum,
+        });
+      }
+
+      const walletSnapAfter = syncUsableBalance(wallet);
+      await wallet.save({ session });
+
+      // 9) Update contract status
+      let updatedContract = null;
+
+      if (contractDoc) {
+        const alreadyMilestonesLocked =
+          String(contractDoc.status || "").toUpperCase() ===
+          CONTRACT_STATUS.MILESTONES_CREATED;
+
+        if (!alreadyMilestonesLocked) {
+          contractDoc.status = CONTRACT_STATUS.MILESTONES_CREATED;
+          contractDoc.milestonesCreatedAt =
+            contractDoc.milestonesCreatedAt || new Date();
+          contractDoc.awaitingRole = null;
+
+          contractDoc.statusFlags = contractDoc.statusFlags || {};
+          contractDoc.statusFlags.awaitingCollabglam = false;
+
+          contractDoc.audit = contractDoc.audit || [];
+          contractDoc.audit.push({
+            type: "MILESTONES_CREATED",
+            role: "system",
+            details: { brandId, influencerId, campaignId },
+            at: new Date(),
+          });
+
+          await contractDoc.save({ session });
+        }
+
+        updatedContract = contractDoc;
+
+        await Campaign.updateOne(
+          { _id: campaignId },
+          {
+            $set: {
+              contractId: contractDoc._id || contractDoc.contractId,
+              isContracted: 1,
+              contractStatus: contractDoc.status,
+              milestonesCreatedAt: contractDoc.milestonesCreatedAt || new Date(),
+            },
+          },
+          { session }
+        );
+
+        responsePayload = {
+          contractStatus: updatedContract?.status || contractDoc?.status || null,
+          milestonesCreatedAt:
+            updatedContract?.milestonesCreatedAt ||
+            contractDoc?.milestonesCreatedAt ||
+            null,
+        };
+      }
+
+      responsePayload = {
+        ...(responsePayload || {}),
+        message: "Milestone created and amount frozen successfully",
+        milestoneId: String(doc._id),
+        totalAmount: doc.totalAmount,
+        entry: {
+          milestoneHistoryId: String(createdEntry._id),
+          influencerId: createdEntry.influencerId,
+          campaignId: createdEntry.campaignId,
+          milestoneTitle: createdEntry.milestoneTitle,
+          amount: createdEntry.amount,
+          milestoneDescription: createdEntry.milestoneDescription,
+          released: createdEntry.released,
+          payoutStatus: createdEntry.payoutStatus,
+          createdAt: createdEntry.createdAt,
+        },
+        wallet: {
+          walletBalance: walletSnapAfter.walletBalance,
+          frozenBalance: walletSnapAfter.frozenBalance,
+          usableBalance: walletSnapAfter.usableBalance,
+        },
+      };
+
+      emailData = {
+        brandId,
+        influencerId,
+        campaignName: camp.productOrServiceName || "",
+        milestoneTitle,
+        amount: amountNum,
+        milestoneDescription,
+      };
+    });
+
+    session.endSession();
+
+    // Notifications after transaction success
     createAndEmit({
-      influencerId,
+      influencerId: req.body.influencerId,
       type: "milestone.created",
-      title: `New milestone: ${milestoneTitle}`,
-      message: `An amount of $${amountNum.toFixed(2)} was created for this campaign.`,
+      title: `New milestone: ${req.body.milestoneTitle}`,
+      message: `An amount of $${Number(req.body.amount).toFixed(2)} was created for this campaign.`,
       entityType: "campaign",
-      entityId: String(campaignId),
+      entityId: String(req.body.campaignId),
       actionPath: `/influencer/my-campaign`,
     }).catch((e) => console.error("notify influencer (created) failed:", e));
 
     createAndEmit({
-      brandId,
+      brandId: req.body.brandId,
       type: "milestone.created",
-      title: `Milestone created for influencer ${influencerId}`,
-      message: `${milestoneTitle} • $${amountNum.toFixed(2)}`,
+      title: `Milestone created for influencer ${req.body.influencerId}`,
+      message: `${req.body.milestoneTitle} • $${Number(req.body.amount).toFixed(2)}`,
       entityType: "campaign",
-      entityId: String(campaignId),
+      entityId: String(req.body.campaignId),
       actionPath: `/brand/active-campaign`,
     }).catch((e) => console.error("notify brand (created) failed:", e));
 
-    // 11) Email
+    // Email after transaction success
     try {
       const [infDoc, brandDoc] = await Promise.all([
-        Influencer.findById(influencerId, "name email").lean(),
-        Brand.findById(brandId, "name").lean(),
+        Influencer.findById(emailData.influencerId, "name email").lean(),
+        Brand.findById(emailData.brandId, "name").lean(),
       ]);
 
       if (infDoc && infDoc.email) {
@@ -320,10 +394,10 @@ exports.createMilestone = async (req, res) => {
           to: infDoc.email,
           influencerName: infDoc.name || "",
           brandName: (brandDoc && brandDoc.name) || "",
-          campaignName: camp.productOrServiceName || "",
-          milestoneTitle,
-          amount: amountNum,
-          milestoneDescription,
+          campaignName: emailData.campaignName,
+          milestoneTitle: emailData.milestoneTitle,
+          amount: emailData.amount,
+          milestoneDescription: emailData.milestoneDescription,
           dashboardUrl: `${APP_BASE_URL}/influencer/my-campaign`,
         }).catch((e) => console.error("sendMilestoneCreatedEmail failed:", e));
       }
@@ -331,34 +405,20 @@ exports.createMilestone = async (req, res) => {
       console.error("Error preparing milestone created email:", emailErr);
     }
 
-    return res.status(201).json({
-      message: "Milestone created and amount frozen successfully",
-      milestoneId: String(doc._id),
-      totalAmount: doc.totalAmount,
-      entry: {
-        milestoneHistoryId: String(createdEntry._id),
-        influencerId: createdEntry.influencerId,
-        campaignId: createdEntry.campaignId,
-        milestoneTitle: createdEntry.milestoneTitle,
-        amount: createdEntry.amount,
-        milestoneDescription: createdEntry.milestoneDescription,
-        released: createdEntry.released,
-        payoutStatus: createdEntry.payoutStatus,
-        createdAt: createdEntry.createdAt,
-      },
-      wallet: {
-        walletBalance: walletSnapAfter.walletBalance,
-        frozenBalance: walletSnapAfter.frozenBalance,
-        usableBalance: walletSnapAfter.usableBalance,
-      },
-      contractStatus: updatedContract?.status || contractDoc?.status || null,
-      milestonesCreatedAt:
-        updatedContract?.milestonesCreatedAt ||
-        contractDoc?.milestonesCreatedAt ||
-        null,
-    });
+    return res.status(201).json(responsePayload);
   } catch (err) {
+    await session.abortTransaction().catch(() => {});
+    session.endSession();
+
     console.error("Error in createMilestone:", err);
+
+    if (err.status) {
+      return res.status(err.status).json({
+        message: err.message,
+        ...(err.extra || {}),
+      });
+    }
+
     return res.status(500).json({ message: "Internal server error" });
   }
 };
