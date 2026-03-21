@@ -113,6 +113,78 @@ function mapAdminRoleToThreadRole(role) {
   return role;
 }
 
+async function getActorAdmin(actorAdminId) {
+  const actorObj = toObjectIdStrict(actorAdminId, "actorAdminId");
+
+  const actor = await AdminModel.findById(actorObj)
+    .select("_id name email proxyEmail role status parentAdmin rootAdmin")
+    .lean();
+
+  if (!actor) {
+    throw new Error("Admin not found");
+  }
+
+  const allowedRoles = [
+    ROLES.SUPER_ADMIN,
+    ROLES.REVENUE_HEAD,
+    ROLES.IME,
+    ROLES.BME,
+  ];
+
+  if (!actor.role || !allowedRoles.includes(actor.role)) {
+    throw new Error("Unsupported admin role");
+  }
+
+  if (String(actor.status || "").toLowerCase() !== "active") {
+    throw new Error("Admin account is not active");
+  }
+
+  return actor;
+}
+
+async function getAccessibleAdminIds(actorAdminId) {
+  const actor = await getActorAdmin(actorAdminId);
+
+  if (actor.role === ROLES.SUPER_ADMIN) {
+    return null;
+  }
+
+  if (actor.role === ROLES.REVENUE_HEAD) {
+    const childAdmins = await AdminModel.find({
+      parentAdmin: actor._id,
+      role: { $in: [ROLES.IME, ROLES.BME] },
+    })
+      .select("_id")
+      .lean();
+
+    return [actor._id, ...childAdmins.map((item) => item._id)];
+  }
+
+  if ([ROLES.IME, ROLES.BME].includes(actor.role)) {
+    return [actor._id];
+  }
+
+  throw new Error("Unsupported admin role");
+}
+
+async function assertThreadAccess(thread, actorAdminId) {
+  const accessibleAdminIds = await getAccessibleAdminIds(actorAdminId);
+
+  if (accessibleAdminIds === null) {
+    return true;
+  }
+
+  const allowed = accessibleAdminIds.some(
+    (id) => String(id) === String(thread.executiveId)
+  );
+
+  if (!allowed) {
+    throw new Error("You are not allowed to access this thread");
+  }
+
+  return true;
+}
+
 async function getAdminSender(adminId) {
   const execObj = toObjectIdStrict(adminId, "adminId");
 
@@ -383,37 +455,45 @@ async function sendBulkEmailToCsv({ adminId, csvBuffer, subject, text, html }) {
   };
 }
 
-async function listThreads({ executiveId, page = 1, limit = 20 }) {
-  const execObj = toObjectIdStrict(executiveId, "executiveId");
-  const skip = (Number(page) - 1) * Number(limit);
+async function listThreads({ actorAdminId, page = 1, limit = 20 }) {
+  const accessibleAdminIds = await getAccessibleAdminIds(actorAdminId);
+  const safePage = Math.max(1, Number(page) || 1);
+  const safeLimit = Math.max(1, Math.min(100, Number(limit) || 20));
+  const skip = (safePage - 1) * safeLimit;
+
+  const filter =
+    accessibleAdminIds === null
+      ? {}
+      : { executiveId: { $in: accessibleAdminIds } };
 
   const [items, total] = await Promise.all([
-    AdminEmailThreadModel.find({ executiveId: execObj })
+    AdminEmailThreadModel.find(filter)
       .sort({ lastMessageAt: -1 })
       .skip(skip)
-      .limit(Number(limit))
+      .limit(safeLimit)
+      .populate("executiveId", "name email proxyEmail role parentAdmin rootAdmin")
       .lean(),
-    AdminEmailThreadModel.countDocuments({ executiveId: execObj }),
+    AdminEmailThreadModel.countDocuments(filter),
   ]);
 
   return {
-    page: Number(page),
-    limit: Number(limit),
+    page: safePage,
+    limit: safeLimit,
     total,
     items,
   };
 }
 
-async function getThreadMessages(threadId, executiveId) {
+async function getThreadMessages({ threadId, actorAdminId }) {
   const tid = toObjectIdStrict(threadId, "threadId");
-  const execObj = toObjectIdStrict(executiveId, "executiveId");
 
-  const thread = await AdminEmailThreadModel.findById(tid).lean();
+  const thread = await AdminEmailThreadModel.findById(tid)
+    .populate("executiveId", "name email proxyEmail role parentAdmin rootAdmin")
+    .lean();
+
   if (!thread) throw new Error("Thread not found");
 
-  if (String(thread.executiveId) !== String(execObj)) {
-    throw new Error("You are not allowed to view this thread");
-  }
+  await assertThreadAccess(thread, actorAdminId);
 
   const messages = await AdminEmailMessageModel.find({ threadId: tid })
     .sort({ createdAt: 1 })
@@ -422,18 +502,13 @@ async function getThreadMessages(threadId, executiveId) {
   return { thread, messages };
 }
 
-async function replyToThread({ threadId, executiveId, subject, text, html }) {
+async function replyToThread({ threadId, actorAdminId, subject, text, html }) {
   const tid = toObjectIdStrict(threadId, "threadId");
-  const execObj = toObjectIdStrict(executiveId, "executiveId");
 
   const thread = await AdminEmailThreadModel.findById(tid).lean();
   if (!thread) throw new Error("Thread not found");
 
-  if (String(thread.executiveId) !== String(execObj)) {
-    throw new Error("You are not allowed to reply to this thread");
-  }
-
-  const { from } = await getAdminSender(execObj);
+  await assertThreadAccess(thread, actorAdminId);
 
   const finalSubject = cleanStr(subject) || thread.subject;
   const to = thread.recipientEmail;
@@ -441,13 +516,14 @@ async function replyToThread({ threadId, executiveId, subject, text, html }) {
   return saveOutboundAndSend({
     thread,
     to,
-    from,
+    from: thread.senderEmail,
     subject: finalSubject,
     text,
     html,
-    executiveId: execObj,
+    executiveId: thread.executiveId,
     meta: {
       source: "THREAD_REPLY",
+      repliedByAdminId: String(actorAdminId),
     },
   });
 }
