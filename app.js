@@ -50,6 +50,7 @@ const supportRoutes = require("./routes/supportRoutes");
 const timezoneRoutes = require("./routes/timezoneRoutes");
 const adminEmailRoutes = require("./routes/adminEmailRoute");
 const groupChatRoutes = require("./routes/groupChatRoutes");
+const pipelineRoutes = require("./routes/influencerPipeline")
 
 const app = express();
 const server = http.createServer(app);
@@ -145,6 +146,7 @@ app.use("/support", supportRoutes);
 app.use("/timezone", timezoneRoutes);
 app.use("/admin-email", adminEmailRoutes);
 app.use("/group-chat", groupChatRoutes);
+app.use("/pipeline", pipelineRoutes)
 
 /* =========================================================
    ERROR HANDLER
