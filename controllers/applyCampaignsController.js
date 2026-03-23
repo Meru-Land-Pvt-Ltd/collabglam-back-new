@@ -481,7 +481,12 @@ exports.getListByCampaign = async (req, res) => {
 
     if (!record) {
       return res.status(200).json({
-        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        meta: {
+          total: 0,
+          page: Number(page),
+          limit: Number(limit),
+          totalPages: 0
+        },
         applicantCount: 0,
         isContracted: 0,
         contractId: null,
@@ -544,9 +549,7 @@ exports.getListByCampaign = async (req, res) => {
       filter.name = { $regex: search.trim(), $options: 'i' };
     }
 
-    const influencersRaw = await InfluencerModel.find(filter)
-      .select('_id name email countryName categories')
-      .lean();
+    const influencersRaw = await InfluencerModel.find(filter).lean();
 
     if (!influencersRaw.length) {
       return res.status(200).json({
@@ -558,10 +561,10 @@ exports.getListByCampaign = async (req, res) => {
       });
     }
 
-    const modashProfiles = await Modash.find(
-      { influencerId: { $in: influencerIds } },
-      'influencerId provider handle username fullname followers'
-    ).lean();
+    
+    const modashProfiles = await Modash.find({
+      influencerId: { $in: influencerIds }
+    }).lean();
 
     const modashByInf = new Map();
     for (const p of modashProfiles) {
@@ -579,20 +582,37 @@ exports.getListByCampaign = async (req, res) => {
       : null;
     const applicationCreatedAt = record.createdAt || record._id?.getTimestamp?.() || null;
 
+    const serializeModashProfile = (profile) => {
+      if (!profile) return null;
+
+      return {
+        ...profile,
+        _id: profile._id ? String(profile._id) : null,
+        influencerId: profile.influencerId ? String(profile.influencerId) : null
+      };
+    };
+
     const condensed = influencersRaw.map((inf) => {
       const infIdStr = String(inf._id);
 
-      const profiles = modashByInf.get(infIdStr) || [];
-      const audienceSize = profiles.reduce((sum, p) => sum + (Number(p?.followers) || 0), 0);
-      const chosen = pickModashProfile(profiles);
+      const rawProfiles = modashByInf.get(infIdStr) || [];
+      const audienceSize = rawProfiles.reduce(
+        (sum, p) => sum + (Number(p?.followers) || 0),
+        0
+      );
+
+      const chosenRaw = pickModashProfile(rawProfiles);
+      const chosen = serializeModashProfile(chosenRaw);
+      const allProfiles = rawProfiles.map(serializeModashProfile);
 
       let handle = null;
-      if (chosen) {
-        handle = (chosen.handle || chosen.username || chosen.fullname || '').trim() || null;
+      if (chosenRaw) {
+        handle =
+          (chosenRaw.handle || chosenRaw.username || chosenRaw.fullname || '').trim() || null;
       }
       if (handle && !handle.startsWith('@')) handle = '@' + handle;
 
-      const primaryPlatform = chosen?.provider || null;
+      const primaryPlatform = chosenRaw?.provider || null;
 
       let categoryName = null;
       if (Array.isArray(inf.categories) && inf.categories.length > 0) {
@@ -642,15 +662,30 @@ exports.getListByCampaign = async (req, res) => {
         if (!c) return true;
 
         const status = normalizeStatus(c.status || c.contractStatus);
-        const awaitingRole = normalizeRole(c.awaitingRole || c.awaiting_role || c.awaiting?.role);
+        const awaitingRole = normalizeRole(
+          c.awaitingRole || c.awaiting_role || c.awaiting?.role
+        );
 
-        if (status === 'READY_TO_SIGN' && awaitingRole === 'collabglam') return false;
+        if (status === 'READY_TO_SIGN' && awaitingRole === 'collabglam') {
+          return false;
+        }
+
         return true;
       });
     }
 
     const dir = sortOrder === 1 ? -1 : 1;
+
     if (sortField) {
+      const allowed = new Set([
+        'name',
+        'primaryPlatform',
+        'category',
+        'audienceSize',
+        'handle',
+        'createdAt'
+      ]);
+
       const allowed = new Set([
         'name',
         'primaryPlatform',

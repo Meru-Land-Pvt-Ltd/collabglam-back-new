@@ -9,7 +9,9 @@ const {
 } = require("../utils/adminHierarchy");
 const { sendEmail } = require("../services/emailService");
 const { adminInviteEmailTemplate } = require("../template/inviteRole");
-
+const brand = require("../models/brand");
+const BrandAssigned = require("../models/brandAssigned");
+const mongoose = require("mongoose");
 const INVITE_EXP_MINUTES = Number(process.env.INVITE_EXP_MINUTES || 60);
 
 // ======================
@@ -683,3 +685,474 @@ exports.sendBulkEmailCsv = async (req, res) => {
     });
   }
 };
+exports.fullyManagedBrandList = async (req, res) => {
+  try {
+    const brandList = await brand
+      .find({
+        "subscription.planId": "e5cb75da-6d0d-481b-b202-69b9cf864940",
+        "subscription.status": "active",
+      })
+      .lean();
+
+    const enrichedBrandList = await Promise.all(
+      brandList.map(async (item) => {
+        // change brandId to brand if your BrandAssigned schema uses another field name
+        const assignedData = await BrandAssigned.findOne({ brandId: item._id }).lean();
+
+        let assignedRm = "";
+        let assignedBm = "";
+        let assignedIm = "";
+console.log("assignedData for brand", item._id, assignedData);
+        if (assignedData) {
+          const masterIds = [
+            assignedData.RHId,
+            assignedData.bdmId,
+            assignedData.idmId,
+          ].filter(Boolean);
+
+          if (masterIds.length > 0) {
+            const masters = await AdminModel.find({ _id: { $in: masterIds } })
+              .select("_id name")
+              .lean();
+
+            const masterMap = {};
+            masters.forEach((m) => {
+              masterMap[String(m._id)] = m.name || "";
+            });
+
+            assignedRm = assignedData.RHId
+              ? masterMap[String(assignedData.RHId)] || ""
+              : "";
+            assignedBm = assignedData.bdmId
+              ? masterMap[String(assignedData.bdmId)] || ""
+              : "";
+            assignedIm = assignedData.idmId
+              ? masterMap[String(assignedData.idmId)] || ""
+              : "";
+          }
+        }
+
+        return {
+          ...item,
+          assignedRm,
+          assignedBm,
+          assignedIm,
+        };
+      })
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: enrichedBrandList,
+    });
+  } catch (e) {
+    console.error("fullyManagedBrandList error:", e);
+    return res.status(500).json({
+      success: false,
+      message: e?.message || "Internal error",
+    });
+  }
+};
+
+exports.assignBrand = async (req, res) => {
+  try {
+    const { brandId, RHId, bdmId, idmId } = req.body;
+
+    if (!brandId) {
+      return res.status(400).json({
+        success: false,
+        message: "brandId is required",
+      });
+    }
+
+    const wantsRH = RHId !== undefined && RHId !== null && String(RHId).trim() !== "";
+    const wantsBDMorIDM = bdmId !== undefined || idmId !== undefined;
+
+    if (!wantsRH && !wantsBDMorIDM) {
+      return res.status(400).json({
+        success: false,
+        message: "Send RHId to assign RH OR send bdmId/idmId to assign BDM/IDM",
+      });
+    }
+
+    // ---------------------------
+    // CASE A: RH assignment (RHId present)
+    // ---------------------------
+    if (wantsRH) {
+      const set = { RHId, status: "active" };
+      if (bdmId !== undefined) set.bdmId = bdmId;
+      if (idmId !== undefined) set.idmId = idmId;
+
+      // 1) Update active doc if exists
+      let doc = await BrandAssigned.findOneAndUpdate(
+        { brandId, status: "active" },
+        { $set: set },
+        { new: true }
+      ).exec();
+
+      if (doc) {
+        return res.status(200).json({
+          success: true,
+          message: "RH assigned successfully (updated active assignment)",
+          data: doc,
+        });
+      }
+
+      // 2) Reactivate/update latest old doc if exists
+      doc = await BrandAssigned.findOneAndUpdate(
+        { brandId },
+        { $set: set },
+        { new: true, sort: { updatedAt: -1, createdAt: -1 } }
+      ).exec();
+
+      if (doc) {
+        return res.status(200).json({
+          success: true,
+          message: "RH assigned successfully (reactivated previous assignment)",
+          data: doc,
+        });
+      }
+
+      // 3) Create new if none exists
+      const created = await BrandAssigned.create({
+        brandId,
+        RHId,
+        bdmId: bdmId ?? null,
+        idmId: idmId ?? null,
+        status: "active",
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: "RH assigned successfully (created new assignment)",
+        data: created,
+      });
+    }
+
+    // ---------------------------
+    // CASE B: Only BDM/IDM assignment (RHId NOT present)
+    // RH must already exist in DB
+    // ---------------------------
+    const set = {};
+    if (bdmId !== undefined) set.bdmId = bdmId;
+    if (idmId !== undefined) set.idmId = idmId;
+
+    // 1) Update active doc ONLY if RH is already assigned
+    let updated = await BrandAssigned.findOneAndUpdate(
+      {
+        brandId,
+        status: "active",
+        RHId: { $exists: true, $ne: null },
+      },
+      { $set: set },
+      { new: true }
+    ).exec();
+
+    if (updated) {
+      return res.status(200).json({
+        success: true,
+        message: "BDM/IDM assigned successfully (updated active RH assignment)",
+        data: updated,
+      });
+    }
+
+    // 2) If no active doc, update latest doc where RH exists (reactivate)
+    updated = await BrandAssigned.findOneAndUpdate(
+      {
+        brandId,
+        RHId: { $exists: true, $ne: null },
+      },
+      { $set: { ...set, status: "active" } },
+      { new: true, sort: { updatedAt: -1, createdAt: -1 } }
+    ).exec();
+
+    if (!updated) {
+      return res.status(400).json({
+        success: false,
+        message: "RH is not assigned for this brand. Assign RH first, then add BDM/IDM.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "BDM/IDM assigned successfully (updated existing RH assignment)",
+      data: updated,
+    });
+  } catch (e) {
+    console.error("assignBrand error:", e);
+    return res.status(500).json({
+      success: false,
+      message: e?.message || "Internal error",
+    });
+  }
+};
+
+  exports.updateBrandAssignment = async (req, res) => {
+    try {
+      const { assignmentId, status, bdmId } = req.body;
+  
+      if (!assignmentId) {
+        return res.status(400).json({
+          success: false,
+          message: "assignmentId is required",
+        });
+      }
+  
+      if (!mongoose.isValidObjectId(assignmentId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid assignmentId",
+        });
+      }
+  
+      const assignment = await BrandAssigned.findById(assignmentId);
+  
+      if (!assignment) {
+        return res.status(404).json({
+          success: false,
+          message: "Assignment not found",
+        });
+      }
+  
+      if (bdmId && !mongoose.isValidObjectId(bdmId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid bdmId",
+        });
+      }
+  
+      if (status && !["active", "inactive"].includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid status",
+        });
+      }
+  
+      const newStatus = status || assignment.status;
+  
+      if (newStatus === "active") {
+        const existingActive = await BrandAssigned.findOne({
+          brandId: assignment.brandId,
+          status: "active",
+          _id: { $ne: assignmentId },
+        });
+  
+        if (existingActive) {
+          return res.status(409).json({
+            success: false,
+            message: "Another active assignment already exists for this brand",
+          });
+        }
+      }
+  
+      if (status) assignment.status = status;
+      if (bdmId) assignment.bdmId = bdmId;
+  
+      await assignment.save();
+  
+      return res.status(200).json({
+        success: true,
+        message: "Assignment updated successfully",
+        data: assignment,
+      });
+    } catch (e) {
+      return res.status(500).json({
+        success: false,
+        message: e?.message || "Internal error",
+      });
+    }
+  };
+//
+
+  exports.updateBrandAssignmentStatusAndRH = async (req, res) => {
+    try {
+      const { assignmentId, status, RHId } = req.body;
+      const actor = req.admin;
+
+      if (!actor?.adminId) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+      if(adminId == "64b8c8f1c9d898001d9e7c3e"){
+
+      }
+      if (!assignmentId) {
+        return res.status(400).json({
+          success: false,
+          message: "assignmentId is required",
+        });
+      }
+  
+      if (!mongoose.isValidObjectId(assignmentId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid assignmentId",
+        });
+      }
+  
+      const assignment = await BrandAssigned.findById(assignmentId);
+  
+      if (!assignment) {
+        return res.status(404).json({
+          success: false,
+          message: "Assignment not found",
+        });
+      }
+  
+      if (RHId && !mongoose.isValidObjectId(RHId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid RHId",
+        });
+      }
+  
+      if (status && !["active", "inactive"].includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid status",
+        });
+      }
+  
+      const newStatus = status || assignment.status;
+  
+      if (newStatus === "active") {
+        const existingActive = await BrandAssigned.findOne({
+          brandId: assignment.brandId,
+          status: "active",
+          _id: { $ne: assignmentId },
+        });
+  
+        if (existingActive) {
+          return res.status(409).json({
+            success: false,
+            message: "Another active assignment already exists for this brand",
+          });
+        }
+      }
+  
+      if (status) assignment.status = status;
+      if (RHId) assignment.RHId = RHId;
+  
+      await assignment.save();
+  
+      return res.status(200).json({
+        success: true,
+        message: "Assignment updated successfully",
+        data: assignment,
+      });
+    } catch (e) {
+      return res.status(500).json({
+        success: false,
+        message: e?.message || "Internal error",
+      });
+    }
+  };
+
+  exports.listExecutiveAdmin = async (req, res) => {
+    try {
+      const admin = req.admin;
+      const adminId = admin?.adminId;
+  
+      if (!adminId) {
+        return res.status(401).json({
+          success: false,
+          message: "Unauthorized",
+        });
+      }
+  
+      if (!mongoose.isValidObjectId(adminId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid adminId",
+        });
+      }
+  
+      const executives = await AdminModel.find({ parentAdmin: adminId,status: "active" })
+        .select("-passwordHash -inviteTokenHash")
+        .sort({ createdAt: -1 });
+  
+      return res.status(200).json({
+        success: true,
+        count: executives.length,
+        data: executives,
+      });
+    } catch (e) {
+      return res.status(500).json({
+        success: false,
+        message: e?.message || "Internal error",
+      });
+    }
+  };
+
+  exports.rmlist= async(req,res)=>{
+    try{
+      const rms = await AdminModel.find({role:"revenue_head",status:"active"})
+      .select("-passwordHash -inviteTokenHash")
+      .sort({ createdAt: -1 });
+
+      return res.status(200).json({
+        success: true,
+        count: rms.length,
+        data: rms,
+      });
+    }catch(e){
+      return res.status(500).json({
+        success: false,
+        message: e?.message || "Internal error",
+      });
+    }
+  }
+
+  exports.allocateBrand = async (req, res) => {
+    try {
+      const admin = req.admin;
+      const adminId = admin?.adminId;
+  
+      if (!adminId) {
+        return res.status(401).json({
+          success: false,
+          message: "Unauthorized: adminId not found",
+        });
+      }
+  
+      const adminIdStr = String(adminId);
+  
+      // support both string and ObjectId storage in DB
+      const isObjId = mongoose.Types.ObjectId.isValid(adminIdStr);
+      const adminObjId = isObjId ? new mongoose.Types.ObjectId(adminIdStr) : null;
+  
+      const orConditions = [
+        { bdmId: adminIdStr },
+        { idmId: adminIdStr },
+      ];
+      if (adminObjId) {
+        orConditions.push({ bdmId: adminObjId }, { idmId: adminObjId });
+      }
+  
+      const allocations = await BrandAssigned.find({
+        status: "active",
+        $or: orConditions,
+      })
+        .populate("brandId") // if brandId is ref; otherwise it will just return brandId as stored
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .lean();
+  
+      return res.status(200).json({
+        success: true,
+        message: allocations.length
+          ? "Allocated brands fetched successfully"
+          : "No brands allocated to this admin",
+        count: allocations.length,
+        data: allocations,
+      });
+    } catch (e) {
+      console.error("allocateBrand error:", e);
+      return res.status(500).json({
+        success: false,
+        message: e?.message || "Internal server error",
+      });
+    }
+  };
+
+
+
+  
