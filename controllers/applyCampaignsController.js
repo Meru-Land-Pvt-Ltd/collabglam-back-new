@@ -677,14 +677,6 @@ exports.getListByCampaign = async (req, res) => {
     const dir = sortOrder === 1 ? -1 : 1;
 
     if (sortField) {
-      const allowed = new Set([
-        'name',
-        'primaryPlatform',
-        'category',
-        'audienceSize',
-        'handle',
-        'createdAt'
-      ]);
 
       const allowed = new Set([
         'name',

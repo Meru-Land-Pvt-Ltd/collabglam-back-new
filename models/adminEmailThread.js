@@ -2,6 +2,20 @@ const mongoose = require("mongoose");
 
 const adminEmailThreadSchema = new mongoose.Schema(
   {
+    pipelineId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "InfluencerPipeline",
+      default: null,
+      index: true,
+    },
+
+    campaignId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Campaign",
+      default: null,
+      index: true,
+    },
+
     executiveId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Master",
@@ -57,6 +71,7 @@ const adminEmailThreadSchema = new mongoose.Schema(
       type: String,
       enum: ["INBOUND", "OUTBOUND"],
       default: "OUTBOUND",
+      index: true,
     },
 
     status: {
@@ -72,10 +87,17 @@ const adminEmailThreadSchema = new mongoose.Schema(
   }
 );
 
+// one pipeline row = one thread
 adminEmailThreadSchema.index(
-  { executiveId: 1, recipientEmail: 1 },
-  { unique: true }
+  { pipelineId: 1 },
+  { unique: true, partialFilterExpression: { pipelineId: { $type: "objectId" } } }
 );
+
+// fallback uniqueness if pipelineId is not used yet
+adminEmailThreadSchema.index({ executiveId: 1, recipientEmail: 1 });
+
+// better query support
+adminEmailThreadSchema.index({ campaignId: 1, executiveId: 1, lastMessageAt: -1 });
 
 module.exports =
   mongoose.models.AdminEmailThread ||

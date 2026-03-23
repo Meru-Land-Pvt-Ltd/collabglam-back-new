@@ -10,6 +10,20 @@ const adminEmailMessageSchema = new Schema(
       index: true,
     },
 
+    pipelineId: {
+      type: Schema.Types.ObjectId,
+      ref: "InfluencerPipeline",
+      default: null,
+      index: true,
+    },
+
+    campaignId: {
+      type: Schema.Types.ObjectId,
+      ref: "Campaign",
+      default: null,
+      index: true,
+    },
+
     direction: {
       type: String,
       enum: ["INBOUND", "OUTBOUND"],
@@ -115,8 +129,12 @@ const adminEmailMessageSchema = new Schema(
       default: null,
     },
   },
-  { timestamps: true }
+  { timestamps: true, versionKey: false }
 );
+
+adminEmailMessageSchema.index({ threadId: 1, createdAt: 1 });
+adminEmailMessageSchema.index({ pipelineId: 1, createdAt: 1 });
+adminEmailMessageSchema.index({ campaignId: 1, createdAt: 1 });
 
 const AdminEmailMessageModel =
   mongoose.models.AdminEmailMessage ||

@@ -223,19 +223,29 @@ async function getAdminSender(adminId) {
 }
 
 async function createOrGetThread({
+  pipelineId = null,
+  campaignId = null,
   executiveId,
   role,
   senderEmail,
   recipientEmail,
   subject,
 }) {
-  let thread = await AdminEmailThreadModel.findOne({
-    executiveId,
-    recipientEmail,
-  });
+  let thread = null;
+
+  if (pipelineId) {
+    thread = await AdminEmailThreadModel.findOne({ pipelineId });
+  } else {
+    thread = await AdminEmailThreadModel.findOne({
+      executiveId,
+      recipientEmail,
+    });
+  }
 
   if (!thread) {
     thread = await AdminEmailThreadModel.create({
+      pipelineId,
+      campaignId,
       executiveId,
       role: mapAdminRoleToThreadRole(role),
       senderEmail,
@@ -249,6 +259,8 @@ async function createOrGetThread({
     thread.replyToEmail = buildThreadReplyAddress(thread._id);
     await thread.save();
   } else {
+    thread.pipelineId = pipelineId || thread.pipelineId || null;
+    thread.campaignId = campaignId || thread.campaignId || null;
     thread.senderEmail = senderEmail;
     thread.recipientEmail = recipientEmail;
     thread.subject = subject;
@@ -286,6 +298,8 @@ async function saveOutboundAndSend({
 
   const emailMessage = await AdminEmailMessageModel.create({
     threadId: thread._id,
+    pipelineId: thread.pipelineId || null,
+    campaignId: thread.campaignId || null,
     direction: "OUTBOUND",
     subject,
     from,
@@ -299,6 +313,20 @@ async function saveOutboundAndSend({
     htmlPreview: html ? String(html).slice(0, 2000) : null,
   });
 
+  const emailTags = [
+    { Name: "threadId", Value: String(thread._id) },
+    { Name: "executiveId", Value: String(executiveId) },
+    { Name: "source", Value: meta.source || "CSV" },
+  ];
+
+  if (thread.pipelineId) {
+    emailTags.push({ Name: "pipelineId", Value: String(thread.pipelineId) });
+  }
+
+  if (thread.campaignId) {
+    emailTags.push({ Name: "campaignId", Value: String(thread.campaignId) });
+  }
+
   const { messageId } = await sendEmail({
     to,
     subject,
@@ -307,11 +335,7 @@ async function saveOutboundAndSend({
     from,
     replyTo: [thread.replyToEmail],
     configurationSetName: process.env.SES_CONFIGURATION_SET,
-    emailTags: [
-      { Name: "threadId", Value: String(thread._id) },
-      { Name: "executiveId", Value: String(executiveId) },
-      { Name: "source", Value: meta.source || "CSV" },
-    ],
+    emailTags,
   });
 
   let s3Key = null;
@@ -323,6 +347,8 @@ async function saveOutboundAndSend({
       threadId: String(thread._id),
       emailMessageId: String(emailMessage._id),
       executiveId: String(executiveId),
+      pipelineId: thread.pipelineId ? String(thread.pipelineId) : null,
+      campaignId: thread.campaignId ? String(thread.campaignId) : null,
       to,
       from,
       replyTo: thread.replyToEmail,
@@ -349,6 +375,16 @@ async function saveOutboundAndSend({
     }
   );
 
+  await AdminEmailThreadModel.updateOne(
+    { _id: thread._id },
+    {
+      $set: {
+        lastMessageAt: new Date(),
+        lastMessageDirection: "OUTBOUND",
+      },
+    }
+  );
+
   return {
     threadId: String(thread._id),
     emailMessageId: String(emailMessage._id),
@@ -358,7 +394,15 @@ async function saveOutboundAndSend({
   };
 }
 
-async function sendBulkEmailToCsv({ adminId, csvBuffer, subject, text, html }) {
+async function sendBulkEmailToCsv({
+  adminId,
+  csvBuffer,
+  subject,
+  text,
+  html,
+  campaignId = null,
+  pipelineIdByEmail = {},
+}) {
   if (!csvBuffer?.length) {
     throw new Error("CSV file is required");
   }
@@ -388,7 +432,11 @@ async function sendBulkEmailToCsv({ adminId, csvBuffer, subject, text, html }) {
       const to = cleanEmail(recipient.email);
       const recipientName = cleanStr(recipient.name) || "there";
 
+      const matchedPipelineId = pipelineIdByEmail[to] || null;
+
       const thread = await createOrGetThread({
+        pipelineId: matchedPipelineId,
+        campaignId,
         executiveId: execObj,
         role: admin.role,
         senderEmail: from,
@@ -528,9 +576,74 @@ async function replyToThread({ threadId, actorAdminId, subject, text, html }) {
   });
 }
 
+async function getThreadConversationState({
+  pipelineId = null,
+  recipientEmail = null,
+  actorAdminId,
+}) {
+  const email = cleanEmail(recipientEmail);
+
+  const emptyState = {
+    threadId: null,
+    outreachSentAt: null,
+    followUp1SentAt: null,
+    followUp2SentAt: null,
+    replyChecked: false,
+    repliedAt: null,
+    replyText: "",
+  };
+
+  const accessibleAdminIds = await getAccessibleAdminIds(actorAdminId);
+
+  let thread = null;
+
+  if (pipelineId) {
+    const pipelineObj = toObjectIdStrict(pipelineId, "pipelineId");
+
+    const filter = { pipelineId: pipelineObj };
+    if (accessibleAdminIds !== null) {
+      filter.executiveId = { $in: accessibleAdminIds };
+    }
+
+    thread = await AdminEmailThreadModel.findOne(filter).lean();
+  } else if (email) {
+    const filter = { recipientEmail: email };
+    if (accessibleAdminIds !== null) {
+      filter.executiveId = { $in: accessibleAdminIds };
+    }
+
+    thread = await AdminEmailThreadModel.findOne(filter)
+      .sort({ lastMessageAt: -1 })
+      .lean();
+  } else {
+    return emptyState;
+  }
+
+  if (!thread) return emptyState;
+
+  const messages = await AdminEmailMessageModel.find({ threadId: thread._id })
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const outbound = messages.filter((m) => m.direction === "OUTBOUND");
+  const inbound = messages.filter((m) => m.direction === "INBOUND");
+  const firstInbound = inbound[0] || null;
+
+  return {
+    threadId: String(thread._id),
+    outreachSentAt: outbound[0]?.createdAt || null,
+    followUp1SentAt: outbound[1]?.createdAt || null,
+    followUp2SentAt: outbound[2]?.createdAt || null,
+    replyChecked: !!firstInbound,
+    repliedAt: firstInbound?.createdAt || null,
+    replyText: cleanStr(firstInbound?.textPreview || firstInbound?.htmlPreview),
+  };
+}
+
 module.exports = {
   sendBulkEmailToCsv,
   listThreads,
   getThreadMessages,
   replyToThread,
+  getThreadConversationState
 };

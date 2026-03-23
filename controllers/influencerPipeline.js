@@ -10,6 +10,8 @@ const {
   PIPELINE_STAGES,
   PIPELINE_SOURCES,
 } = require('../models/influencerPipeline');
+const { ensureCampaignAccess } = require('../utils/campaignAccess');
+const { getThreadConversationState } = require('../services/adminEmail.service');
 
 function cleanStr(v) {
   if (v === undefined || v === null) return '';
@@ -23,12 +25,29 @@ function uniqStrings(values = []) {
   for (const v of values) {
     const s = cleanStr(v);
     if (!s) continue;
+
     const key = s.toLowerCase();
     if (seen.has(key)) continue;
+
     seen.add(key);
     out.push(s);
   }
+
   return out;
+}
+
+function cleanObject(obj = {}) {
+  const out = { ...obj };
+
+  for (const key of Object.keys(out)) {
+    if (out[key] === undefined) delete out[key];
+  }
+
+  return out;
+}
+
+function getActorAdminId(actor) {
+  return actor?.adminId || actor?._id || actor?.id || null;
 }
 
 function categoryNamesFromModash(doc) {
@@ -37,11 +56,14 @@ function categoryNamesFromModash(doc) {
 
   for (const item of arr) {
     if (!item) continue;
-    if (typeof item === 'string') out.push(item);
-    else {
-      if (cleanStr(item.categoryName)) out.push(item.categoryName);
-      if (cleanStr(item.subcategoryName)) out.push(item.subcategoryName);
+
+    if (typeof item === 'string') {
+      out.push(item);
+      continue;
     }
+
+    if (cleanStr(item.categoryName)) out.push(item.categoryName);
+    if (cleanStr(item.subcategoryName)) out.push(item.subcategoryName);
   }
 
   return uniqStrings(out);
@@ -90,7 +112,6 @@ function normalizeModashDoc(doc, campaignId, actorId) {
     engagementRate:
       Number.isFinite(Number(doc?.engagementRate)) ? Number(doc.engagementRate) : null,
 
-    createdByAdmin: actorId || null,
     updatedByAdmin: actorId || null,
     rawSnapshot: doc,
   };
@@ -114,15 +135,16 @@ function normalizeYoutubeDoc(doc, campaignId, actorId) {
     handle: cleanStr(doc?.handle),
     userId: cleanStr(doc?.channelId),
 
-    followers: Number.isFinite(Number(doc?.subscriberCount)) ? Number(doc.subscriberCount) : null,
+    followers: Number.isFinite(Number(doc?.subscriberCount))
+      ? Number(doc.subscriberCount)
+      : null,
     links: uniqStrings([channelUrl]),
     primaryLink: channelUrl,
-    picture:
-      cleanStr(
-        doc?.thumbnails?.default?.url ||
+    picture: cleanStr(
+      doc?.thumbnails?.default?.url ||
         doc?.thumbnails?.medium?.url ||
         doc?.thumbnails?.high?.url
-      ),
+    ),
 
     niche: topicNamesFromYoutube(doc),
     description: cleanStr(doc?.description),
@@ -145,20 +167,169 @@ function normalizeYoutubeDoc(doc, campaignId, actorId) {
     mediaKit: '',
     address: '',
 
-    createdByAdmin: actorId || null,
     updatedByAdmin: actorId || null,
     rawSnapshot: doc,
   };
 }
 
+function normalizeRawUser(item, campaignId, actorId) {
+  const sourceRefId =
+    cleanStr(item?.sourceRefId) ||
+    cleanStr(item?.userId) ||
+    cleanStr(item?.handle) ||
+    cleanStr(item?.username);
+
+  return {
+    campaignId,
+    sourceType: PIPELINE_SOURCES.MODASH,
+    sourceRefId,
+    platform: cleanStr(item?.platform || item?.provider || 'other').toLowerCase() || 'other',
+
+    name: cleanStr(item?.fullname || item?.name),
+    username: cleanStr(item?.username),
+    handle: cleanStr(item?.handle || item?.username),
+    userId: cleanStr(item?.userId),
+
+    followers: Number.isFinite(Number(item?.followers)) ? Number(item.followers) : null,
+    links: uniqStrings([item?.url]),
+    primaryLink: cleanStr(item?.url),
+    picture: cleanStr(item?.picture),
+
+    niche: uniqStrings([
+      ...(Array.isArray(item?.categories) ? item.categories : []),
+      item?.category,
+    ]),
+    description: cleanStr(item?.bio),
+    email: cleanStr(item?.email),
+    phone: '',
+
+    country: cleanStr(item?.country),
+    state: cleanStr(item?.state),
+    city: cleanStr(item?.city),
+    language: cleanStr(item?.language),
+
+    engagementRate:
+      Number.isFinite(Number(item?.engagementRate)) ? Number(item.engagementRate) : null,
+
+    updatedByAdmin: actorId || null,
+    rawSnapshot: item,
+  };
+}
+
+async function ensurePipelineAccess(actor, pipelineId) {
+  if (!pipelineId || !mongoose.Types.ObjectId.isValid(pipelineId)) return null;
+
+  const row = await InfluencerPipeline.findById(pipelineId)
+    .select('_id campaignId')
+    .lean();
+
+  if (!row) return null;
+
+  const allowedCampaign = await ensureCampaignAccess(actor, row.campaignId);
+  if (!allowedCampaign) return null;
+
+  return row;
+}
+
+async function ensureManyPipelineAccess(actor, ids = []) {
+  const validIds = ids
+    .map((x) => cleanStr(x))
+    .filter((x) => mongoose.Types.ObjectId.isValid(x));
+
+  if (!validIds.length) return [];
+
+  const rows = await InfluencerPipeline.find({
+    _id: { $in: validIds },
+  })
+    .select('_id campaignId')
+    .lean();
+
+  if (rows.length !== validIds.length) {
+    return null;
+  }
+
+  const campaignAccessCache = new Map();
+
+  for (const row of rows) {
+    const campaignId = cleanStr(row.campaignId);
+
+    if (!campaignAccessCache.has(campaignId)) {
+      const allowed = await ensureCampaignAccess(actor, campaignId);
+      campaignAccessCache.set(campaignId, !!allowed);
+    }
+
+    if (!campaignAccessCache.get(campaignId)) {
+      return null;
+    }
+  }
+
+  return validIds;
+}
+
+async function buildEmailStateForRow(row, actorAdminId) {
+  if (!row?.email) {
+    return {
+      threadId: null,
+      outreachSentAt: null,
+      followUp1SentAt: null,
+      followUp2SentAt: null,
+      replyChecked: false,
+      repliedAt: null,
+      replyText: '',
+    };
+  }
+
+  try {
+    return await getThreadConversationState({
+      recipientEmail: row.email,
+      actorAdminId,
+    });
+  } catch (error) {
+    return {
+      threadId: null,
+      outreachSentAt: null,
+      followUp1SentAt: null,
+      followUp2SentAt: null,
+      replyChecked: false,
+      repliedAt: null,
+      replyText: '',
+      error: error?.message || 'Failed to derive email state',
+    };
+  }
+}
+
+async function attachEmailStateToRow(row, actorAdminId) {
+  const emailState = await buildEmailStateForRow(row, actorAdminId);
+
+  return {
+    ...row,
+    emailState,
+    replyChecked: !!emailState.replyChecked,
+    repliedAt: emailState.repliedAt || row.repliedAt || null,
+    replyText: emailState.replyText || '',
+    followUp1SentAt: emailState.followUp1SentAt || null,
+    followUp2SentAt: emailState.followUp2SentAt || null,
+  };
+}
+
+async function attachEmailStateToRows(rows, actorAdminId) {
+  return Promise.all(rows.map((row) => attachEmailStateToRow(row, actorAdminId)));
+}
+
 exports.bulkAddToOutreach = async (req, res) => {
   try {
     const body = req.body || {};
-    const actorId = req.admin?.adminId || null;
+    const actor = req.admin;
+    const actorId = getActorAdminId(actor);
     const campaignId = cleanStr(body.campaignId);
 
     if (!campaignId || !mongoose.Types.ObjectId.isValid(campaignId)) {
       return res.status(400).json({ error: 'Valid campaignId is required' });
+    }
+
+    const allowedCampaign = await ensureCampaignAccess(actor, campaignId);
+    if (!allowedCampaign) {
+      return res.status(403).json({ error: 'You are not allowed to access this campaign' });
     }
 
     const modashIds = Array.isArray(body.modashIds) ? body.modashIds : [];
@@ -166,8 +337,6 @@ exports.bulkAddToOutreach = async (req, res) => {
     const rawUsers = Array.isArray(body.rawUsers) ? body.rawUsers : [];
 
     const ops = [];
-    let added = 0;
-    let updated = 0;
 
     if (modashIds.length) {
       const docs = await ModashProfile.find({
@@ -176,6 +345,7 @@ exports.bulkAddToOutreach = async (req, res) => {
 
       for (const doc of docs) {
         const normalized = normalizeModashDoc(doc, campaignId, actorId);
+
         ops.push({
           updateOne: {
             filter: {
@@ -206,6 +376,7 @@ exports.bulkAddToOutreach = async (req, res) => {
 
       for (const doc of docs) {
         const normalized = normalizeYoutubeDoc(doc, campaignId, actorId);
+
         ops.push({
           updateOne: {
             filter: {
@@ -229,48 +400,8 @@ exports.bulkAddToOutreach = async (req, res) => {
       }
     }
 
-    // for live /modash/users results that do not exist in ModashProfile yet
     for (const item of rawUsers) {
-      const sourceRefId =
-        cleanStr(item?.sourceRefId) ||
-        cleanStr(item?.userId) ||
-        cleanStr(item?.handle) ||
-        cleanStr(item?.username);
-
-      const normalized = {
-        campaignId,
-        sourceType: PIPELINE_SOURCES.MODASH,
-        sourceRefId,
-        platform: cleanStr(item?.platform || item?.provider || 'other').toLowerCase() || 'other',
-
-        name: cleanStr(item?.fullname || item?.name),
-        username: cleanStr(item?.username),
-        handle: cleanStr(item?.handle || item?.username),
-        userId: cleanStr(item?.userId),
-
-        followers: Number.isFinite(Number(item?.followers)) ? Number(item.followers) : null,
-        links: uniqStrings([item?.url]),
-        primaryLink: cleanStr(item?.url),
-        picture: cleanStr(item?.picture),
-
-        niche: uniqStrings([...(Array.isArray(item?.categories) ? item.categories : []), item?.category]),
-        description: cleanStr(item?.bio),
-        email: cleanStr(item?.email),
-        phone: '',
-
-        country: cleanStr(item?.country),
-        state: cleanStr(item?.state),
-        city: cleanStr(item?.city),
-        language: cleanStr(item?.language),
-
-        engagementRate:
-          Number.isFinite(Number(item?.engagementRate)) ? Number(item.engagementRate) : null,
-
-        createdByAdmin: actorId || null,
-        updatedByAdmin: actorId || null,
-        rawSnapshot: item,
-      };
-
+      const normalized = normalizeRawUser(item, campaignId, actorId);
       if (!normalized.sourceRefId) continue;
 
       ops.push({
@@ -300,14 +431,13 @@ exports.bulkAddToOutreach = async (req, res) => {
     }
 
     const result = await InfluencerPipeline.bulkWrite(ops, { ordered: false });
-    added = result.upsertedCount || 0;
-    updated = result.modifiedCount || 0;
 
     return res.json({
       success: true,
       message: 'Influencers added to outreach pipeline',
-      added,
-      updated,
+      added: result.upsertedCount || 0,
+      updated: result.modifiedCount || 0,
+      matched: result.matchedCount || 0,
     });
   } catch (err) {
     console.error('[bulkAddToOutreach] Error:', err);
@@ -317,14 +447,28 @@ exports.bulkAddToOutreach = async (req, res) => {
 
 exports.listPipeline = async (req, res) => {
   try {
+    const actor = req.admin;
+    const actorId = getActorAdminId(actor);
     const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '20'), 10) || 20));
     const skip = (page - 1) * limit;
 
-    const filter = {};
-    if (cleanStr(req.query.campaignId)) filter.campaignId = req.query.campaignId;
+    const campaignId = cleanStr(req.query.campaignId);
+    if (!campaignId) {
+      return res.status(400).json({ error: 'campaignId is required' });
+    }
+
+    const allowedCampaign = await ensureCampaignAccess(actor, campaignId);
+    if (!allowedCampaign) {
+      return res.status(403).json({ error: 'You are not allowed to access this campaign' });
+    }
+
+    const filter = { campaignId };
+
     if (cleanStr(req.query.status)) filter.status = cleanStr(req.query.status);
-    if (cleanStr(req.query.platform)) filter.platform = cleanStr(req.query.platform).toLowerCase();
+    if (cleanStr(req.query.platform)) {
+      filter.platform = cleanStr(req.query.platform).toLowerCase();
+    }
 
     const q = cleanStr(req.query.q);
     if (q) {
@@ -348,12 +492,14 @@ exports.listPipeline = async (req, res) => {
         .lean(),
     ]);
 
+    const results = await attachEmailStateToRows(rows, actorId);
+
     return res.json({
       page,
       limit,
       total,
       hasNext: page * limit < total,
-      results: rows,
+      results,
     });
   } catch (err) {
     console.error('[listPipeline] Error:', err);
@@ -363,11 +509,17 @@ exports.listPipeline = async (req, res) => {
 
 exports.updateOutreach = async (req, res) => {
   try {
-    const id = cleanStr(req.params.id);
-    const actorId = req.admin?.adminId || null;
+    const id = cleanStr(req.body?.id);
+    const actor = req.admin;
+    const actorId = getActorAdminId(actor);
     const body = req.body || {};
 
-    const update = {
+    const allowedRow = await ensurePipelineAccess(actor, id);
+    if (!allowedRow) {
+      return res.status(403).json({ error: 'You are not allowed to update this row' });
+    }
+
+    const update = cleanObject({
       email: cleanStr(body.email),
       phone: cleanStr(body.phone),
       description: cleanStr(body.description),
@@ -376,17 +528,24 @@ exports.updateOutreach = async (req, res) => {
       engagementNotes: cleanStr(body.engagementNotes),
       redFlags: cleanStr(body.redFlags),
       internalNotes: cleanStr(body.internalNotes),
-      updatedByAdmin: actorId,
-    };
+      outreachDate: body.outreachDate ? new Date(body.outreachDate) : null,
+      outreached: typeof body.outreached === 'boolean' ? body.outreached : undefined,
+      updatedByAdmin: actorId || null,
+    });
 
     const doc = await InfluencerPipeline.findByIdAndUpdate(
       id,
       { $set: update },
       { new: true }
-    );
+    ).lean();
 
-    if (!doc) return res.status(404).json({ error: 'Record not found' });
-    return res.json({ success: true, data: doc });
+    if (!doc) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+
+    const data = await attachEmailStateToRow(doc, actorId);
+
+    return res.json({ success: true, data });
   } catch (err) {
     console.error('[updateOutreach] Error:', err);
     return res.status(500).json({ error: 'Internal error' });
@@ -395,11 +554,22 @@ exports.updateOutreach = async (req, res) => {
 
 exports.markOutreachSent = async (req, res) => {
   try {
+    const actor = req.admin;
     const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const allowedIds = await ensureManyPipelineAccess(actor, ids);
+
+    if (allowedIds === null) {
+      return res.status(403).json({ error: 'You are not allowed to update one or more rows' });
+    }
+
+    if (!allowedIds.length) {
+      return res.status(400).json({ error: 'ids are required' });
+    }
+
     const now = new Date();
 
     await InfluencerPipeline.updateMany(
-      { _id: { $in: ids } },
+      { _id: { $in: allowedIds } },
       {
         $set: {
           outreached: true,
@@ -418,20 +588,27 @@ exports.markOutreachSent = async (req, res) => {
 
 exports.markFollowUp = async (req, res) => {
   try {
-    const id = cleanStr(req.params.id);
-    const step = cleanStr(req.body?.step); // 1 or 2
-    const set = step === '2'
-      ? { followUp2SentAt: new Date() }
-      : { followUp1SentAt: new Date() };
+    const actor = req.admin;
+    const actorId = getActorAdminId(actor);
+    const id = cleanStr(req.body?.id);
 
-    const doc = await InfluencerPipeline.findByIdAndUpdate(
-      id,
-      { $set: set },
-      { new: true }
-    );
+    const allowedRow = await ensurePipelineAccess(actor, id);
+    if (!allowedRow) {
+      return res.status(403).json({ error: 'You are not allowed to update this row' });
+    }
 
-    if (!doc) return res.status(404).json({ error: 'Record not found' });
-    return res.json({ success: true, data: doc });
+    const doc = await InfluencerPipeline.findById(id).lean();
+    if (!doc) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+
+    const data = await attachEmailStateToRow(doc, actorId);
+
+    return res.json({
+      success: true,
+      message: 'Follow-up state is derived from email thread messages',
+      data,
+    });
   } catch (err) {
     console.error('[markFollowUp] Error:', err);
     return res.status(500).json({ error: 'Internal error' });
@@ -440,23 +617,48 @@ exports.markFollowUp = async (req, res) => {
 
 exports.saveReplyAndMoveToRoster = async (req, res) => {
   try {
-    const id = cleanStr(req.params.id);
-    const replyText = cleanStr(req.body?.replyText);
+    const id = cleanStr(req.body?.id);
+    const actor = req.admin;
+    const actorId = getActorAdminId(actor);
+
+    const allowedRow = await ensurePipelineAccess(actor, id);
+    if (!allowedRow) {
+      return res.status(403).json({ error: 'You are not allowed to update this row' });
+    }
+
+    const row = await InfluencerPipeline.findById(id).lean();
+    if (!row) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+
+    const emailState = await buildEmailStateForRow(row, actorId);
+
+    if (!emailState.replyChecked) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot move to roster until a reply is received',
+        emailState,
+      });
+    }
 
     const doc = await InfluencerPipeline.findByIdAndUpdate(
       id,
       {
         $set: {
-          replyText,
-          repliedAt: new Date(),
           status: PIPELINE_STAGES.ROSTER,
+          repliedAt: emailState.repliedAt || new Date(),
         },
       },
       { new: true }
-    );
+    ).lean();
 
-    if (!doc) return res.status(404).json({ error: 'Record not found' });
-    return res.json({ success: true, data: doc });
+    if (!doc) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+
+    const data = await attachEmailStateToRow(doc, actorId);
+
+    return res.json({ success: true, data });
   } catch (err) {
     console.error('[saveReplyAndMoveToRoster] Error:', err);
     return res.status(500).json({ error: 'Internal error' });
@@ -465,8 +667,15 @@ exports.saveReplyAndMoveToRoster = async (req, res) => {
 
 exports.updateRoster = async (req, res) => {
   try {
-    const id = cleanStr(req.params.id);
+    const id = cleanStr(req.body?.id);
+    const actor = req.admin;
+    const actorId = getActorAdminId(actor);
     const body = req.body || {};
+
+    const allowedRow = await ensurePipelineAccess(actor, id);
+    if (!allowedRow) {
+      return res.status(403).json({ error: 'You are not allowed to update this row' });
+    }
 
     const doc = await InfluencerPipeline.findByIdAndUpdate(
       id,
@@ -480,13 +689,19 @@ exports.updateRoster = async (req, res) => {
           rates: Number.isFinite(Number(body.rates)) ? Number(body.rates) : null,
           mediaKit: cleanStr(body.mediaKit),
           address: cleanStr(body.address),
+          email: cleanStr(body.email),
         },
       },
       { new: true }
-    );
+    ).lean();
 
-    if (!doc) return res.status(404).json({ error: 'Record not found' });
-    return res.json({ success: true, data: doc });
+    if (!doc) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+
+    const data = await attachEmailStateToRow(doc, actorId);
+
+    return res.json({ success: true, data });
   } catch (err) {
     console.error('[updateRoster] Error:', err);
     return res.status(500).json({ error: 'Internal error' });
@@ -495,16 +710,28 @@ exports.updateRoster = async (req, res) => {
 
 exports.moveToPitch = async (req, res) => {
   try {
-    const id = cleanStr(req.params.id);
+    const id = cleanStr(req.body?.id);
+    const actor = req.admin;
+    const actorId = getActorAdminId(actor);
+
+    const allowedRow = await ensurePipelineAccess(actor, id);
+    if (!allowedRow) {
+      return res.status(403).json({ error: 'You are not allowed to update this row' });
+    }
 
     const doc = await InfluencerPipeline.findByIdAndUpdate(
       id,
       { $set: { status: PIPELINE_STAGES.PITCH } },
       { new: true }
-    );
+    ).lean();
 
-    if (!doc) return res.status(404).json({ error: 'Record not found' });
-    return res.json({ success: true, data: doc });
+    if (!doc) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+
+    const data = await attachEmailStateToRow(doc, actorId);
+
+    return res.json({ success: true, data });
   } catch (err) {
     console.error('[moveToPitch] Error:', err);
     return res.status(500).json({ error: 'Internal error' });
@@ -513,8 +740,15 @@ exports.moveToPitch = async (req, res) => {
 
 exports.updatePitch = async (req, res) => {
   try {
-    const id = cleanStr(req.params.id);
+    const id = cleanStr(req.body?.id);
+    const actor = req.admin;
+    const actorId = getActorAdminId(actor);
     const body = req.body || {};
+
+    const allowedRow = await ensurePipelineAccess(actor, id);
+    if (!allowedRow) {
+      return res.status(403).json({ error: 'You are not allowed to update this row' });
+    }
 
     const doc = await InfluencerPipeline.findByIdAndUpdate(
       id,
@@ -530,10 +764,15 @@ exports.updatePitch = async (req, res) => {
         },
       },
       { new: true }
-    );
+    ).lean();
 
-    if (!doc) return res.status(404).json({ error: 'Record not found' });
-    return res.json({ success: true, data: doc });
+    if (!doc) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+
+    const data = await attachEmailStateToRow(doc, actorId);
+
+    return res.json({ success: true, data });
   } catch (err) {
     console.error('[updatePitch] Error:', err);
     return res.status(500).json({ error: 'Internal error' });
@@ -542,9 +781,18 @@ exports.updatePitch = async (req, res) => {
 
 exports.generatePortalLink = async (req, res) => {
   try {
+    const actor = req.admin;
     const campaignId = cleanStr(req.params.campaignId);
+
+    const allowedCampaign = await ensureCampaignAccess(actor, campaignId);
+    if (!allowedCampaign) {
+      return res.status(403).json({ error: 'You are not allowed to access this campaign' });
+    }
+
     const token = crypto.randomBytes(24).toString('hex');
-    const portalUrl = `${process.env.BRAND_PORTAL_BASE_URL || 'https://collabglam.cloud/brand-portal'}/${token}`;
+    const portalUrl = `${
+      process.env.BRAND_PORTAL_BASE_URL || 'https://collabglam.cloud/brand-portal'
+    }/${token}`;
 
     await InfluencerPipeline.updateMany(
       {
@@ -557,7 +805,7 @@ exports.generatePortalLink = async (req, res) => {
             token,
             url: portalUrl,
             generatedAt: new Date(),
-            sharedByAdminId: req.admin?.adminId || null,
+            sharedByAdminId: getActorAdminId(req.admin),
           },
         },
       }
@@ -576,8 +824,15 @@ exports.generatePortalLink = async (req, res) => {
 
 exports.addMilestone = async (req, res) => {
   try {
-    const id = cleanStr(req.params.id);
+    const id = cleanStr(req.body?.id);
+    const actor = req.admin;
+    const actorId = getActorAdminId(actor);
     const body = req.body || {};
+
+    const allowedRow = await ensurePipelineAccess(actor, id);
+    if (!allowedRow) {
+      return res.status(403).json({ error: 'You are not allowed to update this row' });
+    }
 
     const update = {
       $push: {
@@ -592,10 +847,15 @@ exports.addMilestone = async (req, res) => {
       },
     };
 
-    const doc = await InfluencerPipeline.findByIdAndUpdate(id, update, { new: true });
-    if (!doc) return res.status(404).json({ error: 'Record not found' });
+    const doc = await InfluencerPipeline.findByIdAndUpdate(id, update, { new: true }).lean();
 
-    return res.json({ success: true, data: doc });
+    if (!doc) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+
+    const data = await attachEmailStateToRow(doc, actorId);
+
+    return res.json({ success: true, data });
   } catch (err) {
     console.error('[addMilestone] Error:', err);
     return res.status(500).json({ error: 'Internal error' });
@@ -604,14 +864,26 @@ exports.addMilestone = async (req, res) => {
 
 exports.getPipelineById = async (req, res) => {
   try {
-    const id = String(req.params.id || '').trim();
-    const doc = await InfluencerPipeline.findById(id).lean();
+    const actor = req.admin;
+    const actorId = getActorAdminId(actor);
+    const id = cleanStr(req.params.id);
 
+    const allowedRow = await ensurePipelineAccess(actor, id);
+    if (!allowedRow) {
+      return res.status(403).json({ error: 'You are not allowed to access this row' });
+    }
+
+    const doc = await InfluencerPipeline.findById(id).lean();
     if (!doc) {
       return res.status(404).json({ error: 'Record not found' });
     }
 
-    return res.json({ success: true, data: doc });
+    const data = await attachEmailStateToRow(doc, actorId);
+
+    return res.json({
+      success: true,
+      data,
+    });
   } catch (err) {
     console.error('[getPipelineById] Error:', err);
     return res.status(500).json({ error: 'Internal error' });
@@ -620,21 +892,194 @@ exports.getPipelineById = async (req, res) => {
 
 exports.moveToRoster = async (req, res) => {
   try {
-    const id = String(req.body?.id || '').trim();
+    const actor = req.admin;
+    const actorId = getActorAdminId(actor);
+    const id = cleanStr(req.body?.id);
+
+    const allowedRow = await ensurePipelineAccess(actor, id);
+    if (!allowedRow) {
+      return res.status(403).json({ error: 'You are not allowed to update this row' });
+    }
+
+    const row = await InfluencerPipeline.findById(id).lean();
+    if (!row) {
+      return res.status(404).json({ error: 'Record not found' });
+    }
+
+    const emailState = await buildEmailStateForRow(row, actorId);
+
+    if (!emailState.replyChecked) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot move to roster until a reply is received',
+        emailState,
+      });
+    }
 
     const doc = await InfluencerPipeline.findByIdAndUpdate(
       id,
-      { $set: { status: 'roster' } },
+      {
+        $set: {
+          status: PIPELINE_STAGES.ROSTER,
+          repliedAt: emailState.repliedAt || new Date(),
+        },
+      },
       { new: true }
-    );
+    ).lean();
 
     if (!doc) {
       return res.status(404).json({ error: 'Record not found' });
     }
 
-    return res.json({ success: true, data: doc });
+    const data = await attachEmailStateToRow(doc, actorId);
+
+    return res.json({
+      success: true,
+      data,
+    });
   } catch (err) {
     console.error('[moveToRoster] Error:', err);
     return res.status(500).json({ error: 'Internal error' });
+  }
+};
+
+exports.createPipelineRow = async (req, res) => {
+  try {
+    const actor = req.admin;
+    const actorId = actor?.adminId || null;
+    const body = req.body || {};
+
+    const campaignId = cleanStr(body.campaignId);
+    const requestedStatus = cleanStr(body.status).toLowerCase();
+
+    if (!campaignId || !mongoose.Types.ObjectId.isValid(campaignId)) {
+      return res.status(400).json({ error: 'Valid campaignId is required' });
+    }
+
+    const allowedCampaign = await ensureCampaignAccess(actor, campaignId);
+    if (!allowedCampaign) {
+      return res.status(403).json({ error: 'You are not allowed to access this campaign' });
+    }
+
+    const allowedStatuses = [
+      PIPELINE_STAGES.OUTREACH,
+      PIPELINE_STAGES.ROSTER,
+      PIPELINE_STAGES.PITCH,
+    ];
+
+    const status = allowedStatuses.includes(requestedStatus)
+      ? requestedStatus
+      : PIPELINE_STAGES.OUTREACH;
+
+    const name = cleanStr(body.name);
+    if (!name) {
+      return res.status(400).json({ error: 'name is required' });
+    }
+
+    const links = Array.isArray(body.links)
+      ? uniqStrings(body.links)
+      : uniqStrings(String(body.links || '').split(','));
+
+    const niche = Array.isArray(body.niche)
+      ? uniqStrings(body.niche)
+      : uniqStrings(String(body.niche || '').split(','));
+
+    const primaryLink =
+      cleanStr(body.primaryLink) ||
+      (links.length ? links[0] : '');
+
+    const manualSourceType = PIPELINE_SOURCES.MANUAL || 'manual';
+    const sourceRefId = `manual_${new mongoose.Types.ObjectId().toString()}`;
+
+    const doc = await InfluencerPipeline.create({
+      campaignId,
+      status,
+
+      sourceType: manualSourceType,
+      sourceRefId,
+      platform: cleanStr(body.platform || 'other').toLowerCase() || 'other',
+
+      name,
+      username: cleanStr(body.username),
+      handle: cleanStr(body.handle),
+      userId: cleanStr(body.userId),
+
+      followers:
+        body.followers === '' || body.followers === null || body.followers === undefined
+          ? null
+          : Number.isFinite(Number(body.followers))
+          ? Number(body.followers)
+          : null,
+
+      links,
+      primaryLink,
+      picture: cleanStr(body.picture),
+
+      niche,
+      email: cleanStr(body.email),
+      phone: cleanStr(body.phone),
+      country: cleanStr(body.country),
+      state: cleanStr(body.state),
+      city: cleanStr(body.city),
+      language: cleanStr(body.language),
+
+      outreachDate: body.outreachDate ? new Date(body.outreachDate) : null,
+      outreached: typeof body.outreached === 'boolean' ? body.outreached : false,
+      followUp1SentAt: body.followUp1SentAt ? new Date(body.followUp1SentAt) : null,
+      followUp2SentAt: body.followUp2SentAt ? new Date(body.followUp2SentAt) : null,
+      replyText: cleanStr(body.replyText),
+
+      demographics: cleanStr(body.demographics),
+      engagementRate:
+        body.engagementRate === '' || body.engagementRate === null || body.engagementRate === undefined
+          ? null
+          : Number.isFinite(Number(body.engagementRate))
+          ? Number(body.engagementRate)
+          : null,
+      deliverables: cleanStr(body.deliverables),
+      rates:
+        body.rates === '' || body.rates === null || body.rates === undefined
+          ? null
+          : Number.isFinite(Number(body.rates))
+          ? Number(body.rates)
+          : null,
+      mediaKit: cleanStr(body.mediaKit),
+      address: cleanStr(body.address),
+
+      additionalInfo: cleanStr(body.additionalInfo),
+      selectionReason: cleanStr(body.selectionReason),
+      goodFit: typeof body.goodFit === 'boolean' ? body.goodFit : false,
+      rateUsd:
+        body.rateUsd === '' || body.rateUsd === null || body.rateUsd === undefined
+          ? null
+          : Number.isFinite(Number(body.rateUsd))
+          ? Number(body.rateUsd)
+          : null,
+      ourFeePct:
+        body.ourFeePct === '' || body.ourFeePct === null || body.ourFeePct === undefined
+          ? null
+          : Number.isFinite(Number(body.ourFeePct))
+          ? Number(body.ourFeePct)
+          : null,
+      comments: cleanStr(body.comments),
+
+      createdByAdmin: actorId,
+      updatedByAdmin: actorId,
+
+      rawSnapshot: {
+        type: 'manual_create',
+        createdFromUi: true,
+        body,
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: 'Pipeline row created successfully',
+      data: doc,
+    });
+  } catch (err) {
+    console.error('[createPipelineRow] Error:', err);
+    return res.status(500).json({ error: err?.message || 'Internal error' });
   }
 };

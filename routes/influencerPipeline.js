@@ -20,7 +20,7 @@ router.post('/pitch/update', ctrl.updatePitch);
 router.post('/campaign/:campaignId/portal', ctrl.generatePortalLink);
 router.post('/milestones/add', ctrl.addMilestone);
 router.post('/move-to-roster', ctrl.moveToRoster);
-
+router.post('/create', ctrl.createPipelineRow);
 // fetch
 router.get('/list', ctrl.listPipeline);
 router.get('/detail/:id', ctrl.getPipelineById);
