@@ -7,6 +7,8 @@ const ROLES = {
   BME: "bme",
 };
 
+const PROXY_EMAIL_DOMAIN = "reply.collabglam.cloud";
+
 const AdminAccessSchema = new Schema(
   {
     key: { type: String, required: true, trim: true, lowercase: true },
@@ -51,6 +53,13 @@ const AdminSchema = new Schema(
       sparse: true,
       lowercase: true,
       trim: true,
+      validate: {
+        validator: function (value) {
+          if (!value) return true;
+          return value.endsWith(`@${PROXY_EMAIL_DOMAIN}`);
+        },
+        message: `proxyEmail must use @${PROXY_EMAIL_DOMAIN}`,
+      },
     },
 
     invitedAt: { type: Date },
@@ -58,14 +67,9 @@ const AdminSchema = new Schema(
     inviteExpiresAt: { type: Date },
 
     createdBy: { type: Schema.Types.ObjectId, ref: "Admin", default: null },
-
-    // direct reporting manager
     parentAdmin: { type: Schema.Types.ObjectId, ref: "Admin", default: null },
-
-    // top-most super admin under which tree belongs
     rootAdmin: { type: Schema.Types.ObjectId, ref: "Admin", default: null },
 
-    // only useful for faster querying / UI
     teamType: {
       type: String,
       enum: ["leadership", "sales", "execution", null],
@@ -77,7 +81,6 @@ const AdminSchema = new Schema(
   { timestamps: true }
 );
 
-// Helpful indexes
 AdminSchema.index({ role: 1 });
 AdminSchema.index({ parentAdmin: 1 });
 AdminSchema.index({ rootAdmin: 1 });
@@ -88,4 +91,5 @@ const AdminModel = model("Master", AdminSchema);
 module.exports = {
   AdminModel,
   ROLES,
+  PROXY_EMAIL_DOMAIN,
 };

@@ -1,7 +1,7 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
-const { AdminModel, ROLES } = require("../models/master");
+const { AdminModel, ROLES, PROXY_EMAIL_DOMAIN } = require("../models/master");
 const {
   canInviteRole,
   buildAdminVisibilityFilter,
@@ -24,8 +24,6 @@ function slugifyName(value) {
 }
 
 async function generateUniqueProxyEmail(name, email, currentAdminId) {
-  const domain = "collabglam.cloud";
-
   let base = slugifyName(name);
 
   if (!base) {
@@ -37,7 +35,7 @@ async function generateUniqueProxyEmail(name, email, currentAdminId) {
     base = "admin";
   }
 
-  let candidate = `${base}@${domain}`;
+  let candidate = `${base}@${PROXY_EMAIL_DOMAIN}`;
   let counter = 1;
 
   while (true) {
@@ -48,7 +46,7 @@ async function generateUniqueProxyEmail(name, email, currentAdminId) {
 
     if (!existing) return candidate;
 
-    candidate = `${base}${counter}@${domain}`;
+    candidate = `${base}${counter}@${PROXY_EMAIL_DOMAIN}`;
     counter += 1;
   }
 }
@@ -155,6 +153,17 @@ function resolveHierarchyFields(inviter, targetRole, explicitParentAdmin) {
   };
 }
 
+function normalizeProxyEmailInput(value) {
+  const raw = clean(value).toLowerCase();
+  if (!raw) return "";
+
+  const localPart = raw.includes("@") ? raw.split("@")[0] : raw;
+  const safeLocalPart = slugifyName(localPart);
+
+  if (!safeLocalPart) return "";
+  return `${safeLocalPart}@${PROXY_EMAIL_DOMAIN}`;
+}
+
 // ======================
 // Admin Login
 // ======================
@@ -170,7 +179,7 @@ exports.adminLogin = async (req, res) => {
     }
 
     const admin = await AdminModel.findOne({ email: exactCI(email) }).select(
-      "+passwordHash role status name email access parentAdmin rootAdmin"
+      "+passwordHash role status name email access parentAdmin rootAdmin proxyEmail"
     );
 
     if (!admin) {
@@ -222,12 +231,26 @@ exports.adminLogin = async (req, res) => {
         access: admin.access || [],
         parentAdmin: admin.parentAdmin,
         rootAdmin: admin.rootAdmin,
+        proxyEmail: admin.proxyEmail,
       },
     });
   } catch (err) {
     return res.status(500).json({ message: err.message || "Internal error" });
   }
 };
+
+async function ensureUniqueProxyEmail(proxyEmail, currentAdminId) {
+  const existing = await AdminModel.findOne({
+    proxyEmail,
+    ...(currentAdminId ? { _id: { $ne: currentAdminId } } : {}),
+  }).select("_id proxyEmail");
+
+  if (existing) {
+    throw new Error("Proxy email already in use");
+  }
+
+  return proxyEmail;
+}
 
 // ======================
 // Invite Admin
@@ -245,6 +268,7 @@ exports.inviteAdmin = async (req, res) => {
     const name = clean(req.body?.name);
     const access = parseAccess(req.body?.access);
     const explicitParentAdmin = clean(req.body?.parentAdmin);
+    const requestedProxyEmail = normalizeProxyEmailInput(req.body?.proxyEmail);
 
     if (!email || !role) {
       return res.status(400).json({ message: "email and role are required" });
@@ -288,7 +312,7 @@ exports.inviteAdmin = async (req, res) => {
     }
 
     if (!admin) {
-      admin = await AdminModel.create({
+      admin = new AdminModel({
         email,
         name: name || undefined,
         role,
@@ -312,6 +336,19 @@ exports.inviteAdmin = async (req, res) => {
       admin.parentAdmin = hierarchy.parentAdmin;
       admin.rootAdmin = hierarchy.rootAdmin;
       admin.teamType = hierarchy.teamType;
+    }
+
+    if (requestedProxyEmail) {
+      admin.proxyEmail = await ensureUniqueProxyEmail(
+        requestedProxyEmail,
+        admin._id
+      );
+    } else if (!admin.proxyEmail) {
+      admin.proxyEmail = await generateUniqueProxyEmail(
+        admin.name,
+        admin.email,
+        admin._id
+      );
     }
 
     const rawToken = generateInviteToken(32);
@@ -350,6 +387,10 @@ exports.inviteAdmin = async (req, res) => {
 
     return res.status(201).json(response);
   } catch (err) {
+    if (err.message === "Proxy email already in use") {
+      return res.status(409).json({ message: err.message });
+    }
+
     return res.status(500).json({ message: err.message || "Internal error" });
   }
 };
@@ -431,7 +472,7 @@ exports.listAdmins = async (req, res) => {
 
     const admins = await AdminModel.find(filter)
       .select(
-        "email name role status invitedAt lastLoginAt createdAt updatedAt access parentAdmin rootAdmin createdBy"
+        "email name role status invitedAt proxyEmail lastLoginAt createdAt updatedAt access parentAdmin rootAdmin createdBy"
       )
       .populate("parentAdmin", "name email role")
       .populate("createdBy", "name email role")
@@ -551,7 +592,7 @@ exports.adminMe = async (req, res) => {
     }
 
     const admin = await AdminModel.findById(adminId).select(
-      "email name role status access lastLoginAt createdAt updatedAt parentAdmin rootAdmin"
+      "email name role status access lastLoginAt createdAt updatedAt parentAdmin rootAdmin proxyEmail "
     );
 
     if (!admin) {
@@ -582,6 +623,7 @@ exports.adminMe = async (req, res) => {
       status: admin.status,
       lastLoginAt: admin.lastLoginAt,
       createdAt: admin.createdAt,
+      proxyEmail: admin.proxyEmail,
       updatedAt: admin.updatedAt,
       parentAdmin: admin.parentAdmin,
       rootAdmin: admin.rootAdmin,

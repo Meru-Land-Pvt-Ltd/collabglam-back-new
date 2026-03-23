@@ -63,7 +63,7 @@ async function getThreads(req, res) {
     }
 
     const result = await listThreads({
-      executiveId: adminId,
+      actorAdminId: adminId,
       page,
       limit,
     });
@@ -92,7 +92,10 @@ async function getMessages(req, res) {
       });
     }
 
-    const result = await getThreadMessages(threadId, adminId);
+    const result = await getThreadMessages({
+      threadId,
+      actorAdminId: adminId,
+    });
 
     return res.status(200).json({
       success: true,
@@ -121,7 +124,7 @@ async function reply(req, res) {
 
     const result = await replyToThread({
       threadId,
-      executiveId: adminId,
+      actorAdminId: adminId,
       subject,
       text,
       html,
