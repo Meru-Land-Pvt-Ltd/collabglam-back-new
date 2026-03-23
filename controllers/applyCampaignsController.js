@@ -435,8 +435,15 @@ ${dashboardLink}
  * Body: { campaignId, page, limit, search, sortField, createdPage, sortOrder }
  */
 exports.getListByCampaign = async (req, res) => {
-  const { campaignId, page = 1, limit = 10, search, sortField, createdPage, sortOrder = 0 } =
-    req.body || {};
+  const {
+    campaignId,
+    page = 1,
+    limit = 10,
+    search,
+    sortField,
+    createdPage,
+    sortOrder = 0
+  } = req.body || {};
 
   if (!campaignId) {
     return res.status(400).json({ message: 'campaignId is required' });
@@ -447,7 +454,12 @@ exports.getListByCampaign = async (req, res) => {
 
     if (!record) {
       return res.status(200).json({
-        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        meta: {
+          total: 0,
+          page: Number(page),
+          limit: Number(limit),
+          totalPages: 0
+        },
         applicantCount: 0,
         isContracted: 0,
         contractId: null,
@@ -462,7 +474,12 @@ exports.getListByCampaign = async (req, res) => {
 
     if (!influencerIds.length) {
       return res.status(200).json({
-        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        meta: {
+          total: 0,
+          page: Number(page),
+          limit: Number(limit),
+          totalPages: 0
+        },
         applicantCount: record.applicants?.length || 0,
         isContracted: 0,
         contractId: null,
@@ -478,13 +495,16 @@ exports.getListByCampaign = async (req, res) => {
       filter.name = { $regex: search.trim(), $options: 'i' };
     }
 
-    const influencersRaw = await InfluencerModel.find(filter)
-      .select('_id name email countryName categories')
-      .lean();
+    const influencersRaw = await InfluencerModel.find(filter).lean();
 
     if (!influencersRaw.length) {
       return res.status(200).json({
-        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        meta: {
+          total: 0,
+          page: Number(page),
+          limit: Number(limit),
+          totalPages: 0
+        },
         applicantCount: record.applicants?.length || 0,
         isContracted: 0,
         contractId: null,
@@ -492,10 +512,9 @@ exports.getListByCampaign = async (req, res) => {
       });
     }
 
-    const modashProfiles = await Modash.find(
-      { influencerId: { $in: influencerIds } },
-      'influencerId provider handle username fullname followers'
-    ).lean();
+    const modashProfiles = await Modash.find({
+      influencerId: { $in: influencerIds }
+    }).lean();
 
     const modashByInf = new Map();
     for (const p of modashProfiles) {
@@ -508,23 +527,43 @@ exports.getListByCampaign = async (req, res) => {
     const contracts = await Contract.find({ campaignId: String(campaignId) }).lean();
     const isContractedCampaign = contracts.length > 0 ? 1 : 0;
     const contractByInf = new Map(contracts.map((c) => [String(c.influencerId), c]));
-    const approvedId = record.approved?.[0]?.influencerId ? String(record.approved[0].influencerId) : null;
+    const approvedId = record.approved?.[0]?.influencerId
+      ? String(record.approved[0].influencerId)
+      : null;
+
     const applicationCreatedAt = record.createdAt || record._id?.getTimestamp?.() || null;
+
+    const serializeModashProfile = (profile) => {
+      if (!profile) return null;
+
+      return {
+        ...profile,
+        _id: profile._id ? String(profile._id) : null,
+        influencerId: profile.influencerId ? String(profile.influencerId) : null
+      };
+    };
 
     const condensed = influencersRaw.map((inf) => {
       const infIdStr = String(inf._id);
 
-      const profiles = modashByInf.get(infIdStr) || [];
-      const audienceSize = profiles.reduce((sum, p) => sum + (Number(p?.followers) || 0), 0);
-      const chosen = pickModashProfile(profiles);
+      const rawProfiles = modashByInf.get(infIdStr) || [];
+      const audienceSize = rawProfiles.reduce(
+        (sum, p) => sum + (Number(p?.followers) || 0),
+        0
+      );
+
+      const chosenRaw = pickModashProfile(rawProfiles);
+      const chosen = serializeModashProfile(chosenRaw);
+      const allProfiles = rawProfiles.map(serializeModashProfile);
 
       let handle = null;
-      if (chosen) {
-        handle = (chosen.handle || chosen.username || chosen.fullname || '').trim() || null;
+      if (chosenRaw) {
+        handle =
+          (chosenRaw.handle || chosenRaw.username || chosenRaw.fullname || '').trim() || null;
       }
       if (handle && !handle.startsWith('@')) handle = '@' + handle;
 
-      const primaryPlatform = chosen?.provider || null;
+      const primaryPlatform = chosenRaw?.provider || null;
 
       let categoryName = null;
       if (Array.isArray(inf.categories) && inf.categories.length > 0) {
@@ -546,6 +585,10 @@ exports.getListByCampaign = async (req, res) => {
         audienceSize,
         createdAt: applicationCreatedAt,
 
+        // full modash data
+        modashProfile: chosen,        // selected full profile
+        modashProfiles: allProfiles,  // all profiles full data
+
         isAssigned,
         isContracted,
         contractId: c?.contractId || null,
@@ -564,16 +607,30 @@ exports.getListByCampaign = async (req, res) => {
         if (!c) return true;
 
         const status = normalizeStatus(c.status || c.contractStatus);
-        const awaitingRole = normalizeRole(c.awaitingRole || c.awaiting_role || c.awaiting?.role);
+        const awaitingRole = normalizeRole(
+          c.awaitingRole || c.awaiting_role || c.awaiting?.role
+        );
 
-        if (status === 'READY_TO_SIGN' && awaitingRole === 'collabglam') return false;
+        if (status === 'READY_TO_SIGN' && awaitingRole === 'collabglam') {
+          return false;
+        }
+
         return true;
       });
     }
 
     const dir = sortOrder === 1 ? -1 : 1;
+
     if (sortField) {
-      const allowed = new Set(['name', 'primaryPlatform', 'category', 'audienceSize', 'handle', 'createdAt']);
+      const allowed = new Set([
+        'name',
+        'primaryPlatform',
+        'category',
+        'audienceSize',
+        'handle',
+        'createdAt'
+      ]);
+
       if (allowed.has(sortField)) {
         filtered.sort((a, b) => {
           const av = a[sortField];
@@ -603,8 +660,16 @@ exports.getListByCampaign = async (req, res) => {
     const paged = filtered.slice(start, end);
 
     return res.status(200).json({
-      meta: { total, page: pageNum, limit: limNum, totalPages: Math.ceil(total / limNum) },
-      applicantCount: createdPage === true || createdPage === 'true' ? total : record.applicants.length,
+      meta: {
+        total,
+        page: pageNum,
+        limit: limNum,
+        totalPages: Math.ceil(total / limNum)
+      },
+      applicantCount:
+        createdPage === true || createdPage === 'true'
+          ? total
+          : record.applicants?.length || 0,
       isContracted: isContractedCampaign,
       contractId: null,
       influencers: paged
