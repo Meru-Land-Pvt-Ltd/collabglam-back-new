@@ -25,4 +25,6 @@ router.post(
   campaignInvitationController.getInvitationsByBrandIdAndCampaignId
 );
 
+router.post("/get-by-campaign", campaignInvitationController.getInvitationsByCampaignIdPost);
+
 module.exports = router;       

@@ -713,3 +713,211 @@ exports.getInvitationsByBrandIdAndCampaignId = async (req, res) => {
     });
   }
 };
+
+exports.getInvitationsByCampaignIdPost = async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.body?.page || "1", 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.body?.limit || "25", 10), 1), 200);
+    const skip = (page - 1) * limit;
+
+    const includeCampaign = String(req.body?.includeCampaign ?? "1") === "1";
+    const includeNames = String(req.body?.includeNames ?? "1") === "1";
+
+    // campaignId only
+    const raw = req.body?.campaignId ?? req.body?.campaignIds;
+    let requestedCampaignIds = [];
+
+    if (Array.isArray(raw)) {
+      requestedCampaignIds = raw.map((x) => String(x || "").trim()).filter(Boolean);
+    } else if (typeof raw === "string" || raw != null) {
+      const v = String(raw || "").trim();
+      if (v) requestedCampaignIds = [v];
+    }
+
+    requestedCampaignIds = [...new Set(requestedCampaignIds)];
+
+    if (!requestedCampaignIds.length) {
+      return res.status(400).json({
+        status: "error",
+        message: "campaignId is required (Mongo _id string or array).",
+      });
+    }
+
+    // validate ObjectIds
+    const invalidIds = requestedCampaignIds.filter((id) => !mongoose.Types.ObjectId.isValid(id));
+    if (invalidIds.length) {
+      return res.status(400).json({
+        status: "error",
+        message: "One or more campaignId values are invalid.",
+        invalidCampaignIds: invalidIds,
+      });
+    }
+
+    const campaignObjectIds = requestedCampaignIds.map((id) => new mongoose.Types.ObjectId(id));
+
+    const filter = {};
+
+    if (req.body?.brandId) {
+      filter.brandId = String(req.body.brandId).trim();
+    }
+
+    if (req.body?.platform) {
+      filter.platform = String(req.body.platform).trim().toLowerCase();
+    }
+
+    if (req.body?.status) {
+      filter.status = String(req.body.status).trim().toLowerCase();
+    }
+
+    if (req.body?.handle) {
+      const h = normalizeHandle(req.body.handle);
+      if (!h || !HANDLE_RX.test(h)) {
+        return res.status(400).json({
+          status: "error",
+          message: "Invalid handle format. Use @username",
+        });
+      }
+      filter.handle = h;
+    }
+
+    // campaignId filter only
+    filter.campaignId =
+      campaignObjectIds.length === 1 ? campaignObjectIds[0] : { $in: campaignObjectIds };
+
+    const [total, invitations] = await Promise.all([
+      CampaignInvitation.countDocuments(filter),
+      CampaignInvitation.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+    ]);
+
+    const foundCampaignIds = new Set(
+      invitations.map((i) => String(i.campaignId || "")).filter(Boolean)
+    );
+
+    const missingCampaignIds = requestedCampaignIds.filter((id) => !foundCampaignIds.has(id));
+
+    let campaignMap = new Map();
+    let brandMap = new Map();
+    let influencerMap = new Map();
+    let modashMap = new Map();
+
+    if (includeCampaign && invitations.length) {
+      const invitationCampaignIds = [
+        ...new Set(invitations.map((i) => String(i.campaignId || "")).filter(Boolean)),
+      ];
+
+      const campaigns = await Campaign.find({
+        _id: { $in: invitationCampaignIds.map((id) => new mongoose.Types.ObjectId(id)) },
+      })
+        .select("_id campaignTitle brandId status isActive")
+        .lean();
+
+      campaignMap = new Map(campaigns.map((c) => [String(c._id), c]));
+    }
+
+    if (includeNames && invitations.length) {
+      const brandIds = [...new Set(invitations.map((i) => i.brandId).filter(Boolean).map(String))];
+      const influencerIds = [...new Set(invitations.map((i) => i.influencerId).filter(Boolean).map(String))];
+
+      const modashUserIds = [
+        ...new Set(invitations.map((i) => i.modashUserId).filter(Boolean).map((x) => String(x).trim())),
+      ];
+
+      const providers = [
+        ...new Set(invitations.map((i) => i.platform).filter(Boolean).map((x) => String(x).trim().toLowerCase())),
+      ];
+
+      const [brands, influencers, modashDocs] = await Promise.all([
+        brandIds.length
+          ? Brand.find({ brandId: { $in: brandIds } }).select("brandId name brandName companyName").lean()
+          : [],
+        influencerIds.length
+          ? Influencer.find({ influencerId: { $in: influencerIds } })
+              .select("influencerId name influencerName fullName username")
+              .lean()
+          : [],
+        modashUserIds.length
+          ? Modash.find({
+              userId: { $in: modashUserIds },
+              provider: providers.length ? { $in: providers } : undefined,
+            })
+              .select("userId provider fullname username handle")
+              .lean()
+          : [],
+      ]);
+
+      brandMap = new Map(
+        brands.map((b) => [String(b.brandId), b.name || b.brandName || b.companyName || ""])
+      );
+
+      influencerMap = new Map(
+        influencers.map((i) => [
+          String(i.influencerId),
+          i.name || i.fullName || i.influencerName || i.username || "",
+        ])
+      );
+
+      modashMap = new Map(
+        modashDocs.map((m) => [
+          `${String(m.userId).trim()}|${String(m.provider).trim().toLowerCase()}`,
+          m.fullname || m.username || m.handle || "",
+        ])
+      );
+    }
+
+    const cleaned = invitations.map((inv) => {
+      const c = includeCampaign ? campaignMap.get(String(inv.campaignId)) : null;
+
+      const brandName = includeNames ? brandMap.get(String(inv.brandId)) || "" : undefined;
+
+      let influencerName = undefined;
+      if (includeNames) {
+        influencerName = inv.influencerId ? influencerMap.get(String(inv.influencerId)) || "" : "";
+        if ((!influencerName || influencerName.trim() === "") && inv.modashUserId) {
+          const key = `${String(inv.modashUserId).trim()}|${String(inv.platform || "").trim().toLowerCase()}`;
+          influencerName = modashMap.get(key) || "";
+        }
+      }
+
+      const out = {
+        invitationId: inv.invitationId,
+
+        brandId: inv.brandId,
+        brandName: includeNames ? (brandName || null) : undefined,
+
+        influencerId: inv.influencerId || null,
+        influencerName: includeNames ? (influencerName || null) : undefined,
+
+        campaignId: inv.campaignId ? String(inv.campaignId) : null,
+
+        campaignTitle: includeCampaign ? (c?.campaignTitle || null) : null,
+        campaignStatus: includeCampaign ? (c?.status || null) : null,
+        campaignIsActive: includeCampaign ? Number(c?.isActive || 0) : null,
+
+        platform: inv.platform,
+        handle: inv.handle,
+        status: inv.status,
+        modashUserId: inv.modashUserId || null,
+
+        createdAt: inv.createdAt,
+        updatedAt: inv.updatedAt,
+      };
+
+      Object.keys(out).forEach((k) => out[k] === undefined && delete out[k]);
+      return out;
+    });
+
+    return res.json({
+      status: "success",
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit),
+      requested: requestedCampaignIds.length,
+      returned: cleaned.length,
+      invitations: cleaned,
+    });
+  } catch (e) {
+    console.error("getInvitationsByCampaignIdPost error:", e);
+    return res.status(500).json({ status: "error", message: "Internal server error" });
+  }
+};

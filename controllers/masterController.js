@@ -1,6 +1,7 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const Campaign = require("../models/campaign");
 const { AdminModel, ROLES, PROXY_EMAIL_DOMAIN } = require("../models/master");
 const {
   canInviteRole,
@@ -681,5 +682,67 @@ exports.sendBulkEmailCsv = async (req, res) => {
       success: false,
       message: e?.message || "Internal error",
     });
+  }
+};
+
+exports.getAllCampaignsLite = async (req, res) => {
+  try {
+    const search = String(req.body.search || "").trim();
+    const statusFlag = parseInt(req.body.type, 10) || 0; // 0=all, 1=active, 2=inactive
+
+    const brandIdRaw = req.body.brandId ?? req.body.brand_id ?? req.body.brand ?? "";
+    const brandId = String(brandIdRaw || "").trim();
+
+    const filter = {
+      isDraft: { $ne: 1 },
+    };
+
+    if (brandId) {
+      if (!mongoose.Types.ObjectId.isValid(brandId)) {
+        return res.status(400).json({ message: "Valid brandId is required" });
+      }
+      filter.brandId = new mongoose.Types.ObjectId(brandId);
+    }
+
+    if (search) {
+      const re = new RegExp(search, "i");
+      filter.$or = [
+        { campaignTitle: re },
+        { description: re },
+        { campaignCategory: re },
+        { campaignSubcategory: re },
+      ];
+    }
+
+    if (statusFlag === 1) {
+      filter.isActive = 1;
+    } else if (statusFlag === 2) {
+      filter.isActive = 0;
+    }
+
+    const rows = await Campaign.find(filter)
+      .select("_id brandId campaignTitle status isActive isDraft")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const campaigns = rows.map((c) => ({
+      brandId: c.brandId ? String(c.brandId) : null,
+      campaignId: c._id ? String(c._id) : null,
+      campaignTitle: c.campaignTitle || "",
+      status: c.status || "",
+      isActive: Number(c.isActive || 0),
+    }));
+
+    const uniqueBrandIds = [...new Set(campaigns.map((c) => c.brandId).filter(Boolean))];
+
+    return res.status(200).json({
+      status: statusFlag,
+      brandId: brandId || (uniqueBrandIds.length === 1 ? uniqueBrandIds[0] : null),
+      total: campaigns.length,
+      campaigns,
+    });
+  } catch (err) {
+    console.error("Error in getAllCampaignsLite:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };

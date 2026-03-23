@@ -14,6 +14,7 @@ router.post("/accept-invite", adminController.acceptInviteSetPassword);
 router.get("/list", adminAuth, adminController.listAdmins);
 router.put("/update-status", adminAuth, adminController.updateStatus);
 router.get("/me", adminAuth, adminController.adminMe);
+router.post("/campaign/lite",adminController.getAllCampaignsLite);
 
 router.post(
   "/send-bulk-csv",

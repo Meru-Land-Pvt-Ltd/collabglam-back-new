@@ -12,7 +12,7 @@ const { InfluencerModel: Influencer } = require("../models/influencer");
 const Contract = require("../models/contract");
 const Country = require("../models/country");
 const Modash = require("../models/modash");
-const Admin = require("../models/admin");
+const { AdminModel: Admin } = require("../models/master");
 
 const { AgeRangeModel: AgeRange } = require("../models/ageRange");
 const ContentLanguage = require("../models/language");
@@ -895,7 +895,18 @@ const buildCampaignDoc = (body, geo, status, byAi, timing, extra = {}) => {
     byAi,
 
     createdLocation,
-    createdBy: extra.createdBy || null,
+    createdBy: extra.createdBy
+      ? {
+        role: extra.createdBy.role,
+        userId: extra.createdBy.userId,
+        userModel:
+          extra.createdBy.userModel ||
+          (extra.createdBy.role === "admin" ? "Master" : "Brand"),
+        email: extra.createdBy.email || "",
+        name: extra.createdBy.name || "",
+        adminRole: extra.createdBy.adminRole || "",
+      }
+      : null,
     approvalMode: extra.approvalMode || "direct",
 
     status,
@@ -1250,37 +1261,124 @@ function diffObject(base, next) {
 
 function isAdminRequest(req) {
   const role = String(req.user?.role || req.user?.userType || "").toLowerCase();
-  if (req.user?.brandId || role.includes("brand")) return false;
-  if (role.includes("admin")) return true;
-  if (req.user?.isAdmin === true) return true;
-  if (req.user?.adminId && !req.user?.brandId) return true;
-  if (req.body?.adminId || req.query?.adminId) return true;
+  const isMasterRole = ["super_admin", "revenue_head", "ime", "bme"].includes(role);
+
+
+  if (
+    isMasterRole ||
+    role.includes("admin") ||
+    req.user?.isAdmin === true ||
+    req.user?.adminId ||
+    req.body?.adminId ||
+    req.body?.adminMongoId ||
+    req.body?.adminEmail ||
+    req.query?.adminId
+  ) {
+    return true;
+  }
+
+  if (role.includes("brand") || req.user?.brandId) {
+    return false;
+  }
+
   return false;
 }
 
+async function findAdminDoc(rawValue) {
+  const v = String(rawValue || "").trim();
+  if (!v) return null;
+
+  if (mongoose.Types.ObjectId.isValid(v)) {
+    const byId = await Admin.findById(v)
+      .select("_id email name role status")
+      .lean();
+    if (byId) return byId;
+  }
+
+  const byEmail = await Admin.findOne({ email: v.toLowerCase() })
+    .select("_id email name role status")
+    .lean();
+
+  if (byEmail) return byEmail;
+
+  return null;
+}
 async function resolveActorFromPayload(req, fallbackBrandId = "") {
   const role = String(req.user?.role || req.user?.userType || "").toLowerCase();
 
-  if (!req.user?.brandId && (role.includes("admin") || req.user?.isAdmin === true || req.user?.adminId)) {
-    let adminKey = String(req.user?.adminId || req.user?._id || req.user?.id || "").trim();
-    if (mongoose.Types.ObjectId.isValid(adminKey)) {
-      const a = await Admin.findById(adminKey, "adminId").lean();
-      if (a?.adminId) adminKey = String(a.adminId);
-    } else {
-      const a = await Admin.findOne({ adminId: adminKey }, "adminId").lean();
-      if (a?.adminId) adminKey = String(a.adminId);
+  const findAdminDoc = async (rawValue) => {
+    const v = String(rawValue || "").trim();
+    if (!v) return null;
+
+    // try by Mongo _id
+    if (mongoose.Types.ObjectId.isValid(v)) {
+      const byId = await Admin.findById(v)
+        .select("_id email name role status")
+        .lean();
+      if (byId) return byId;
     }
-    return { role: "admin", userId: adminKey };
+
+    // fallback by email
+    const byEmail = await Admin.findOne({ email: v.toLowerCase() })
+      .select("_id email name role status")
+      .lean();
+    if (byEmail) return byEmail;
+
+    return null;
+  };
+
+  const isMasterRole = ["super_admin", "revenue_head", "ime", "bme"].includes(role);
+
+  const looksLikeAdmin =
+    !req.user?.brandId &&
+    (
+      isMasterRole ||
+      role.includes("admin") ||
+      req.user?.isAdmin === true ||
+      req.user?.adminId ||
+      req.body?.adminId ||
+      req.body?.adminMongoId ||
+      req.body?.adminEmail ||
+      req.user?.email
+    );
+
+  if (looksLikeAdmin) {
+    const adminDoc =
+      (await findAdminDoc(req.user?.adminId)) ||
+      (await findAdminDoc(req.user?._id)) ||
+      (await findAdminDoc(req.user?.id)) ||
+      (await findAdminDoc(req.user?.email)) ||
+      (await findAdminDoc(req.body?.adminMongoId)) ||
+      (await findAdminDoc(req.body?.adminId)) ||
+      (await findAdminDoc(req.body?.adminEmail));
+
+    if (!adminDoc) {
+      throw new Error("Admin actor detected but Admin record could not be resolved");
+    }
+
+    return {
+      role: "admin",
+      userId: adminDoc._id,
+      userModel: "Master",
+      email: adminDoc.email,
+      name: adminDoc.name || "",
+      adminRole: adminDoc.role,
+    };
   }
 
-  const raw = req.body?.adminId;
-  const adminId = raw == null ? "" : String(raw).trim();
-  if (adminId) {
-    const admin = await Admin.findOne({ adminId }, "adminId").lean();
-    if (admin) return { role: "admin", userId: String(admin.adminId) };
+  const brandDoc = await findBrandDocByAnyId(
+    fallbackBrandId || req.user?.brandId || req.body?.brandId || ""
+  );
+
+  if (!brandDoc) {
+    return { role: "brand", userId: null, userModel: "Brand" };
   }
 
-  return { role: "brand", userId: String(fallbackBrandId || "") };
+  return {
+    role: "brand",
+    userId: brandDoc._id,
+    userModel: "Brand",
+  };
 }
 
 function mapCampaignForInfluencer(c) {
@@ -1431,6 +1529,47 @@ function addInfluencerOpenStatusGate(filter) {
   return filter;
 }
 
+async function resolveAdminActor(req) {
+  const findAdminDoc = async (rawValue) => {
+    const v = String(rawValue || "").trim();
+    if (!v) return null;
+
+    if (mongoose.Types.ObjectId.isValid(v)) {
+      const byId = await Admin.findById(v)
+        .select("_id email name role status")
+        .lean();
+      if (byId) return byId;
+    }
+
+    const byEmail = await Admin.findOne({ email: v.toLowerCase() })
+      .select("_id email name role status")
+      .lean();
+    if (byEmail) return byEmail;
+
+    return null;
+  };
+
+  const adminDoc =
+    (await findAdminDoc(req.user?.adminId)) ||
+    (await findAdminDoc(req.user?._id)) ||
+    (await findAdminDoc(req.user?.id)) ||
+    (await findAdminDoc(req.user?.email)) ||
+    (await findAdminDoc(req.body?.adminMongoId)) ||
+    (await findAdminDoc(req.body?.adminId)) ||
+    (await findAdminDoc(req.body?.adminEmail));
+
+  if (!adminDoc) return null;
+
+  return {
+    role: "admin",
+    userId: adminDoc._id,
+    userModel: "Master",
+    email: adminDoc.email,
+    name: adminDoc.name || "",
+    adminRole: adminDoc.role,
+    adminStatus: adminDoc.status,
+  };
+}
 // ===============================
 // CREATE CAMPAIGN
 // ===============================
@@ -3437,14 +3576,14 @@ exports.approveCampaignPendingUpdate = async (req, res) => {
     if (campaign.pendingUpdate?.status !== "pending" || !campaign.pendingUpdate?.patch) {
       return res.status(400).json({ message: "No pending update to approve." });
     }
-
+    const reviewer = await resolveAdminActor(req);
     Object.assign(campaign, campaign.pendingUpdate.patch);
     campaign.pendingUpdate = {
       status: "approved",
       patch: null,
       updatedBy: campaign.pendingUpdate.updatedBy,
       updatedAt: campaign.pendingUpdate.updatedAt,
-      reviewedBy: { role: "admin", userId: String(req.user?.id || req.user?.adminId || "") },
+      reviewedBy: reviewer,
       reviewedAt: new Date(),
       reviewNote: String(req.body?.note || ""),
     };
@@ -3471,13 +3610,13 @@ exports.rejectCampaignPendingUpdate = async (req, res) => {
     if (!campaign) return res.status(404).json({ message: "Campaign not found." });
 
     if (campaign.pendingUpdate?.status !== "pending") return res.status(400).json({ message: "No pending update to reject." });
-
+    const reviewer = await resolveAdminActor(req);
     campaign.pendingUpdate = {
       status: "rejected",
       patch: null,
       updatedBy: campaign.pendingUpdate.updatedBy,
       updatedAt: campaign.pendingUpdate.updatedAt,
-      reviewedBy: { role: "admin", userId: String(req.user?.id || req.user?.adminId || "") },
+      reviewedBy: reviewer,
       reviewedAt: new Date(),
       reviewNote: note,
     };
@@ -5100,11 +5239,11 @@ exports.editDraftCampaign = async (req, res) => {
 
       update.$set.categories = Array.isArray(rel?.subs)
         ? rel.subs.map((sub, idx) => ({
-            categoryId: mergedCategoryId,
-            categoryName: rel?.cat?.name || "",
-            subcategoryId: String(mergedSubIds[idx] || ""),
-            subcategoryName: String(sub.name || ""),
-          }))
+          categoryId: mergedCategoryId,
+          categoryName: rel?.cat?.name || "",
+          subcategoryId: String(mergedSubIds[idx] || ""),
+          subcategoryName: String(sub.name || ""),
+        }))
         : [];
     } else if (update.$unset.categoryId || update.$unset.subcategoryIds) {
       update.$unset.campaignCategory = 1;

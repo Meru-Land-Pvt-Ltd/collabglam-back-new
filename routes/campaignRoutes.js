@@ -52,7 +52,7 @@ router.post("/reject-pending", campaignController.rejectCampaignPendingUpdate);
 router.get("/created-by-admin/:brandId", campaignController.getAdminCampaigns);
 
 router.get("/category",campaignController.getCategories);
-router.get("/subcategory", brandAuth, campaignController.getSubcategories);
+router.get("/subcategory", campaignController.getSubcategories);
 
 // existing endpoint
 router.post("/view-campaign-brand", brandAuth, campaignController.viewCampaignByIdForBrand);

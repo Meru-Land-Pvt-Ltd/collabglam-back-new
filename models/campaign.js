@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
-
+const { ROLES } = require("./master");
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 const normalizePaymentType = (v) => {
@@ -11,13 +11,44 @@ const normalizePaymentType = (v) => {
   return "Milestone";
 };
 
-const actorSchema = new Schema(
+const actorSchema = new mongoose.Schema(
   {
-    role: { type: String, enum: ["brand", "admin"], required: true },
-    userId: { type: String, default: "" },
+    role: {
+      type: String,
+      enum: ["brand", "admin"],
+      required: true,
+    },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      refPath: "userModel",
+    },
+    userModel: {
+      type: String,
+      enum: ["Brand", "Master"],
+      required: true,
+    },
+    email: { type: String, default: "" },
+    name: { type: String, default: "" },
+    adminRole: { type: String, default: "" },
   },
   { _id: false }
 );
+
+actorSchema.pre("validate", function (next) {
+  if (this.role === "brand") {
+    this.userModel = "Brand";
+    this.email = undefined;
+    this.name = undefined;
+    this.adminRole = undefined;
+  }
+
+  if (this.role === "admin") {
+    this.userModel = "Master";
+  }
+
+  next();
+});
 
 const pendingUpdateSchema = new Schema(
   {
