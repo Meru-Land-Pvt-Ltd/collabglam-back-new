@@ -59,6 +59,35 @@ const BrandPortalSchema = new mongoose.Schema(
 
 const InfluencerPipelineSchema = new mongoose.Schema(
   {
+    linkedInfluencerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Influencer',
+      default: null,
+      index: true,
+    },
+    campaignInvitationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'CampaignInvitation',
+      default: null,
+    },
+    campaignInvitationStatus: {
+      type: String,
+      enum: ['', 'sent', 'accepted', 'reject', 'failed'],
+      default: '',
+    },
+    campaignInvitationSentAt: {
+      type: Date,
+      default: null,
+    },
+    hasInvited: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    hasInvitedAt: {
+      type: Date,
+      default: null,
+    },
     campaignId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Campaign',

@@ -10,40 +10,76 @@ function cleanStr(v) {
   return String(v).trim();
 }
 
-function uniqIds(values = []) {
-  return Array.from(
-    new Set(values.map((x) => cleanStr(x)).filter(Boolean))
-  );
+function toLower(v) {
+  return cleanStr(v).toLowerCase();
 }
 
-async function getAccessibleBrandIds(actor) {
-  const adminId = cleanStr(actor?.adminId);
-  const role = cleanStr(actor?.role).toLowerCase();
+function isValidObjectId(v) {
+  return mongoose.Types.ObjectId.isValid(cleanStr(v));
+}
 
-  if (!adminId) return [];
-  if (role === ROLES.SUPER_ADMIN) return null;
+function toObjectId(v) {
+  return new mongoose.Types.ObjectId(cleanStr(v));
+}
+
+function uniqStrings(values = []) {
+  return Array.from(new Set(values.map((x) => cleanStr(x)).filter(Boolean)));
+}
+
+function buildIdMatch(field, rawValue) {
+  const value = cleanStr(rawValue);
+  if (!value) return [];
+
+  const out = [{ [field]: value }];
+
+  if (isValidObjectId(value)) {
+    out.push({ [field]: toObjectId(value) });
+  }
+
+  return out;
+}
+
+function buildManyIdMatch(field, values = []) {
+  const cleaned = uniqStrings(values);
+  const stringValues = cleaned;
+  const objectIdValues = cleaned.filter(isValidObjectId).map(toObjectId);
 
   const or = [];
 
-  if (role === ROLES.REVENUE_HEAD) {
-    or.push({ RHId: adminId });
-    if (mongoose.Types.ObjectId.isValid(adminId)) {
-      or.push({ RHId: new mongoose.Types.ObjectId(adminId) });
-    }
+  if (stringValues.length) {
+    or.push({ [field]: { $in: stringValues } });
   }
 
-  if (role === ROLES.BME) {
-    or.push({ bdmId: adminId });
-    if (mongoose.Types.ObjectId.isValid(adminId)) {
-      or.push({ bdmId: new mongoose.Types.ObjectId(adminId) });
-    }
+  if (objectIdValues.length) {
+    or.push({ [field]: { $in: objectIdValues } });
   }
 
-  if (role === ROLES.IME) {
-    or.push({ idmId: adminId });
-    if (mongoose.Types.ObjectId.isValid(adminId)) {
-      or.push({ idmId: new mongoose.Types.ObjectId(adminId) });
-    }
+  return or;
+}
+
+async function getAccessibleBrandIds(actor) {
+  const adminId =
+    cleanStr(actor?.adminId) ||
+    cleanStr(actor?._id) ||
+    cleanStr(actor?.id);
+
+  const role = toLower(actor?.role);
+
+  if (!adminId) return [];
+  if (role === toLower(ROLES.SUPER_ADMIN)) return null;
+
+  const or = [];
+
+  if (role === toLower(ROLES.REVENUE_HEAD)) {
+    or.push(...buildIdMatch('RHId', adminId));
+  }
+
+  if (role === toLower(ROLES.BME)) {
+    or.push(...buildIdMatch('bdmId', adminId));
+  }
+
+  if (role === toLower(ROLES.IME)) {
+    or.push(...buildIdMatch('idmId', adminId));
   }
 
   if (!or.length) return [];
@@ -55,7 +91,7 @@ async function getAccessibleBrandIds(actor) {
     .select('brandId')
     .lean();
 
-  return uniqIds(rows.map((r) => r.brandId));
+  return uniqStrings(rows.map((row) => row.brandId));
 }
 
 async function buildCampaignVisibilityFilter(actor) {
@@ -65,28 +101,62 @@ async function buildCampaignVisibilityFilter(actor) {
     return {};
   }
 
-  return {
-    brandId: { $in: brandIds },
-  };
+  if (!brandIds.length) {
+    return { _id: { $in: [] } };
+  }
+
+  const brandIdOr = buildManyIdMatch('brandId', brandIds);
+
+  if (!brandIdOr.length) {
+    return { _id: { $in: [] } };
+  }
+
+  return brandIdOr.length === 1 ? brandIdOr[0] : { $or: brandIdOr };
 }
 
 async function ensureCampaignAccess(actor, campaignId) {
-  if (!campaignId || !mongoose.Types.ObjectId.isValid(campaignId)) {
+  const cleanCampaignId = cleanStr(campaignId);
+
+  if (!cleanCampaignId || !isValidObjectId(cleanCampaignId)) {
     return null;
   }
 
   const visibilityFilter = await buildCampaignVisibilityFilter(actor);
 
-  const filter = {
-    _id: campaignId,
+  return Campaign.findOne({
+    _id: toObjectId(cleanCampaignId),
     ...visibilityFilter,
-  };
+  })
+    .select('_id brandId name campaignTitle')
+    .lean();
+}
 
-  return Campaign.findOne(filter).select('_id brandId name').lean();
+async function ensureBrandCampaignAccess(brandId, campaignId) {
+  const cleanBrandId = cleanStr(brandId);
+  const cleanCampaignId = cleanStr(campaignId);
+
+  if (!cleanBrandId) return null;
+  if (!cleanCampaignId || !isValidObjectId(cleanCampaignId)) {
+    return null;
+  }
+
+  const brandIdOr = buildIdMatch('brandId', cleanBrandId);
+
+  if (!brandIdOr.length) {
+    return null;
+  }
+
+  return Campaign.findOne({
+    _id: toObjectId(cleanCampaignId),
+    $or: brandIdOr,
+  })
+    .select('_id brandId name campaignTitle')
+    .lean();
 }
 
 module.exports = {
   getAccessibleBrandIds,
   buildCampaignVisibilityFilter,
   ensureCampaignAccess,
+  ensureBrandCampaignAccess,
 };

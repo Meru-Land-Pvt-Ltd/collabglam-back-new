@@ -2240,6 +2240,83 @@ async function exportSavedInfluencersCsv(req, res) {
   }
 }
 
+async function getMediaKitLink(req, res) {
+  try {
+    const platform = normalizePlatform(req.query.platform || req.body?.platform || '');
+    let username = cleanStr(req.query.username || req.body?.username || '').replace(/^@/, '');
+
+    if (!platform) {
+      return res.status(400).json({ error: 'platform must be instagram|youtube|tiktok' });
+    }
+
+    if (!username) {
+      return res.status(400).json({ error: 'username is required' });
+    }
+
+    const usernameRx = exactCI(username);
+    const handleRx = exactCI(`@${username}`);
+
+    // 1) First try local DB
+    let saved = await ModashProfile.findOne({
+      provider: platform,
+      $or: [
+        { username: usernameRx },
+        { handle: usernameRx },
+        { handle: handleRx },
+      ],
+    })
+      .select('_id provider userId username handle fullname')
+      .lean();
+
+    // 2) If not found locally, call Modash API and save it
+    if (!saved) {
+      const hit = await searchForUsername(platform, username);
+
+      if (!hit || !hit.userId) {
+        return res.status(404).json({ error: 'Modash profile not found' });
+      }
+
+      const reportJSON = await modashGET(
+        `/${platform}/profile/${encodeURIComponent(hit.userId)}/report`,
+        { calculationMethod: 'median' }
+      );
+
+      const normalized = normalizeReportData(reportJSON);
+
+      await upsertModashProfileFromReport(normalized, platform, {
+        userIdFromRequest: hit.userId,
+      });
+
+      saved = await ModashProfile.findOne({
+        provider: platform,
+        userId: String(hit.userId),
+      })
+        .select('_id provider userId username handle fullname')
+        .lean();
+    }
+
+    if (!saved) {
+      return res.status(404).json({ error: 'Unable to create media kit link' });
+    }
+
+    const baseUrl = cleanStr(process.env.FRONTEND_BASE_URL || 'http://localhost:3000');
+    const link = `${baseUrl}/mediakit/${saved._id}`;
+
+    return res.json({
+      success: true,
+      data: {
+        modashId: String(saved._id),
+        platform: saved.provider,
+        username: saved.username || saved.handle || username,
+        link,
+      },
+    });
+  } catch (err) {
+    console.error('[getMediaKitLink] Error:', err);
+    return res.status(500).json({ error: err?.message || 'Failed to generate media kit link' });
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /*                                   Exports                                  */
 /* -------------------------------------------------------------------------- */
@@ -2258,4 +2335,5 @@ module.exports = {
   getSavedInfluencers,
   getRandomInfluencers,
   exportSavedInfluencersCsv,
+  getMediaKitLink
 };

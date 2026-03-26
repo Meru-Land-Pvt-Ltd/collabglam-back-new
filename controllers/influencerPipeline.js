@@ -10,12 +10,165 @@ const {
   PIPELINE_STAGES,
   PIPELINE_SOURCES,
 } = require('../models/influencerPipeline');
-const { ensureCampaignAccess } = require('../utils/campaignAccess');
+const {
+  ensureCampaignAccess,
+  ensureBrandCampaignAccess,
+} = require('../utils/campaignAccess');
 const { getThreadConversationState } = require('../services/adminEmail.service');
+const CampaignInvitation = require("../models/campaignInvitation");
+const Campaign = require("../models/campaign");
+const { InfluencerModel: Influencer } = require("../models/influencer");
 
 function cleanStr(v) {
   if (v === undefined || v === null) return '';
   return String(v).trim();
+}
+
+function normalizeSocialHandle(value) {
+  const raw = cleanStr(value).toLowerCase();
+  if (!raw) return null;
+
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) return null;
+
+  const socialUrlMatch = raw.match(
+    /(?:instagram\.com|tiktok\.com|youtube\.com)\/(?:@)?([a-z0-9._-]+)/i
+  );
+  if (socialUrlMatch?.[1]) {
+    return socialUrlMatch[1].replace(/^@/, "").trim().toLowerCase();
+  }
+
+  if (raw.startsWith("@")) {
+    return raw.slice(1).trim().toLowerCase();
+  }
+
+  if (/^[a-z0-9._-]{2,}$/.test(raw)) {
+    return raw;
+  }
+
+  return null;
+}
+
+function addHandleCandidate(set, value) {
+  const normalized = normalizeSocialHandle(value);
+  if (normalized) set.add(normalized);
+}
+
+function collectHandlesFromSignupPayload(value, set, parentKey = "") {
+  if (value == null) return;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectHandlesFromSignupPayload(item, set, parentKey);
+    }
+    return;
+  }
+
+  if (typeof value === "object") {
+    for (const [key, val] of Object.entries(value)) {
+      collectHandlesFromSignupPayload(val, set, key);
+    }
+    return;
+  }
+
+  if (typeof value !== "string") return;
+
+  const str = value.trim();
+  if (!str) return;
+
+  const key = String(parentKey || "").toLowerCase();
+
+  const looksLikeHandleField =
+    /handle|username|user_name|user name|instagram|youtube|tiktok|ig|yt/.test(key);
+
+  const looksLikeSocialUrl =
+    /instagram\.com|tiktok\.com|youtube\.com|youtu\.be/i.test(str);
+
+  const looksLikeAtHandle = str.trim().startsWith("@");
+
+  if (looksLikeHandleField || looksLikeSocialUrl || looksLikeAtHandle) {
+    addHandleCandidate(set, str);
+  }
+}
+
+function influencerMatchesAnyHandle(influencerDoc, targetHandles) {
+  const foundHandles = new Set();
+
+  collectHandlesFromSignupPayload(influencerDoc?.page1 || [], foundHandles);
+  collectHandlesFromSignupPayload(influencerDoc?.page2 || [], foundHandles);
+  collectHandlesFromSignupPayload(influencerDoc?.page3 || [], foundHandles);
+
+  for (const handle of targetHandles) {
+    if (foundHandles.has(handle)) return true;
+  }
+
+  return false;
+}
+
+async function resolveInfluencerFromPipelineRow(row) {
+  if (
+    row?.linkedInfluencerId &&
+    mongoose.Types.ObjectId.isValid(String(row.linkedInfluencerId))
+  ) {
+    const linked = await Influencer.findById(row.linkedInfluencerId)
+      .select("_id name email proxyEmail page1 page2 page3")
+      .lean();
+
+    if (linked) return linked;
+  }
+
+  const email = cleanStr(row?.email).toLowerCase();
+  if (email) {
+    const byEmail = await Influencer.findOne({
+      $or: [{ email }, { proxyEmail: email }],
+    })
+      .select("_id name email proxyEmail page1 page2 page3")
+      .lean();
+
+    if (byEmail) return byEmail;
+  }
+
+  const handleCandidates = new Set();
+
+  addHandleCandidate(handleCandidates, row?.handle);
+  addHandleCandidate(handleCandidates, row?.username);
+
+  let modashDoc = null;
+
+  if (
+    row?.sourceType === PIPELINE_SOURCES.MODASH &&
+    row?.sourceRefId &&
+    mongoose.Types.ObjectId.isValid(String(row.sourceRefId))
+  ) {
+    modashDoc = await ModashProfile.findById(row.sourceRefId)
+      .select("_id userId provider username handle fullname")
+      .lean();
+  }
+
+  if (!modashDoc && row?.userId) {
+    modashDoc = await ModashProfile.findOne({
+      userId: String(row.userId).trim(),
+      ...(row?.platform ? { provider: String(row.platform).trim().toLowerCase() } : {}),
+    })
+      .select("_id userId provider username handle fullname")
+      .lean();
+  }
+
+  addHandleCandidate(handleCandidates, modashDoc?.handle);
+  addHandleCandidate(handleCandidates, modashDoc?.username);
+
+  if (!handleCandidates.size) {
+    return null;
+  }
+
+  const influencers = await Influencer.find({})
+    .select("_id name email proxyEmail page1 page2 page3")
+    .lean();
+
+  const matched = influencers.find((doc) =>
+    influencerMatchesAnyHandle(doc, handleCandidates)
+  );
+
+  return matched || null;
 }
 
 function uniqStrings(values = []) {
@@ -142,8 +295,8 @@ function normalizeYoutubeDoc(doc, campaignId, actorId) {
     primaryLink: channelUrl,
     picture: cleanStr(
       doc?.thumbnails?.default?.url ||
-        doc?.thumbnails?.medium?.url ||
-        doc?.thumbnails?.high?.url
+      doc?.thumbnails?.medium?.url ||
+      doc?.thumbnails?.high?.url
     ),
 
     niche: topicNamesFromYoutube(doc),
@@ -281,6 +434,7 @@ async function buildEmailStateForRow(row, actorAdminId) {
 
   try {
     return await getThreadConversationState({
+      pipelineId: row._id,
       recipientEmail: row.email,
       actorAdminId,
     });
@@ -301,14 +455,37 @@ async function buildEmailStateForRow(row, actorAdminId) {
 async function attachEmailStateToRow(row, actorAdminId) {
   const emailState = await buildEmailStateForRow(row, actorAdminId);
 
+  const outreachDate =
+    emailState.outreachSentAt ||
+    row.outreachDate ||
+    row.createdAt ||
+    null;
+
+  const followUp1SentAt =
+    emailState.followUp1SentAt ||
+    row.followUp1SentAt ||
+    null;
+
+  const followUp2SentAt =
+    emailState.followUp2SentAt ||
+    row.followUp2SentAt ||
+    null;
+
+  const repliedAt =
+    emailState.repliedAt ||
+    row.repliedAt ||
+    null;
+
   return {
     ...row,
     emailState,
-    replyChecked: !!emailState.replyChecked,
-    repliedAt: emailState.repliedAt || row.repliedAt || null,
-    replyText: emailState.replyText || '',
-    followUp1SentAt: emailState.followUp1SentAt || null,
-    followUp2SentAt: emailState.followUp2SentAt || null,
+    outreachDate,
+    outreached: Boolean(row.outreached || emailState.outreachSentAt),
+    followUp1SentAt,
+    followUp2SentAt,
+    replyChecked: Boolean(row.replyChecked || emailState.replyChecked || repliedAt),
+    repliedAt,
+    replyText: emailState.replyText || row.replyText || "",
   };
 }
 
@@ -361,6 +538,7 @@ exports.bulkAddToOutreach = async (req, res) => {
               },
               $setOnInsert: {
                 createdByAdmin: actorId || null,
+                outreachDate: new Date(),
               },
             },
             upsert: true,
@@ -528,8 +706,6 @@ exports.updateOutreach = async (req, res) => {
       engagementNotes: cleanStr(body.engagementNotes),
       redFlags: cleanStr(body.redFlags),
       internalNotes: cleanStr(body.internalNotes),
-      outreachDate: body.outreachDate ? new Date(body.outreachDate) : null,
-      outreached: typeof body.outreached === 'boolean' ? body.outreached : undefined,
       updatedByAdmin: actorId || null,
     });
 
@@ -790,9 +966,8 @@ exports.generatePortalLink = async (req, res) => {
     }
 
     const token = crypto.randomBytes(24).toString('hex');
-    const portalUrl = `${
-      process.env.BRAND_PORTAL_BASE_URL || 'https://collabglam.cloud/brand-portal'
-    }/${token}`;
+    const portalUrl = `${process.env.BRAND_PORTAL_BASE_URL || 'https://collabglam.cloud/brand-portal'
+      }/${token}`;
 
     await InfluencerPipeline.updateMany(
       {
@@ -1008,8 +1183,8 @@ exports.createPipelineRow = async (req, res) => {
         body.followers === '' || body.followers === null || body.followers === undefined
           ? null
           : Number.isFinite(Number(body.followers))
-          ? Number(body.followers)
-          : null,
+            ? Number(body.followers)
+            : null,
 
       links,
       primaryLink,
@@ -1023,7 +1198,12 @@ exports.createPipelineRow = async (req, res) => {
       city: cleanStr(body.city),
       language: cleanStr(body.language),
 
-      outreachDate: body.outreachDate ? new Date(body.outreachDate) : null,
+      outreachDate:
+        status === PIPELINE_STAGES.OUTREACH
+          ? body.outreachDate
+            ? new Date(body.outreachDate)
+            : new Date()
+          : null,
       outreached: typeof body.outreached === 'boolean' ? body.outreached : false,
       followUp1SentAt: body.followUp1SentAt ? new Date(body.followUp1SentAt) : null,
       followUp2SentAt: body.followUp2SentAt ? new Date(body.followUp2SentAt) : null,
@@ -1034,15 +1214,15 @@ exports.createPipelineRow = async (req, res) => {
         body.engagementRate === '' || body.engagementRate === null || body.engagementRate === undefined
           ? null
           : Number.isFinite(Number(body.engagementRate))
-          ? Number(body.engagementRate)
-          : null,
+            ? Number(body.engagementRate)
+            : null,
       deliverables: cleanStr(body.deliverables),
       rates:
         body.rates === '' || body.rates === null || body.rates === undefined
           ? null
           : Number.isFinite(Number(body.rates))
-          ? Number(body.rates)
-          : null,
+            ? Number(body.rates)
+            : null,
       mediaKit: cleanStr(body.mediaKit),
       address: cleanStr(body.address),
 
@@ -1053,14 +1233,14 @@ exports.createPipelineRow = async (req, res) => {
         body.rateUsd === '' || body.rateUsd === null || body.rateUsd === undefined
           ? null
           : Number.isFinite(Number(body.rateUsd))
-          ? Number(body.rateUsd)
-          : null,
+            ? Number(body.rateUsd)
+            : null,
       ourFeePct:
         body.ourFeePct === '' || body.ourFeePct === null || body.ourFeePct === undefined
           ? null
           : Number.isFinite(Number(body.ourFeePct))
-          ? Number(body.ourFeePct)
-          : null,
+            ? Number(body.ourFeePct)
+            : null,
       comments: cleanStr(body.comments),
 
       createdByAdmin: actorId,
@@ -1081,5 +1261,226 @@ exports.createPipelineRow = async (req, res) => {
   } catch (err) {
     console.error('[createPipelineRow] Error:', err);
     return res.status(500).json({ error: err?.message || 'Internal error' });
+  }
+};
+
+exports.getBrandPitchSheetByCampaign = async (req, res) => {
+  try {
+    const campaignId = cleanStr(req.query.campaignId);
+    const brandId = cleanStr(req.query.brandId || req.body?.brandId);
+
+    if (!campaignId || !mongoose.Types.ObjectId.isValid(campaignId)) {
+      return res.status(400).json({ error: 'Valid campaignId is required' });
+    }
+
+    if (!brandId) {
+      return res.status(401).json({ error: 'Brand login required' });
+    }
+
+    const allowedCampaign = await ensureBrandCampaignAccess(brandId, campaignId);
+    if (!allowedCampaign) {
+      return res.status(403).json({ error: 'You are not allowed to access this pitch sheet' });
+    }
+
+    const rows = await InfluencerPipeline.find({
+      campaignId,
+      status: PIPELINE_STAGES.PITCH,
+    })
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    return res.json({
+      success: true,
+      data: {
+        campaignId,
+        items: rows.map((row) => ({
+          _id: row._id,
+          campaignId: row.campaignId,
+          name: row.name,
+          followers: row.followers,
+          primaryLink: row.primaryLink,
+          links: row.links,
+          niche: row.niche,
+          country: row.country,
+          additionalInfo: row.additionalInfo,
+          selectionReason: row.selectionReason,
+          goodFit: row.goodFit,
+          rateUsd: row.rateUsd,
+          ourFeePct: row.ourFeePct,
+          comments: row.comments,
+        })),
+      },
+    });
+  } catch (err) {
+    console.error('[getBrandPitchSheetByCampaign] Error:', err);
+    return res.status(500).json({ error: err?.message || 'Internal error' });
+  }
+};
+
+exports.updateBrandPitchGoodFit = async (req, res) => {
+  try {
+    const id = cleanStr(req.params.id);
+    const brandId = cleanStr(req.body?.brandId);
+    const goodFit = !!req.body?.goodFit;
+
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Valid pitch id is required' });
+    }
+
+    if (!brandId) {
+      return res.status(401).json({ error: 'Brand login required' });
+    }
+
+    const row = await InfluencerPipeline.findById(id).lean();
+    if (!row) {
+      return res.status(404).json({ error: 'Pitch row not found' });
+    }
+
+    if (String(row.status).toLowerCase() !== PIPELINE_STAGES.PITCH) {
+      return res.status(400).json({ error: 'This row is not in pitch stage' });
+    }
+
+    const allowedCampaign = await ensureBrandCampaignAccess(brandId, row.campaignId);
+    if (!allowedCampaign) {
+      return res.status(403).json({ error: 'You are not allowed to update this pitch sheet' });
+    }
+
+    const updated = await InfluencerPipeline.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          goodFit,
+        },
+      },
+      { new: true }
+    ).lean();
+
+    return res.json({
+      success: true,
+      message: 'Good fit updated successfully',
+      data: updated,
+    });
+  } catch (err) {
+    console.error('[updateBrandPitchGoodFit] Error:', err);
+    return res.status(500).json({ error: err?.message || 'Internal error' });
+  }
+};
+
+exports.sendCampaignInvitationFromPitch = async (req, res) => {
+  try {
+    const actor = req.admin;
+    const actorId = getActorAdminId(actor);
+
+    const campaignId = cleanStr(req.body?.campaignId);
+    const pipelineId = cleanStr(req.body?.pipelineId);
+
+    if (!campaignId || !mongoose.Types.ObjectId.isValid(campaignId)) {
+      return res.status(400).json({ error: "Valid campaignId is required" });
+    }
+
+    if (!pipelineId || !mongoose.Types.ObjectId.isValid(pipelineId)) {
+      return res.status(400).json({ error: "Valid pipelineId is required" });
+    }
+
+    const allowedCampaign = await ensureCampaignAccess(actor, campaignId);
+    if (!allowedCampaign) {
+      return res.status(403).json({ error: "You are not allowed to access this campaign" });
+    }
+
+    const [campaign, row] = await Promise.all([
+      Campaign.findById(campaignId)
+        .select("_id brandId campaignTitle")
+        .lean(),
+      InfluencerPipeline.findOne({
+        _id: pipelineId,
+        campaignId,
+        status: PIPELINE_STAGES.PITCH,
+      }).lean(),
+    ]);
+
+    if (!campaign) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    if (!row) {
+      return res.status(404).json({ error: "Pitch row not found" });
+    }
+
+    const influencer = await resolveInfluencerFromPipelineRow(row);
+
+    if (!influencer) {
+      return res.status(404).json({
+        error: "Influencer signup not found from email/handle/modash username",
+      });
+    }
+
+    const invitation = await CampaignInvitation.findOneAndUpdate(
+      {
+        brandId: campaign.brandId,
+        campaignId: campaign._id,
+        influencerId: influencer._id,
+      },
+      {
+        $setOnInsert: {
+          brandId: campaign.brandId,
+          campaignId: campaign._id,
+          influencerId: influencer._id,
+          createdByAdminId:
+            actorId && mongoose.Types.ObjectId.isValid(String(actorId))
+              ? new mongoose.Types.ObjectId(actorId)
+              : null,
+        },
+        $set: {
+          platform: cleanStr(row.platform).toLowerCase() || undefined,
+          handle: cleanStr(row.handle) || undefined,
+          modashUserId: cleanStr(row.userId) || undefined,
+          emailTo: influencer.email || cleanStr(row.email).toLowerCase() || null,
+          status: "sent",
+          sentAt: new Date(),
+          failedAt: null,
+          failReason: null,
+        },
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true,
+      }
+    ).lean();
+
+const hasInvited = ["sent", "accepted", "reject"].includes(invitation.status);
+
+await InfluencerPipeline.updateOne(
+  { _id: row._id },
+  {
+    $set: {
+      linkedInfluencerId: influencer._id,
+      campaignInvitationId: invitation._id,
+      campaignInvitationStatus: invitation.status,
+      campaignInvitationSentAt: invitation.sentAt || new Date(),
+      hasInvited,
+      hasInvitedAt: hasInvited ? (invitation.sentAt || new Date()) : null,
+      updatedByAdmin: actorId || null,
+    },
+  }
+);
+
+    return res.json({
+      success: true,
+      message: "Campaign invitation created successfully",
+      data: {
+        pipelineId: String(row._id),
+        influencerId: String(influencer._id),
+        invitationId: String(invitation._id),
+        influencerName: influencer.name || "",
+        influencerEmail: influencer.email || "",
+        status: invitation.status,
+        sentAt: invitation.sentAt,
+        hasInvited
+      },
+    });
+  } catch (err) {
+    console.error("[sendCampaignInvitationFromPitch] Error:", err);
+    return res.status(500).json({ error: err?.message || "Internal error" });
   }
 };

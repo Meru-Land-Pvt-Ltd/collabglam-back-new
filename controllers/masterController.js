@@ -756,6 +756,58 @@ exports.fullyManagedBrandList = async (req, res) => {
   }
 };
 
+async function validateExecutivesUnderRH({ RHId, bdmId, idmId }) {
+  const rhId = String(RHId || "").trim();
+
+  if (!rhId || !mongoose.isValidObjectId(rhId)) {
+    throw new Error("Valid RHId is required before assigning BME/IME");
+  }
+
+  const rh = await AdminModel.findOne({
+    _id: rhId,
+    role: ROLES.REVENUE_HEAD,
+    status: "active",
+  }).select("_id");
+
+  if (!rh) {
+    throw new Error("Assigned RH not found or inactive");
+  }
+
+  if (bdmId !== undefined && bdmId !== null && String(bdmId).trim() !== "") {
+    if (!mongoose.isValidObjectId(String(bdmId))) {
+      throw new Error("Invalid bdmId");
+    }
+
+    const bme = await AdminModel.findOne({
+      _id: bdmId,
+      role: ROLES.BME,
+      status: "active",
+      parentAdmin: rhId,
+    }).select("_id");
+
+    if (!bme) {
+      throw new Error("Selected BME does not belong to the assigned RH");
+    }
+  }
+
+  if (idmId !== undefined && idmId !== null && String(idmId).trim() !== "") {
+    if (!mongoose.isValidObjectId(String(idmId))) {
+      throw new Error("Invalid idmId");
+    }
+
+    const ime = await AdminModel.findOne({
+      _id: idmId,
+      role: ROLES.IME,
+      status: "active",
+      parentAdmin: rhId,
+    }).select("_id");
+
+    if (!ime) {
+      throw new Error("Selected IME does not belong to the assigned RH");
+    }
+  }
+}
+
 exports.assignBrand = async (req, res) => {
   try {
     const { brandId, RHId, bdmId, idmId } = req.body;
@@ -767,7 +819,15 @@ exports.assignBrand = async (req, res) => {
       });
     }
 
-    const wantsRH = RHId !== undefined && RHId !== null && String(RHId).trim() !== "";
+    if (!mongoose.isValidObjectId(String(brandId))) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid brandId",
+      });
+    }
+
+    const wantsRH =
+      RHId !== undefined && RHId !== null && String(RHId).trim() !== "";
     const wantsBDMorIDM = bdmId !== undefined || idmId !== undefined;
 
     if (!wantsRH && !wantsBDMorIDM) {
@@ -777,107 +837,96 @@ exports.assignBrand = async (req, res) => {
       });
     }
 
-    // ---------------------------
-    // CASE A: RH assignment (RHId present)
-    // ---------------------------
-    if (wantsRH) {
-      const set = { RHId, status: "active" };
-      if (bdmId !== undefined) set.bdmId = bdmId;
-      if (idmId !== undefined) set.idmId = idmId;
+    const normalizedBrandId = new mongoose.Types.ObjectId(String(brandId));
 
-      // 1) Update active doc if exists
+    // CASE A: RH assignment
+    if (wantsRH) {
+      await validateExecutivesUnderRH({ RHId, bdmId, idmId });
+
+      // IMPORTANT:
+      // when RH changes, reset old BME/IME unless explicitly sent
+      const set = {
+        RHId,
+        bdmId: bdmId !== undefined ? (bdmId || null) : null,
+        idmId: idmId !== undefined ? (idmId || null) : null,
+        status: "active",
+      };
+
       let doc = await BrandAssigned.findOneAndUpdate(
-        { brandId, status: "active" },
+        { brandId: normalizedBrandId, status: "active" },
         { $set: set },
         { new: true }
       ).exec();
 
-      if (doc) {
-        return res.status(200).json({
-          success: true,
-          message: "RH assigned successfully (updated active assignment)",
-          data: doc,
+      if (!doc) {
+        doc = await BrandAssigned.findOneAndUpdate(
+          { brandId: normalizedBrandId },
+          { $set: set },
+          { new: true, sort: { updatedAt: -1, createdAt: -1 } }
+        ).exec();
+      }
+
+      if (!doc) {
+        doc = await BrandAssigned.create({
+          brandId: normalizedBrandId,
+          RHId,
+          bdmId: bdmId || null,
+          idmId: idmId || null,
+          status: "active",
         });
       }
 
-      // 2) Reactivate/update latest old doc if exists
-      doc = await BrandAssigned.findOneAndUpdate(
-        { brandId },
-        { $set: set },
-        { new: true, sort: { updatedAt: -1, createdAt: -1 } }
-      ).exec();
-
-      if (doc) {
-        return res.status(200).json({
-          success: true,
-          message: "RH assigned successfully (reactivated previous assignment)",
-          data: doc,
-        });
-      }
-
-      // 3) Create new if none exists
-      const created = await BrandAssigned.create({
-        brandId,
-        RHId,
-        bdmId: bdmId ?? null,
-        idmId: idmId ?? null,
-        status: "active",
-      });
-
-      return res.status(201).json({
-        success: true,
-        message: "RH assigned successfully (created new assignment)",
-        data: created,
-      });
-    }
-
-    // ---------------------------
-    // CASE B: Only BDM/IDM assignment (RHId NOT present)
-    // RH must already exist in DB
-    // ---------------------------
-    const set = {};
-    if (bdmId !== undefined) set.bdmId = bdmId;
-    if (idmId !== undefined) set.idmId = idmId;
-
-    // 1) Update active doc ONLY if RH is already assigned
-    let updated = await BrandAssigned.findOneAndUpdate(
-      {
-        brandId,
-        status: "active",
-        RHId: { $exists: true, $ne: null },
-      },
-      { $set: set },
-      { new: true }
-    ).exec();
-
-    if (updated) {
       return res.status(200).json({
         success: true,
-        message: "BDM/IDM assigned successfully (updated active RH assignment)",
-        data: updated,
+        message: "Brand assignment saved successfully",
+        data: doc,
       });
     }
 
-    // 2) If no active doc, update latest doc where RH exists (reactivate)
-    updated = await BrandAssigned.findOneAndUpdate(
-      {
-        brandId,
-        RHId: { $exists: true, $ne: null },
-      },
-      { $set: { ...set, status: "active" } },
-      { new: true, sort: { updatedAt: -1, createdAt: -1 } }
-    ).exec();
+    // CASE B: only BME / IME assignment, RH must already exist
+    let activeAssignment = await BrandAssigned.findOne({
+      brandId: normalizedBrandId,
+      status: "active",
+      RHId: { $exists: true, $ne: null },
+    })
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .lean();
 
-    if (!updated) {
+    if (!activeAssignment) {
+      activeAssignment = await BrandAssigned.findOne({
+        brandId: normalizedBrandId,
+        RHId: { $exists: true, $ne: null },
+      })
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .lean();
+    }
+
+    if (!activeAssignment?.RHId) {
       return res.status(400).json({
         success: false,
         message: "RH is not assigned for this brand. Assign RH first, then add BDM/IDM.",
       });
     }
 
+    await validateExecutivesUnderRH({
+      RHId: activeAssignment.RHId,
+      bdmId,
+      idmId,
+    });
+
+    const set = { status: "active" };
+    if (bdmId !== undefined) set.bdmId = bdmId || null;
+    if (idmId !== undefined) set.idmId = idmId || null;
+
+    const updated = await BrandAssigned.findOneAndUpdate(
+      { _id: activeAssignment._id },
+      { $set: set },
+      { new: true }
+    ).exec();
+
     return res.status(200).json({
       success: true,
-      message: "BDM/IDM assigned successfully (updated existing RH assignment)",
+      message: "Brand assignment updated successfully",
       data: updated,
     });
   } catch (e) {
@@ -1053,6 +1102,10 @@ exports.listExecutiveAdmin = async (req, res) => {
   try {
     const admin = req.admin;
     const adminId = admin?.adminId;
+    const actorRole = String(admin?.role || "").trim().toLowerCase();
+    const requestedRole = String(req.query?.role || req.body?.role || "")
+      .trim()
+      .toLowerCase();
 
     if (!adminId) {
       return res.status(401).json({
@@ -1068,7 +1121,26 @@ exports.listExecutiveAdmin = async (req, res) => {
       });
     }
 
-    const executives = await AdminModel.find({ parentAdmin: adminId, status: "active" })
+    const filter = { status: "active" };
+
+    if (requestedRole) {
+      if (![ROLES.BME, ROLES.IME].includes(requestedRole)) {
+        return res.status(400).json({
+          success: false,
+          message: "role must be either bme or ime",
+        });
+      }
+      filter.role = requestedRole;
+    } else {
+      filter.role = { $in: [ROLES.BME, ROLES.IME] };
+    }
+
+    // RH should only see their own team
+    if (actorRole === ROLES.REVENUE_HEAD) {
+      filter.parentAdmin = adminId;
+    }
+
+    const executives = await AdminModel.find(filter)
       .select("-passwordHash -inviteTokenHash")
       .sort({ createdAt: -1 });
 
