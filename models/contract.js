@@ -441,7 +441,11 @@ const ContractSchema = new mongoose.Schema(
     brandId: { type: String, index: true, required: true },
     influencerId: { type: String, index: true, required: true },
     campaignId: { type: String, index: true, required: true },
-
+    brandPoc: { type: String, default: "" },
+    brandPocDesignation: { type: String, default: "" },
+    isFinalUpdate: { type: Boolean, default: false }, 
+    signatureBrand: { type: String, default: "" },
+    signatureInfluencer: { type: String, default: "" },
     paymentType: {
       type: String,
       enum: Object.values(PAYMENT_TYPES),
