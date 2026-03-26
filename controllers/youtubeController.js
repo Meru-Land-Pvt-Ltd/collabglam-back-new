@@ -14,6 +14,10 @@ const httpAgent = new Agent({
   keepAliveTimeout: 60_000,
   keepAliveMaxTimeout: 60_000,
 });
+const httpAgent = new Agent({
+  keepAliveTimeout: 60_000,
+  keepAliveMaxTimeout: 60_000,
+});
 
 const YT_CHANNELS = 'https://www.googleapis.com/youtube/v3/channels';
 const YT_PLAYLIST_ITEMS = 'https://www.googleapis.com/youtube/v3/playlistItems';
@@ -98,7 +102,7 @@ async function fetchVideosByIds(videoIds = []) {
 }
 
 function normalizeHandle(input) {
-  const s = String(input || '').trim();
+  const s = cleanStr(input);
   if (!s) return null;
 
   // Handles plain handle, @handle, or URL containing @handle
@@ -110,12 +114,17 @@ function normalizeHandle(input) {
   return null;
 }
 
+function handleToLower(input) {
+  const h = normalizeHandle(input);
+  return h ? h.toLowerCase() : null;
+}
+
 function labelFromWikiUrl(url) {
   try {
     const last = decodeURIComponent(String(url).split('/').pop() || '');
     return last.replace(/_/g, ' ');
   } catch {
-    return String(url);
+    return String(url || '');
   }
 }
 
@@ -154,6 +163,7 @@ function parseDateOrNull(v) {
 function parseBoolOrNull(v) {
   if (v === null || typeof v === 'undefined' || v === '') return null;
   if (typeof v === 'boolean') return v;
+
 
   const s = String(v).trim().toLowerCase();
   if (['true', 'yes', '1'].includes(s)) return true;
@@ -265,9 +275,17 @@ async function buildYouTubeProfileData(channel, opts = {}) {
 // ======================================================
 async function ytFetch(url, timeoutMs = YT_TIMEOUT_MS) {
   const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(new Error('YouTube API timeout')), timeoutMs);
+  const t = setTimeout(
+    () => ac.abort(new Error('YouTube API timeout')),
+    timeoutMs
+  );
 
   try {
+    const r = await fetch(url, {
+      dispatcher: httpAgent,
+      signal: ac.signal,
+    });
+
     const r = await fetch(url, {
       dispatcher: httpAgent,
       signal: ac.signal,
@@ -278,21 +296,24 @@ async function ytFetch(url, timeoutMs = YT_TIMEOUT_MS) {
       throw new Error(`YouTube API ${r.status}: ${txt || r.statusText}`);
     }
 
+
     return await r.json();
   } finally {
     clearTimeout(t);
   }
 }
 
-// ======================================================
-// YouTube API calls
-// ======================================================
+/* -------------------------------------------------------------------------- */
+/*                              YouTube calls                                 */
+/* -------------------------------------------------------------------------- */
+
 async function fetchChannelByHandle(handle) {
   const params = new URLSearchParams({
     part: CHANNEL_PARTS.join(','),
     forHandle: handle,
     key: YT_API_KEY,
   });
+
 
   const data = await ytFetch(`${YT_CHANNELS}?${params.toString()}`);
   return data?.items?.[0] || null;
@@ -398,15 +419,18 @@ async function searchVideosByKeyword(query, limit = 12) {
  * Fetch latest uploads. YouTube API maxResults per request is 50.
  */
 async function fetchLatestVideosFromUploads(uploadsPlaylistId, limit = 50) {
-  const safeLimit = Math.min(50, Math.max(1, Number(limit) || 50));
+  const safeLimit = Math.min(
+    MAX_VIDEO_FETCH,
+    Math.max(1, Number(limit) || MAX_VIDEO_FETCH)
+  );
 
-  // 1) get videoIds from uploads playlist
   const params = new URLSearchParams({
     part: 'contentDetails,snippet',
     playlistId: uploadsPlaylistId,
     maxResults: String(safeLimit),
     key: YT_API_KEY,
   });
+
 
   const data = await ytFetch(`${YT_PLAYLIST_ITEMS}?${params.toString()}`);
 
@@ -458,7 +482,7 @@ function computeMetricsFromVideos(videos = [], sampleSize = 15) {
 
   if (!sample.length) {
     return {
-      lastVideos: [],
+      storedVideos: [],
       avgViews: null,
       engagementRate: null,
       postsPerWeek: null,
@@ -476,7 +500,9 @@ function computeMetricsFromVideos(videos = [], sampleSize = 15) {
     .filter(Number.isFinite);
 
   const engagementRate = erArr.length
-    ? Number((erArr.reduce((a, b) => a + b, 0) / erArr.length).toFixed(6))
+    ? Number(
+        (erArr.reduce((a, b) => a + b, 0) / erArr.length).toFixed(6)
+      )
     : null;
 
   let postsPerWeek = null;
@@ -492,8 +518,11 @@ function computeMetricsFromVideos(videos = [], sampleSize = 15) {
     for (let i = 0; i < sample.length - 1; i++) {
       gaps.push((sample[i].publishedAt - sample[i + 1].publishedAt) / (1000 * 60 * 60 * 24));
     }
+
     avgDaysBetween = gaps.length
-      ? Number((gaps.reduce((a, b) => a + b, 0) / gaps.length).toFixed(3))
+      ? Number(
+          (gaps.reduce((a, b) => a + b, 0) / gaps.length).toFixed(3)
+        )
       : null;
   }
 
@@ -508,6 +537,218 @@ function computeMetricsFromVideos(videos = [], sampleSize = 15) {
     lastVideoTitle: sample[0].title,
   };
 }
+
+/* -------------------------------------------------------------------------- */
+/*                           Shared query builder                             */
+/* -------------------------------------------------------------------------- */
+
+function buildInfluencerQuery(input = {}, opts = {}) {
+  const and = [{ platform: 'youtube' }];
+
+  const followersMin = parseFlexibleNumber(
+    input.followersMin ?? input.minFollowers ?? input.followers_from
+  );
+  const followersMax = parseFlexibleNumber(
+    input.followersMax ?? input.maxFollowers ?? input.followers_to
+  );
+
+  if (followersMin !== null || followersMax !== null) {
+    const range = {};
+    if (followersMin !== null) range.$gte = followersMin;
+    if (followersMax !== null) range.$lte = followersMax;
+    and.push({ subscriberCount: range });
+  }
+
+  const countryValues = normalizeCountryTokens([
+    ...parseArrayInput(input.country),
+    ...parseArrayInput(input.countries),
+  ]);
+
+  if (countryValues.length) {
+    and.push({
+      country: { $in: countryValues.map(exactCI) },
+    });
+  }
+
+  const categoryValues = [
+    ...parseArrayInput(input.category),
+    ...parseArrayInput(input.categories),
+  ].filter(Boolean);
+
+  if (categoryValues.length) {
+    const rxList = categoryValues.map((c) => containsCI(c));
+    and.push({
+      $or: [
+        { topicLabels: { $in: rxList } },
+        { topicCategories: { $in: rxList } },
+      ],
+    });
+  }
+
+  const search = cleanStr(input.search);
+  if (search) {
+    const needleRaw = search;
+    const needleNoAt = search.startsWith('@') ? search.slice(1) : search;
+
+    const rxRaw = escapeRegex(needleRaw);
+    const rxNoAt = escapeRegex(needleNoAt);
+
+    const handleRx = new RegExp(
+      rxRaw.startsWith('@') ? rxRaw : `@${rxNoAt}`,
+      'i'
+    );
+    const plainRx = new RegExp(rxNoAt, 'i');
+
+    and.push({
+      $or: [
+        { email: plainRx },
+        { handle: handleRx },
+        { title: plainRx },
+        { channelId: plainRx },
+        { instagramHandle: plainRx },
+        { handleId: plainRx },
+        { country: plainRx },
+        { defaultLanguage: plainRx },
+        { lastSponsor: plainRx },
+        { topAudienceCountry: plainRx },
+        { workingHandle: plainRx },
+      ],
+    });
+  }
+
+  if (Array.isArray(opts.handleIds) && opts.handleIds.length) {
+    and.push({
+      handleId: { $in: opts.handleIds.map((x) => cleanStr(x)).filter(Boolean) },
+    });
+  }
+
+  return and.length === 1 ? and[0] : { $and: and };
+}
+
+function buildSortSpec(sortBy, sortOrder) {
+  const safeSortBy = ALLOWED_SORT.has(String(sortBy)) ? String(sortBy) : 'createdAt';
+  const safeSortOrder =
+    String(sortOrder || 'desc').toLowerCase() === 'asc' ? 1 : -1;
+
+  if (safeSortBy === 'engagementRateLast15') {
+    return {
+      sortBy: safeSortBy,
+      sortOrder: safeSortOrder,
+      mongoSort: {
+        engagementRateLast15: safeSortOrder,
+        uploadFrequencyPerWeek: -1,
+        createdAt: -1,
+      },
+    };
+  }
+
+  if (safeSortBy === 'uploadFrequencyPerWeek') {
+    return {
+      sortBy: safeSortBy,
+      sortOrder: safeSortOrder,
+      mongoSort: {
+        uploadFrequencyPerWeek: safeSortOrder,
+        engagementRateLast15: -1,
+        createdAt: -1,
+      },
+    };
+  }
+
+  return {
+    sortBy: safeSortBy,
+    sortOrder: safeSortOrder,
+    mongoSort: { [safeSortBy]: safeSortOrder, createdAt: -1 },
+  };
+}
+
+function buildProjection({ includeRaw = false, includeVideos = false } = {}) {
+  return {
+    __v: 0,
+    rawPlaylists: 0,
+    ...(includeRaw ? {} : { rawChannel: 0 }),
+    ...(includeVideos ? {} : { lastVideos: 0 }),
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/*                             CSV helpers                                    */
+/* -------------------------------------------------------------------------- */
+
+function csvEscape(v) {
+  const s = String(v ?? '');
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function fmt(v) {
+  return v == null || v === '' ? '—' : String(v);
+}
+
+function fmtNum(v) {
+  return v == null || Number.isNaN(Number(v)) ? '—' : String(v);
+}
+
+function fmtPercent(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return `${(n * 100).toFixed(2)}%`;
+}
+
+function fmtBool(v) {
+  if (v === true) return 'Yes';
+  if (v === false) return 'No';
+  return '—';
+}
+
+function fmtDateOnly(v) {
+  if (!v) return '—';
+  const d = v instanceof Date ? v : new Date(v);
+  if (Number.isNaN(d.getTime())) return '—';
+
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function ytLink(doc) {
+  if (doc?.handle) return `https://www.youtube.com/${doc.handle}`;
+  if (doc?.channelId) return `https://www.youtube.com/channel/${doc.channelId}`;
+  return '—';
+}
+
+function igLink(doc) {
+  const h = cleanStr(doc?.instagramHandle);
+  if (!h) return '—';
+  const username = h.startsWith('@') ? h.slice(1) : h;
+  return `https://www.instagram.com/${username}`;
+}
+
+function niche(doc) {
+  const labels = Array.isArray(doc?.topicLabels) ? doc.topicLabels : [];
+  return labels[0] ? String(labels[0]) : '—';
+}
+
+function subNiche(doc) {
+  const labels = Array.isArray(doc?.topicLabels) ? doc.topicLabels : [];
+  return labels[1] ? String(labels[1]) : '—';
+}
+
+function followups(doc) {
+  const arr = Array.isArray(doc?.followUpDates) ? doc.followUpDates : [];
+  const dates = arr
+    .map((x) => (x instanceof Date ? x : new Date(x)))
+    .filter((d) => d && !Number.isNaN(d.getTime()))
+    .sort((a, b) => b.getTime() - a.getTime());
+
+  return {
+    f1: dates[0] ? fmtDateOnly(dates[0]) : '—',
+    f2: dates[1] ? fmtDateOnly(dates[1]) : '—',
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/*                             Controllers                                    */
+/* -------------------------------------------------------------------------- */
 
 // ======================================================
 // Mapping helpers for GLOBAL SEARCH (read-only, not stored)
@@ -813,6 +1054,10 @@ exports.updateInfluencerManualFields = asyncHandler(async (req, res) => {
       status: 'error',
       message: 'Provide handleId OR handle.',
     });
+    return res.status(400).json({
+      status: 'error',
+      message: 'Provide handleId OR handle.',
+    });
   }
 
   const filter = handleId
@@ -824,6 +1069,7 @@ exports.updateInfluencerManualFields = asyncHandler(async (req, res) => {
   if ('email' in body) {
     const email = cleanStrOrNull(body.email);
 
+
     if (email === null) {
       $set.email = null;
     } else {
@@ -833,12 +1079,18 @@ exports.updateInfluencerManualFields = asyncHandler(async (req, res) => {
           status: 'error',
           message: 'Invalid email format.',
         });
+        return res.status(400).json({
+          status: 'error',
+          message: 'Invalid email format.',
+        });
       }
       $set.email = emailLc;
     }
   }
 
-  if ('lastSponsor' in body) $set.lastSponsor = cleanStrOrNull(body.lastSponsor);
+  if ('lastSponsor' in body) {
+    $set.lastSponsor = cleanStrOrNull(body.lastSponsor);
+  }
 
   if ('managedByAgency' in body) {
     const b = parseBoolOrNull(body.managedByAgency);
@@ -847,11 +1099,17 @@ exports.updateInfluencerManualFields = asyncHandler(async (req, res) => {
         status: 'error',
         message: 'managedByAgency must be boolean.',
       });
+      return res.status(400).json({
+        status: 'error',
+        message: 'managedByAgency must be boolean.',
+      });
     }
     $set.managedByAgency = b;
   }
 
-  if ('topAudienceCountry' in body) $set.topAudienceCountry = cleanStrOrNull(body.topAudienceCountry);
+  if ('topAudienceCountry' in body) {
+    $set.topAudienceCountry = cleanStrOrNull(body.topAudienceCountry);
+  }
 
   if ('averageAudienceAge' in body) {
     const v = body.averageAudienceAge;
@@ -864,20 +1122,33 @@ exports.updateInfluencerManualFields = asyncHandler(async (req, res) => {
           status: 'error',
           message: 'averageAudienceAge must be 0-120.',
         });
+        return res.status(400).json({
+          status: 'error',
+          message: 'averageAudienceAge must be 0-120.',
+        });
       }
       $set.averageAudienceAge = n;
     }
   }
 
   if ('lastContactedAt' in body || 'lastContactedDate' in body) {
-    const raw = ('lastContactedAt' in body) ? body.lastContactedAt : body.lastContactedDate;
+    const raw =
+      'lastContactedAt' in body
+        ? body.lastContactedAt
+        : body.lastContactedDate;
+
     const d = parseDateOrNull(raw);
     if (d && d.__invalid) {
       return res.status(400).json({
         status: 'error',
         message: 'Invalid lastContactedAt date.',
       });
+      return res.status(400).json({
+        status: 'error',
+        message: 'Invalid lastContactedAt date.',
+      });
     }
+    $set.lastContactedAt = d;
     $set.lastContactedAt = d;
   }
 
@@ -885,9 +1156,14 @@ exports.updateInfluencerManualFields = asyncHandler(async (req, res) => {
     const arr = Array.isArray(body.followUpDates) ? body.followUpDates : [];
     const parsed = [];
 
+
     for (const x of arr) {
       const d = parseDateOrNull(x);
       if (d && d.__invalid) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'followUpDates contains invalid date.',
+        });
         return res.status(400).json({
           status: 'error',
           message: 'followUpDates contains invalid date.',
@@ -908,6 +1184,10 @@ exports.updateInfluencerManualFields = asyncHandler(async (req, res) => {
     const existing = await InfluencerProfile.findOne(filter).lean();
 
     if (!existing) {
+      return res.status(404).json({
+        status: 'error',
+        message: 'Influencer not found. Run sync API first.',
+      });
       return res.status(404).json({
         status: 'error',
         message: 'Influencer not found. Run sync API first.',
@@ -934,8 +1214,17 @@ exports.updateInfluencerManualFields = asyncHandler(async (req, res) => {
       status: 'error',
       message: 'Influencer not found. Run sync API first.',
     });
+    return res.status(404).json({
+      status: 'error',
+      message: 'Influencer not found. Run sync API first.',
+    });
   }
 
+  return res.json({
+    status: 'ok',
+    handleId: doc.handleId,
+    data: doc,
+  });
   return res.json({
     status: 'ok',
     handleId: doc.handleId,
@@ -1020,8 +1309,7 @@ function buildLastUploadDays(body = {}) {
 }
 
 exports.getAllInfluencers = asyncHandler(async (req, res) => {
-  try {
-    const body = req.body || {};
+  const body = req.body || {};
 
     const _escapeRegex =
       typeof escapeRegex === 'function'
@@ -1207,7 +1495,7 @@ exports.getAllInfluencers = asyncHandler(async (req, res) => {
 // ======================================================
 exports.patchInfluencerEmail = asyncHandler(async (req, res) => {
   const handle = normalizeHandle(req.body.handle);
-  const email = (req.body.email || '').trim().toLowerCase();
+  const email = cleanStr(req.body.email).toLowerCase();
 
   if (!handle) {
     return res.status(400).json({
@@ -1232,6 +1520,11 @@ exports.patchInfluencerEmail = asyncHandler(async (req, res) => {
     { $set: { email } }
   );
 
+  return res.json({
+    status: 'ok',
+    matched: r.matchedCount,
+    modified: r.modifiedCount,
+  });
   return res.json({
     status: 'ok',
     matched: r.matchedCount,
@@ -1463,11 +1756,10 @@ exports.exportInfluencersCsv = asyncHandler(async (req, res) => {
       'Notes',
     ];
 
-    const lines = [];
-    lines.push(header.map(csvEscape).join(','));
+  const lines = [header.map(csvEscape).join(',')];
 
-    items.forEach((doc, idx) => {
-      const fu = followups(doc);
+  items.forEach((doc, idx) => {
+    const fu = followups(doc);
 
       const row = [
         idx + 1,
@@ -1500,10 +1792,10 @@ exports.exportInfluencersCsv = asyncHandler(async (req, res) => {
         dash,
       ];
 
-      lines.push(row.map(csvEscape).join(','));
-    });
+    lines.push(row.map(csvEscape).join(','));
+  });
 
-    const csv = lines.join('\n');
+  const csv = lines.join('\n');
 
     const ts = new Date();
     const stamp = `${ts.getFullYear()}${String(ts.getMonth() + 1).padStart(2, '0')}${String(ts.getDate()).padStart(2, '0')}_${String(

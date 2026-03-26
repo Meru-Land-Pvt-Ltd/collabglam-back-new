@@ -3,8 +3,9 @@ const router = express.Router();
 const { login, getAllBrands, getList, getAllCampaigns, getBrandById,
   getByInfluencerId, getCampaignById, getCampaignsByBrandId, adminGetInfluencerById,
   adminGetInfluencerList, adminAddYouTubeEmail, listMissingEmail, updateMissingEmail, checkMissingEmailByHandle,
-  getAllPayments, adminAssignBrandPlan, adminAssignInfluencerPlan,getAllCampaignsLite
+  getAllPayments, adminAssignBrandPlan, adminAssignInfluencerPlan, getAllCampaignsLite
 } = require('../controllers/adminController');
+const { adminAuth } = require("../middlewares/adminAuth");
 
 const {
   adminListPayouts,
@@ -13,17 +14,17 @@ const {
 
 // POST /admin/create
 router.post('/login', login);
-router.post('/brand/getlist', getAllBrands);
+router.post('/brand/getlist', adminAuth, getAllBrands);
 router.post('/influencer/getlist', getList);
-router.post('/campaign/getlist', getAllCampaigns);
-router.post('/campaign/lite', getAllCampaignsLite);
+router.post('/campaign/getlist', adminAuth, getAllCampaigns);
+router.post('/campaign/lite', adminAuth, getAllCampaignsLite);
 
 
 // GET /admin/brand/getById
-router.get('/brand/getById', getBrandById);
+router.get('/brand/getById', adminAuth, getBrandById);
 router.get('/influencer/getById', getByInfluencerId);
 router.get('/campaign/getById', getCampaignById);
-router.post('/campaign/getByBrandId', getCampaignsByBrandId);
+router.post('/campaign/getByBrandId', adminAuth, getCampaignsByBrandId);
 
 router.get('/influencer/byId', adminGetInfluencerById);
 router.post('/influencer/list', adminGetInfluencerList);

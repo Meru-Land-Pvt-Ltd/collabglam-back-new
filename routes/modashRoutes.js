@@ -16,5 +16,6 @@ router.post('/search-legacy', ModashController.search);
 router.get('/saved', ModashController.getSavedInfluencers);
 router.get('/random', ModashController.getRandomInfluencers);
 router.post('/export-csv', ModashController.exportSavedInfluencersCsv);
+router.get('/media-kit-link', ModashController.getMediaKitLink);
 
 module.exports = router;

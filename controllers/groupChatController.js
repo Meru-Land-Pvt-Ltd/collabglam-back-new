@@ -50,10 +50,6 @@ function isAdminInGroup(group, adminId) {
   return (group.participants || []).some((p) => sameId(p.adminId, adminId));
 }
 
-function getParticipant(group, adminId) {
-  return (group.participants || []).find((p) => sameId(p.adminId, adminId)) || null;
-}
-
 function toParticipant(adminDoc, addedBy = null, existing = null) {
   return {
     adminId: String(adminDoc._id),
