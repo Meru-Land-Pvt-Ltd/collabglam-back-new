@@ -1,7 +1,7 @@
 // routes/contractRoutes.js
 const express = require('express');
 const router = express.Router();
-
+const multer = require('multer');
 const {
   // Core color-owner flow
   initiate,
@@ -27,6 +27,13 @@ const {
   listCurrencies,
   getCurrency,
   resend,
+    uploadBrandSignature,
+  getBrandSignature,
+  uploadInfluencerSignature,
+  getInfluencerSignature,
+   getDeliverablesByInfluencerAndCampaign,
+  getMilestonesByInfluencerAndCampaign,
+  getScheduleADataByInfluencerAndCampaign,
 } = require('../controllers/contractController');
 
 // Initiation & viewing
@@ -62,4 +69,28 @@ router.get('/timezone', getTimezone);
 router.get('/currencies', listCurrencies);
 router.get('/currency', getCurrency);
 router.post('/resend', resend);
+
+router.get(
+  "/:influencerId/:campaignId/deliverables",
+  getDeliverablesByInfluencerAndCampaign
+);
+
+router.get(
+  "/:influencerId/:campaignId/milestones",
+  getMilestonesByInfluencerAndCampaign
+);
+
+router.get(
+  "/:influencerId/:campaignId/scheduleA",
+  getScheduleADataByInfluencerAndCampaign
+);
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 } // 5 MB
+});
+
+router.post('/upload', upload.single('signature'), uploadBrandSignature);
+router.get('/signature/:brandId', getBrandSignature);
+router.post('/upload-influencer', upload.single('signature'), uploadInfluencerSignature);
+router.get('/signature-influencer/:influencerId', getInfluencerSignature);
 module.exports = router;

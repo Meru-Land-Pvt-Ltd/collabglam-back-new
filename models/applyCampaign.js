@@ -7,7 +7,17 @@ const applicantSchema = new mongoose.Schema(
 
     isShortlisted: { type: Number, enum: [0, 1], default: 0 },
     isUndicided: { type: Number, enum: [0, 1], default: 0 },
-    isRejected: { type: Number, enum: [0, 1], default: 0 }
+    isRejected: { type: Number, enum: [0, 1], default: 0 },
+    statusBrand: { type: String, enum: ['contract-send', 'contractAccept', 'rejected','contract-resend','changerequirement','under-brand-review'], default: '' },
+    statusInfluencer: { type: String, enum: ['under-influencer-review', 'rejected','update-contract','update-review',"contractAccept"], default: '' },
+    contractId: {
+      type: String,
+      default: ''
+    },
+    appliedAt: {
+      type: Date,
+      default: Date.now
+    }
   },
   { _id: false }
 );
