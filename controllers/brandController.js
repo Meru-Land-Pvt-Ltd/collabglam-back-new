@@ -10,6 +10,7 @@ const EmailServiceImport = require("../services/emailService");
 const ApiResponseImport = require("../core/http/ApiResponse");
 const HttpStatusImport = require("../core/http/HttpStatus");
 const ApiErrorImport = require("../core/http/ApiError");
+const SubscriptionPlan = require("../models/subscription");
 
 const BrandModel =
   BrandModelImport.BrandModel || BrandModelImport.default || BrandModelImport;
@@ -179,6 +180,45 @@ function buildSafeSignupPayload(body) {
     companySize: safeTrim(body.companySize),
     industry: safeTrim(body.industry),
     passwordHash: String(body.password || ""),
+  };
+}
+
+
+function featureValueToLimit(value) {
+  if (typeof value === "number") return value;
+  if (value && typeof value === "object" && value.unlimited === true) return -1;
+  return 0;
+}
+
+function buildSubscriptionFromPlan(plan) {
+  const now = new Date();
+
+  return {
+    planId: plan.planId,
+    planName: plan.name,
+    role: plan.role || "Brand",
+    planRef: plan._id,
+    monthlyCost: plan.monthlyCost ?? 0,
+    annualCost: plan.annualCost ?? 0,
+    billingCycle: "monthly",
+    autoRenew: plan.autoRenew ?? false,
+    status: plan.status || "active",
+    durationMins: plan.durationMins ?? 43200,
+    startedAt: now,
+    expiresAt: null,
+    features: (plan.features || []).map((feature) => ({
+      key: feature.key,
+      value: feature.value ?? null,
+      limit: featureValueToLimit(feature.value),
+      used: 0,
+      note: feature.note ?? null,
+      resetsEvery: null,
+      resetsAt: null,
+    })),
+    internalCredits: {
+      used: 0,
+      resetsAt: null,
+    },
   };
 }
 
@@ -664,6 +704,16 @@ async function verifyOtpSignUp(req, res, next) {
       throw new ConflictError("Email already registered. Please login.");
     }
 
+    const freePlan = await SubscriptionPlan.findOne({
+      role: "Brand",
+      name: "free",
+      status: "active",
+    });
+
+    if (!freePlan) {
+      throw new InternalError("Free brand plan not found");
+    }
+
     const brand = await BrandModel.create({
       email,
       brandName: safeTrim(payload.brandName),
@@ -671,6 +721,7 @@ async function verifyOtpSignUp(req, res, next) {
       companySize: safeTrim(payload.companySize),
       industry: safeTrim(payload.industry),
       password: payload.passwordHash,
+      subscription: buildSubscriptionFromPlan(freePlan),
     });
 
     await markOtpUsed(otpDoc, { userId: brand._id });

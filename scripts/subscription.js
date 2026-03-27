@@ -60,7 +60,7 @@ const brandPlans = [
     sortOrder: 1,
     autoRenew: true,
 
-    durationMins: 5,
+    durationMins: 43200,
 
     features: [
       { key: "influencer_search_per_month", value: 20 },

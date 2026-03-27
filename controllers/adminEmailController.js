@@ -116,7 +116,16 @@ async function getThreads(req, res) {
     const adminId = assertAuth(req, res);
     if (!adminId) return;
 
-    const { page, limit, search, status, ownerAdminId } = req.query;
+    const {
+      page,
+      limit,
+      search,
+      status,
+      ownerAdminId,
+      mailboxView,
+      teamRole,
+      revenueHeadId,
+    } = req.query;
 
     const result = await listThreads({
       actorAdminId: adminId,
@@ -125,6 +134,9 @@ async function getThreads(req, res) {
       search,
       status,
       ownerAdminId,
+      mailboxView,
+      teamRole,
+      revenueHeadId,
     });
 
     return res.status(200).json({ success: true, data: result });

@@ -5,21 +5,12 @@ const Brand = require("../models/brand");
 const Influencer = require("../models/influencer");
 const subscriptionHelper = require("../utils/subscriptionHelper");
 
-// Helper: normalize feature value into a numeric limit for usage tracking snapshot
-// - number => that number
-// - { unlimited: true } => -1
-// - other => 0
 function featureValueToLimit(value) {
   if (typeof value === "number") return value;
   if (value && typeof value === "object" && value.unlimited === true) return -1;
   return 0;
 }
 
-/**
- * HIDE THESE FROM ANY "GET PLANS" RESPONSE
- * Brand: marketplace_fee_percent
- * Influencer: platform_fee_on_payouts_percent
- */
 const HIDDEN_FEATURE_KEYS = new Set([
   "marketplace_fee_percent",
   "platform_fee_on_payouts_percent",
