@@ -1217,77 +1217,218 @@ exports.adminGetInfluencerById = async (req, res) => {
   }
 };
 
+function computeInfluencerNextRoute(influencer) {
+  const page1Done = Array.isArray(influencer?.page1) && influencer.page1.length > 0;
+
+  const page2Done =
+    (Array.isArray(influencer?.page2) && influencer.page2.length > 0) ||
+    influencer?.ispage2Skip === true;
+
+  const page3Done =
+    (Array.isArray(influencer?.page3) && influencer.page3.length > 0) ||
+    influencer?.ispage3Skip === true;
+
+  let route = "campaign";
+  if (!page1Done) route = "page1";
+  else if (!page2Done) route = "page2";
+  else if (!page3Done) route = "page3";
+
+  return { route, page1Done, page2Done, page3Done };
+}
+
+async function loadSocialProfilesFromModashBulk(influencerIds = []) {
+  const docs = await Modash.find(
+    { influencerId: { $in: influencerIds.map((id) => String(id)) } },
+    "influencerId provider handle username followers url picture"
+  ).lean();
+
+  const grouped = {};
+
+  for (const d of docs) {
+    const key = String(d.influencerId);
+    if (!grouped[key]) grouped[key] = [];
+
+    grouped[key].push({
+      provider: d.provider,
+      handle: normalizeHandle(d.handle, d.username),
+      username: d.username || null,
+      followers: Number(d.followers) || 0,
+      url: d.url || null,
+      picture: d.picture || null,
+    });
+  }
+
+  return grouped;
+}
+
 exports.adminGetInfluencerList = async (req, res) => {
   try {
-    const page = parsePositiveInt(req.body?.page, 1);
-    const limit = parsePositiveInt(req.body?.limit, 10);
-    const search = String(req.body?.search || "").trim();
-    const sortBy = String(req.body?.sortBy || "createdAt").trim();
-    const sortOrder = normalizeSortOrder(req.body?.sortOrder, "desc");
+    const {
+      page = 1,
+      limit = 20,
+      search = "",
+      countryId = "",
+      languageId = "",
+      categoryId = "",
+      hasProxyEmail,
+      sortBy = "createdAt",
+      sortOrder = "desc",
+    } = req.query || {};
 
-    const filter = {};
-    const re = safeRegex(search);
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.max(Math.min(parseInt(limit, 10) || 20, 100), 1);
+    const skip = (pageNum - 1) * limitNum;
+    const order = String(sortOrder).toLowerCase() === "asc" ? 1 : -1;
 
-    if (re) {
-      filter.$or = [
-        { name: re },
-        { email: re },
-        { countryName: re },
-        { proxyEmail: re },
-        { "subscription.planName": re },
-      ];
-    }
-
-    const total = await Influencer.countDocuments(filter);
     const allowedSortFields = new Set([
+      "createdAt",
+      "updatedAt",
       "name",
       "email",
       "countryName",
-      "createdAt",
-      "planName",
-      "expiresAt",
+      "proxyEmail",
     ]);
 
-    const field = allowedSortFields.has(sortBy) ? sortBy : "createdAt";
-    const dir = sortOrder === "asc" ? 1 : -1;
+    const finalSortBy = allowedSortFields.has(String(sortBy))
+      ? String(sortBy)
+      : "createdAt";
 
-    const sortObj = {};
-    if (field === "planName") sortObj["subscription.planName"] = dir;
-    else if (field === "expiresAt") sortObj["subscription.expiresAt"] = dir;
-    else sortObj[field] = dir;
-    sortObj.createdAt = -1;
+    const filter = {};
 
-    const docs = await Influencer.find(filter)
-      .select("_id name email countryName proxyEmail subscription.planName subscription.expiresAt subscriptionExpired createdAt")
-      .sort(sortObj)
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
+    if (search && String(search).trim()) {
+      const q = String(search).trim();
+      const rx = new RegExp(escapeRegExp(q), "i");
+
+      filter.$or = [
+        { name: rx },
+        { email: rx },
+        { proxyEmail: rx },
+        { countryName: rx },
+        { "languages.name": rx },
+        { "categories.name": rx },
+      ];
+    }
+
+    if (countryId && mongoose.Types.ObjectId.isValid(String(countryId))) {
+      filter.countryId = new mongoose.Types.ObjectId(String(countryId));
+    }
+
+    if (languageId && mongoose.Types.ObjectId.isValid(String(languageId))) {
+      filter["languages._id"] = new mongoose.Types.ObjectId(String(languageId));
+    }
+
+    if (categoryId && mongoose.Types.ObjectId.isValid(String(categoryId))) {
+      filter["categories._id"] = new mongoose.Types.ObjectId(String(categoryId));
+    }
+
+    if (String(hasProxyEmail).toLowerCase() === "true") {
+      filter.proxyEmail = { $exists: true, $nin: ["", null] };
+    } else if (String(hasProxyEmail).toLowerCase() === "false") {
+      filter.$or = [...(filter.$or || []), { proxyEmail: { $exists: false } }, { proxyEmail: "" }, { proxyEmail: null }];
+    }
+
+    const [total, docs] = await Promise.all([
+      Influencer.countDocuments(filter),
+      Influencer.find(filter)
+        .select(
+          [
+            "email",
+            "name",
+            "countryId",
+            "countryName",
+            "languages",
+            "categories",
+            "page1",
+            "page2",
+            "page3",
+            "ispage2Skip",
+            "ispage3Skip",
+            "proxyEmail",
+            "createdAt",
+            "updatedAt",
+          ].join(" ")
+        )
+        .sort({ [finalSortBy]: order, _id: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+    ]);
+
+    const socialProfilesMap = await loadSocialProfilesFromModashBulk(
+      docs.map((doc) => doc._id)
+    );
 
     const influencers = docs.map((doc) => {
-      const planName = doc.subscription?.planName || "free";
-      const expiresAt = doc.subscription?.expiresAt || null;
-      const subscriptionExpired = Boolean(doc.subscriptionExpired) || isExpiredDate(expiresAt);
+      const routeInfo = computeInfluencerNextRoute(doc);
+
+      const page1Profiles = Array.isArray(doc.page1) ? doc.page1 : [];
+      const primaryPage1Profile =
+        page1Profiles.find((item) => item?.isPrimary) || page1Profiles[0] || null;
+
+      const primaryPlatform = primaryPage1Profile
+        ? String(
+          primaryPage1Profile.platform ||
+          primaryPage1Profile.provider ||
+          ""
+        ).toLowerCase() || null
+        : null;
+
+      const socialProfiles =
+        socialProfilesMap[String(doc._id)] || [];
 
       return {
         _id: doc._id,
-        name: doc.name || "",
+        influencerId: String(doc._id),
         email: doc.email || "",
-        countryName: doc.countryName || "",
-        proxyEmail: doc.proxyEmail || "",
-        planName,
-        expiresAt,
-        subscriptionExpired,
+        name: doc.name || "",
+        country: {
+          _id: doc.countryId || null,
+          name: doc.countryName || "",
+        },
+        languages: Array.isArray(doc.languages)
+          ? doc.languages.map((item) => ({
+            _id: item?._id || null,
+            name: item?.name || "",
+          }))
+          : [],
+        categories: Array.isArray(doc.categories)
+          ? doc.categories.map((item) => ({
+            _id: item?._id || null,
+            name: item?.name || "",
+          }))
+          : [],
+        proxyEmail: doc.proxyEmail || null,
+
+        primaryPlatform,
+        socialProfiles,
+
+        pageCounts: {
+          page1: Array.isArray(doc.page1) ? doc.page1.length : 0,
+          page2: Array.isArray(doc.page2) ? doc.page2.length : 0,
+          page3: Array.isArray(doc.page3) ? doc.page3.length : 0,
+        },
+
+        onboarding: {
+          route: routeInfo.route,
+          page1Done: routeInfo.page1Done,
+          page2Done: routeInfo.page2Done,
+          page3Done: routeInfo.page3Done,
+          ispage2Skip: Boolean(doc.ispage2Skip),
+          ispage3Skip: Boolean(doc.ispage3Skip),
+        },
+
+        createdAt: doc.createdAt,
+        updatedAt: doc.updatedAt,
       };
     });
 
     return res.status(200).json({
-      page,
-      limit,
+      success: true,
+      page: pageNum,
+      limit: limitNum,
       total,
-      totalPages: Math.ceil(total / limit),
-      sortBy: field,
-      sortOrder,
+      pages: Math.ceil(total / limitNum),
+      count: influencers.length,
       influencers,
     });
   } catch (error) {
@@ -1933,7 +2074,219 @@ exports.assignBrand = async (req, res) => {
   }
 };
 
+exports.getCampaignsByInfluencerId = async (req, res) => {
+  try {
+    const influencerId = String(req.body?.influencerId || "").trim();
+    const page = parsePositiveInt(req.body?.page, 1);
+    const limit = parsePositiveInt(req.body?.limit, 10);
+    const search = String(req.body?.search || "").trim();
+    const sortBy = String(req.body?.sortBy || "createdAt").trim();
+    const sortOrder = normalizeSortOrder(req.body?.sortOrder, "desc");
+    const statusFilter = String(req.body?.status || "all").trim().toLowerCase();
+
+    if (!influencerId) {
+      return res.status(400).json({ message: "influencerId is required" });
+    }
+
+    if (!isObjectId(influencerId)) {
+      return res.status(400).json({ message: "Invalid influencerId" });
+    }
+
+    const actor = req.admin || {};
+    const visibleBrandKeys = await getScopedCampaignBrandKeysForAdmin(actor);
+
+    const influencer = await Influencer.findById(influencerId)
+      .select("_id name email")
+      .lean();
+
+    if (!influencer) {
+      return res.status(404).json({ message: "Influencer not found" });
+    }
+
+    const invitationFilter = {
+      influencerId: String(influencerId),
+    };
+
+    const invitations = await Invitation.find(invitationFilter)
+      .select("campaignId invitationId status createdAt updatedAt")
+      .lean();
+
+    const invitedCampaignIds = [
+      ...new Set(
+        invitations
+          .map((item) => String(item.campaignId || "").trim())
+          .filter(Boolean)
+      ),
+    ];
+
+    if (!invitedCampaignIds.length) {
+      return res.status(200).json({
+        page,
+        limit,
+        total: 0,
+        pages: 1,
+        campaigns: [],
+        influencer: {
+          influencerId: String(influencer._id),
+          name: influencer.name || "",
+          email: influencer.email || "",
+        },
+      });
+    }
+
+    const objectIds = invitedCampaignIds
+      .filter((id) => isObjectId(id))
+      .map((id) => toObjectId(id));
+
+    const campaignFilter = {
+      $or: [
+        { campaignsId: { $in: invitedCampaignIds } },
+        { _id: { $in: objectIds } },
+      ],
+    };
+
+    if (Array.isArray(visibleBrandKeys)) {
+      if (!visibleBrandKeys.length) {
+        return res.status(200).json({
+          page,
+          limit,
+          total: 0,
+          pages: 1,
+          campaigns: [],
+          influencer: {
+            influencerId: String(influencer._id),
+            name: influencer.name || "",
+            email: influencer.email || "",
+          },
+        });
+      }
+
+      campaignFilter.brandId = { $in: visibleBrandKeys };
+    }
+
+    const re = safeRegex(search);
+    if (re) {
+      campaignFilter.$and = [
+        {
+          $or: [
+            { campaignTitle: re },
+            { productOrServiceName: re },
+            { brandName: re },
+            { description: re },
+            { goal: re },
+          ],
+        },
+      ];
+    }
+
+    const field = getCampaignSortField(sortBy);
+    const dir = sortOrder === "asc" ? 1 : -1;
+
+    const campaignDocs = await Campaign.find(campaignFilter)
+      .select(
+        "_id brandId brandName campaignsId campaignTitle productOrServiceName goal budget applicantCount isActive isDraft campaignStatus timeline.startDate timeline.endDate createdAt updatedAt"
+      )
+      .lean();
+
+    const invitationMap = new Map();
+    invitations.forEach((inv) => {
+      const key = String(inv.campaignId || "").trim();
+      if (!key) return;
+      if (!invitationMap.has(key)) invitationMap.set(key, inv);
+    });
+
+    const normalized = campaignDocs.map((doc) => {
+      const summary = toCampaignSummary(doc);
+
+      const invitation =
+        invitationMap.get(String(doc.campaignsId || "").trim()) ||
+        invitationMap.get(String(doc._id || "").trim()) ||
+        null;
+
+      const rawStatus = String(
+        invitation?.status || doc.campaignStatus || ""
+      ).toLowerCase();
+
+      let status = "pending";
+      if (rawStatus.includes("approve")) status = "approved";
+      else if (rawStatus.includes("reject")) status = "rejected";
+      else if (rawStatus.includes("accept")) status = "approved";
+      else if (rawStatus.includes("decline")) status = "rejected";
+
+      return {
+        _id: String(doc._id || ""),
+        id: summary.campaignId,
+        campaignId: summary.campaignId,
+        name: summary.name,
+        campaignName: summary.name,
+        brandName: doc.brandName || "—",
+        appliedDate:
+          invitation?.createdAt ||
+          doc.createdAt ||
+          null,
+        status,
+        startDate: summary.startDate,
+        endDate: summary.endDate,
+        goal: summary.goal,
+        applicantCount: summary.applicantCount,
+        isActive: summary.isActive,
+      };
+    });
+
+    const filteredByStatus =
+      statusFilter === "all"
+        ? normalized
+        : normalized.filter((item) => item.status === statusFilter);
+
+    const sorted = [...filteredByStatus].sort((a, b) => {
+      const aVal =
+        field === "campaignTitle"
+          ? a.name || ""
+          : field === "createdAt"
+            ? new Date(a.appliedDate || 0).getTime()
+            : 0;
+
+      const bVal =
+        field === "campaignTitle"
+          ? b.name || ""
+          : field === "createdAt"
+            ? new Date(b.appliedDate || 0).getTime()
+            : 0;
+
+      if (typeof aVal === "number" && typeof bVal === "number") {
+        return (aVal - bVal) * dir;
+      }
+
+      return String(aVal).localeCompare(String(bVal), undefined, {
+        numeric: true,
+        sensitivity: "base",
+      }) * dir;
+    });
+
+    const total = sorted.length;
+    const pages = Math.max(1, Math.ceil(total / limit));
+    const campaigns = sorted.slice((page - 1) * limit, page * limit);
+
+    return res.status(200).json({
+      page,
+      limit,
+      total,
+      pages,
+      campaigns,
+      influencer: {
+        influencerId: String(influencer._id),
+        name: influencer.name || "",
+        email: influencer.email || "",
+      },
+    });
+  } catch (error) {
+    console.error("Error in getCampaignsByInfluencerId:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
 module.exports.findCampaignByAnyId = findCampaignByAnyId;
 module.exports.findModashByUserId = findModashByUserId;
 module.exports.extractHandleFromModash = extractHandleFromModash;
 module.exports.enrichBrandsWithAssignments = enrichBrandsWithAssignments;
+

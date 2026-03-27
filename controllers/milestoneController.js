@@ -860,10 +860,11 @@ exports.getInfluencerPaidTotal = async (req, res) => {
 // ======================================================================
 exports.adminListPayouts = async (req, res) => {
   try {
-    const { status = "all", page = 1, limit = 20 } = req.body || {};
+    const { status = "all", page = 1, limit = 20, search = "" } = req.body || {};
 
-    const pageNum = Number(page) || 1;
+    const pageNum = Math.max(1, Number(page) || 1);
     const limitNum = Math.max(1, Number(limit) || 20);
+    const searchText = String(search || "").trim().toLowerCase();
 
     let statusFilter;
     if (status === "all" || status === undefined || status === null || status === "") {
@@ -882,66 +883,136 @@ exports.adminListPayouts = async (req, res) => {
         .map((e) => ({
           ...e,
           milestoneHistoryId: String(e._id),
-          brandId: doc.brandId,
+          brandId: String(doc.brandId || ""),
           milestoneId: String(doc._id),
         }))
     );
 
     if (statusFilter !== "all") {
       entries = entries.filter((e) =>
-        statusFilter.includes(e.payoutStatus || "initiated")
+        statusFilter.includes(String(e.payoutStatus || "initiated"))
       );
     }
 
     entries.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-    const total = entries.length;
-    const totalPages = Math.ceil(total / limitNum);
-    const start = (pageNum - 1) * limitNum;
-    const dataPage = entries.slice(start, start + limitNum);
+    const brandIds = [...new Set(entries.map((e) => String(e.brandId || "")).filter(Boolean))];
+    const influencerIds = [...new Set(entries.map((e) => String(e.influencerId || "")).filter(Boolean))];
+    const campaignIds = [...new Set(entries.map((e) => String(e.campaignId || "")).filter(Boolean))];
 
-    const brandIds = [...new Set(dataPage.map((e) => e.brandId))];
-    const influencerIds = [...new Set(dataPage.map((e) => e.influencerId))];
-    const campaignIds = [...new Set(dataPage.map((e) => e.campaignId))];
+    const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(value);
+
+    const brandObjectIds = brandIds.filter(isValidObjectId).map((id) => new mongoose.Types.ObjectId(id));
+    const influencerObjectIds = influencerIds.filter(isValidObjectId).map((id) => new mongoose.Types.ObjectId(id));
+    const campaignObjectIds = campaignIds.filter(isValidObjectId).map((id) => new mongoose.Types.ObjectId(id));
 
     const [brands, influencers, campaigns] = await Promise.all([
-      Brand.find({ brandId: { $in: brandIds } }, "brandId name").lean(),
+      Brand.find(
+        {
+          $or: [
+            { brandId: { $in: brandIds } },
+            { _id: { $in: brandObjectIds } },
+          ],
+        },
+        "_id brandId name email companyName"
+      ).lean(),
       Influencer.find(
-        { influencerId: { $in: influencerIds } },
-        "influencerId name email"
+        {
+          $or: [
+            { influencerId: { $in: influencerIds } },
+            { _id: { $in: influencerObjectIds } },
+          ],
+        },
+        "_id influencerId name fullName username email"
       ).lean(),
       Campaign.find(
-        { campaignsId: { $in: campaignIds } },
-        "campaignsId productOrServiceName"
+        {
+          $or: [
+            { campaignsId: { $in: campaignIds } },
+            { _id: { $in: campaignObjectIds } },
+          ],
+        },
+        "_id campaignsId campaignTitle productOrServiceName brandName"
       ).lean(),
     ]);
 
-    const brandMap = new Map(brands.map((b) => [b.brandId, b.name]));
-    const influencerMap = new Map(
-      influencers.map((i) => [i.influencerId, { name: i.name, email: i.email }])
-    );
-    const campaignMap = new Map(
-      campaigns.map((c) => [c.campaignsId, c.productOrServiceName])
-    );
+    const brandMap = new Map();
+    brands.forEach((b) => {
+      const displayName = b.name || b.companyName || b.email || "Unknown Brand";
+      if (b.brandId) brandMap.set(String(b.brandId), displayName);
+      if (b._id) brandMap.set(String(b._id), displayName);
+    });
 
-    const items = dataPage.map((e) => {
-      const inf = influencerMap.get(e.influencerId) || {};
+    const influencerMap = new Map();
+    influencers.forEach((i) => {
+      const displayName =
+        i.name || i.fullName || i.username || i.email || "Unknown Influencer";
+
+      const value = {
+        name: displayName,
+        email: i.email || null,
+      };
+
+      if (i.influencerId) influencerMap.set(String(i.influencerId), value);
+      if (i._id) influencerMap.set(String(i._id), value);
+    });
+
+    const campaignMap = new Map();
+    campaigns.forEach((c) => {
+      const value = {
+        title: c.campaignTitle || c.productOrServiceName || "Untitled Campaign",
+        brandName: c.brandName || null,
+      };
+
+      if (c.campaignsId) campaignMap.set(String(c.campaignsId), value);
+      if (c._id) campaignMap.set(String(c._id), value);
+    });
+
+    let items = entries.map((e) => {
+      const inf = influencerMap.get(String(e.influencerId || "")) || {};
+      const campaign = campaignMap.get(String(e.campaignId || "")) || {};
+
       return {
         milestoneId: e.milestoneId,
         milestoneHistoryId: e.milestoneHistoryId,
+        milestoneTitle: e.milestoneTitle || null,
+        milestoneDescription: e.milestoneDescription || null,
         brandId: e.brandId,
-        brandName: brandMap.get(e.brandId) || null,
+        brandName: brandMap.get(String(e.brandId || "")) || campaign.brandName || null,
         influencerId: e.influencerId,
         influencerName: inf.name || null,
         influencerEmail: inf.email || null,
         campaignId: e.campaignId,
-        campaignTitle: campaignMap.get(e.campaignId) || null,
-        amount: e.amount,
-        payoutStatus: e.payoutStatus,
-        releasedAt: e.releasedAt,
+        campaignTitle: campaign.title || null,
+        amount: Number(e.amount || 0),
+        payoutStatus: e.payoutStatus || "initiated",
+        releasedAt: e.releasedAt || null,
+        paidAt: e.paidAt || null,
         createdAt: e.createdAt,
       };
     });
+
+    if (searchText) {
+      items = items.filter((item) =>
+        [
+          item.brandName,
+          item.influencerName,
+          item.influencerEmail,
+          item.campaignTitle,
+          item.milestoneTitle,
+          item.brandId,
+          item.influencerId,
+          item.campaignId,
+        ]
+          .filter(Boolean)
+          .some((value) => String(value).toLowerCase().includes(searchText))
+      );
+    }
+
+    const total = items.length;
+    const totalPages = Math.max(1, Math.ceil(total / limitNum));
+    const start = (pageNum - 1) * limitNum;
+    const pagedItems = items.slice(start, start + limitNum);
 
     return res.status(200).json({
       message: "Milestone payouts for admin",
@@ -949,7 +1020,7 @@ exports.adminListPayouts = async (req, res) => {
       limit: limitNum,
       total,
       totalPages,
-      items,
+      items: pagedItems,
     });
   } catch (err) {
     console.error("Error in adminListPayouts:", err);

@@ -11,6 +11,7 @@ const {
   getByInfluencerId,
   getCampaignById,
   getCampaignsByBrandId,
+  getCampaignsByInfluencerId,
   adminGetInfluencerById,
   adminGetInfluencerList,
   adminAddYouTubeEmail,
@@ -55,7 +56,7 @@ router.post("/addYouTubeEmail", adminAuth, adminAddYouTubeEmail);
 router.post("/listMissingEmail", adminAuth, listMissingEmail);
 router.post("/updateMissingEmail", adminAuth, updateMissingEmail);
 router.post("/checkstatus", adminAuth, checkMissingEmailByHandle);
-
+router.post("/campaign/getByInfluencerId", adminAuth, getCampaignsByInfluencerId);
 router.post("/getpayments", adminAuth, getAllPayments);
 
 router.post("/assignBrandPlan", adminAuth, adminAssignBrandPlan);
