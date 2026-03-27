@@ -18,13 +18,12 @@ const brandOrInfluencerAuth = require("../auth/brandOrInfluencerAuth");
 router.post("/create", influencerAuth, createDeliverableApproval);
 
 router.post(
-  "/deliverables/:deliverableId/approval-status",
-  brandAuth,
+  "/:deliverableId/approval-status",
   updateDeliverableApprovalStatus
 );
 
 // 3) GET - list campaign-wise
-router.get("/campaign/:campaignId", brandOrInfluencerAuth, listDeliverablesByCampaign);
+router.get("/campaign/:campaignId", listDeliverablesByCampaign);
 router.get("/influencer/:influencerId", listInfluencerDeliverablesByCampaign);
 router.get("/influencer/campaign/:campaignId", listInfluencerDeliverablesByCampaign2);
 router.get("/getall", getAllDeliverables);

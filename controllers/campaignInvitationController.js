@@ -832,16 +832,16 @@ exports.getInvitationsByCampaignIdPost = async (req, res) => {
           : [],
         influencerIds.length
           ? Influencer.find({ influencerId: { $in: influencerIds } })
-              .select("influencerId name influencerName fullName username")
-              .lean()
+            .select("influencerId name influencerName fullName username")
+            .lean()
           : [],
         modashUserIds.length
           ? Modash.find({
-              userId: { $in: modashUserIds },
-              provider: providers.length ? { $in: providers } : undefined,
-            })
-              .select("userId provider fullname username handle")
-              .lean()
+            userId: { $in: modashUserIds },
+            provider: providers.length ? { $in: providers } : undefined,
+          })
+            .select("userId provider fullname username handle")
+            .lean()
           : [],
       ]);
 
@@ -919,5 +919,230 @@ exports.getInvitationsByCampaignIdPost = async (req, res) => {
   } catch (e) {
     console.error("getInvitationsByCampaignIdPost error:", e);
     return res.status(500).json({ status: "error", message: "Internal server error" });
+  }
+};
+
+exports.getAcceptedAdminCreatedCampaigns = async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || "25", 10), 1), 200);
+    const skip = (page - 1) * limit;
+
+    const includeCampaign = String(req.query.includeCampaign || "1") === "1";
+    const includeNames = String(req.query.includeNames || "1") === "1";
+    const includeFullCampaignDetails =
+      String(req.query.includeFullCampaignDetails || "1") === "1";
+
+    const filter = {
+      status: "accepted",
+      createdByAdminId: { $ne: null },
+    };
+
+    if (req.query.influencerId) {
+      const influencerId = String(req.query.influencerId).trim();
+      if (!isObjectId(influencerId)) {
+        return res.status(400).json({
+          status: "error",
+          message: "Invalid influencerId",
+        });
+      }
+      filter.influencerId = new mongoose.Types.ObjectId(influencerId);
+    }
+
+    if (req.query.brandId) {
+      const brandId = String(req.query.brandId).trim();
+      if (!isObjectId(brandId)) {
+        return res.status(400).json({
+          status: "error",
+          message: "Invalid brandId",
+        });
+      }
+      filter.brandId = new mongoose.Types.ObjectId(brandId);
+    }
+
+    if (req.query.campaignId) {
+      const campaignId = String(req.query.campaignId).trim();
+      if (!isObjectId(campaignId)) {
+        return res.status(400).json({
+          status: "error",
+          message: "Invalid campaignId",
+        });
+      }
+      filter.campaignId = new mongoose.Types.ObjectId(campaignId);
+    }
+
+    const [total, invitations] = await Promise.all([
+      CampaignInvitation.countDocuments(filter),
+      CampaignInvitation.find(filter)
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+    ]);
+
+    const enriched = await enrichInvitations(invitations, {
+      includeCampaign,
+      includeNames,
+    });
+
+    let campaignDetailsMap = new Map();
+
+    if (includeFullCampaignDetails && invitations.length) {
+      const campaignIds = [
+        ...new Set(
+          invitations
+            .map((inv) => String(inv.campaignId || "").trim())
+            .filter((id) => isObjectId(id))
+        ),
+      ];
+
+      const campaigns = campaignIds.length
+        ? await Campaign.find({
+            _id: { $in: campaignIds.map((id) => new mongoose.Types.ObjectId(id)) },
+          }).lean()
+        : [];
+
+      campaignDetailsMap = new Map(
+        campaigns.map((campaign) => [String(campaign._id), campaign])
+      );
+    }
+
+    const finalInvitations = enriched.map((inv) => ({
+      ...inv,
+      campaignDetails: includeFullCampaignDetails
+        ? campaignDetailsMap.get(String(inv.campaignId || "")) || null
+        : undefined,
+    }));
+
+    return res.json({
+      status: "success",
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit),
+      filters: {
+        status: "accepted",
+        createdByAdmin: true,
+        ...(req.query.influencerId
+          ? { influencerId: String(req.query.influencerId).trim() }
+          : {}),
+        ...(req.query.brandId
+          ? { brandId: String(req.query.brandId).trim() }
+          : {}),
+        ...(req.query.campaignId
+          ? { campaignId: String(req.query.campaignId).trim() }
+          : {}),
+      },
+      invitations: finalInvitations,
+    });
+  } catch (e) {
+    console.error("getAcceptedAdminCreatedCampaigns error:", e);
+    return res.status(500).json({
+      status: "error",
+      message: "Internal server error",
+    });
+  }
+};
+
+exports.getAcceptedAdminCreatedInfluencersByCampaignId = async (req, res) => {
+  try {
+    const campaignId = String(
+      req.query.campaignId || req.params.campaignId || ""
+    ).trim();
+
+    if (!isObjectId(campaignId)) {
+      return res.status(400).json({
+        status: "error",
+        message: "Valid campaignId is required",
+      });
+    }
+
+    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || "25", 10), 1), 200);
+    const skip = (page - 1) * limit;
+
+    const includeCampaign = String(req.query.includeCampaign || "1") === "1";
+    const includeNames = String(req.query.includeNames || "1") === "1";
+
+    const filter = {
+      campaignId: new mongoose.Types.ObjectId(campaignId),
+      status: "accepted",
+      createdByAdminId: { $ne: null },
+    };
+
+    if (req.query.brandId) {
+      const brandId = String(req.query.brandId).trim();
+      if (!isObjectId(brandId)) {
+        return res.status(400).json({
+          status: "error",
+          message: "Invalid brandId",
+        });
+      }
+      filter.brandId = new mongoose.Types.ObjectId(brandId);
+    }
+
+    const [total, invitations] = await Promise.all([
+      CampaignInvitation.countDocuments(filter),
+      CampaignInvitation.find(filter)
+        .sort({ updatedAt: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+    ]);
+
+    const enriched = await enrichInvitations(invitations, {
+      includeCampaign,
+      includeNames,
+    });
+
+    const influencers = enriched.map((inv) => ({
+      invitationId: inv._id,
+      influencerId: inv.influencerId || null,
+      influencerName: inv.influencerName || null,
+      influencerEmail: inv.influencerEmail || null,
+      modashUserId: inv.modashUserId || null,
+      handle: inv.handle || null,
+      platform: inv.platform || null,
+      status: inv.status,
+      brandId: inv.brandId || null,
+      brandName: inv.brandName || null,
+      campaignId: inv.campaignId || null,
+      campaignTitle: includeCampaign ? inv.campaignTitle || null : undefined,
+      description: includeCampaign ? inv.description || null : undefined,
+      campaignBudget: includeCampaign ? inv.campaignBudget ?? null : undefined,
+      budget: includeCampaign ? inv.budget ?? null : undefined,
+      influencerBudget: includeCampaign ? inv.influencerBudget ?? null : undefined,
+      minFollowers: includeCampaign ? inv.minFollowers ?? null : undefined,
+      maxFollowers: includeCampaign ? inv.maxFollowers ?? null : undefined,
+      targetCountry: includeCampaign ? inv.targetCountry ?? null : undefined,
+      paymentType: includeCampaign ? inv.paymentType ?? null : undefined,
+      startAt: includeCampaign ? inv.startAt ?? null : undefined,
+      endAt: includeCampaign ? inv.endAt ?? null : undefined,
+      createdAt: inv.createdAt,
+      updatedAt: inv.updatedAt,
+    }));
+
+    return res.json({
+      status: "success",
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit),
+      campaignId,
+      filters: {
+        status: "accepted",
+        createdByAdmin: true,
+        ...(req.query.brandId
+          ? { brandId: String(req.query.brandId).trim() }
+          : {}),
+      },
+      influencers,
+    });
+  } catch (e) {
+    console.error("getAcceptedAdminCreatedInfluencersByCampaignId error:", e);
+    return res.status(500).json({
+      status: "error",
+      message: "Internal server error",
+    });
   }
 };

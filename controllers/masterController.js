@@ -15,7 +15,6 @@ const BrandAssigned = require("../models/brandAssigned");
 const mongoose = require("mongoose");
 const INVITE_EXP_MINUTES = Number(process.env.INVITE_EXP_MINUTES || 60);
 const { buildCampaignVisibilityFilter } = require('../utils/campaignAccess');
-const Campaign = require('../models/campaign');
 
 // ======================
 // Local Helpers

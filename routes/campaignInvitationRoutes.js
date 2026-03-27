@@ -26,5 +26,14 @@ router.post(
 );
 
 router.post("/get-by-campaign", campaignInvitationController.getInvitationsByCampaignIdPost);
+router.get(
+  "/accepted-admin-created-campaigns",
+  campaignInvitationController.getAcceptedAdminCreatedCampaigns
+);
+
+router.get(
+  "/accepted-admin-created-influencers",
+  campaignInvitationController.getAcceptedAdminCreatedInfluencersByCampaignId
+);
 
 module.exports = router;       
