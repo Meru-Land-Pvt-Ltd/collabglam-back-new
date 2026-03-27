@@ -692,6 +692,18 @@ async function getBrandOutreachRecipientsForComposeService({
 
 async function getMailboxScopeService({ actorAdminId }) {
   const scope = await getActorScope(actorAdminId);
+
+  let revenueHeads = [];
+
+  if (scope.actor?.role === ROLES.SUPER_ADMIN) {
+    revenueHeads = await AdminModel.find({
+      role: ROLES.REVENUE_HEAD,
+      status: "active",
+    })
+      .select("_id name email proxyEmail role parentAdmin rootAdmin")
+      .lean();
+  }
+
   return {
     actor: scope.actor,
     scope: {
@@ -702,32 +714,123 @@ async function getMailboxScopeService({ actorAdminId }) {
       canReply: scope.canReply,
       canEditThread: scope.canEditThread,
     },
+    filters: {
+      revenueHeads,
+    },
   };
 }
 
-async function listThreads({ actorAdminId, page = 1, limit = 20, search = "", status = "", ownerAdminId = "" }) {
+async function resolveScopedExecutiveIds({ scope, teamRole = "ALL", revenueHeadId = "" }) {
+  const actorRole = scope?.actor?.role;
+  const normalizedTeamRole = String(teamRole || "ALL").toLowerCase();
+
+  if (
+    normalizedTeamRole !== "all" &&
+    ![ROLES.REVENUE_HEAD, ROLES.IME, ROLES.BME].includes(normalizedTeamRole)
+  ) {
+    throw new Error("Invalid teamRole");
+  }
+
+  const adminFilter = {};
+
+  if (scope.adminIds !== null) {
+    adminFilter._id = { $in: scope.adminIds };
+  }
+
+  if (normalizedTeamRole !== "all") {
+    adminFilter.role = normalizedTeamRole;
+  }
+
+  if (revenueHeadId) {
+    if (actorRole !== ROLES.SUPER_ADMIN) {
+      throw new Error("Only super admin can filter by revenue head");
+    }
+
+    const rhObj = toObjectIdStrict(revenueHeadId, "revenueHeadId");
+
+    adminFilter.$or = [
+      { _id: rhObj },
+      { parentAdmin: rhObj },
+      { rootAdmin: rhObj },
+    ];
+  }
+
+  const admins = await AdminModel.find(adminFilter).select("_id").lean();
+  return admins.map((item) => item._id);
+}
+
+const PROVIDER_STATUSES = [
+  "QUEUED",
+  "SENT",
+  "DELIVERED",
+  "BOUNCED",
+  "COMPLAINED",
+  "FAILED",
+  "RECEIVED",
+];
+
+const MAILBOX_FILTERS = ["ALL", "REPLIED", ...PROVIDER_STATUSES];
+
+async function listThreads({
+  actorAdminId,
+  page = 1,
+  limit = 20,
+  search = "",
+  status = "",
+  ownerAdminId = "",
+  mailboxView = "ALL",
+  teamRole = "ALL",
+  revenueHeadId = "",
+}) {
   const scope = await getActorScope(actorAdminId);
   const safePage = Math.max(1, Number(page) || 1);
   const safeLimit = Math.max(1, Math.min(100, Number(limit) || 20));
   const skip = (safePage - 1) * safeLimit;
 
-  const filter = buildThreadScopeFilter(scope);
+  const baseFilter = buildThreadScopeFilter(scope);
+  const normalizedMailboxView = String(mailboxView || "ALL").toUpperCase();
 
-  if (status && ["ACTIVE", "ARCHIVED", "CLOSED"].includes(String(status).toUpperCase())) {
-    filter.status = String(status).toUpperCase();
+  if (!MAILBOX_FILTERS.includes(normalizedMailboxView)) {
+    throw new Error("Invalid mailboxView");
   }
 
-  if (ownerAdminId && mongoose.Types.ObjectId.isValid(ownerAdminId)) {
+  if (
+    status &&
+    ["ACTIVE", "ARCHIVED", "CLOSED"].includes(String(status).toUpperCase())
+  ) {
+    baseFilter.status = String(status).toUpperCase();
+  }
+
+  if (ownerAdminId) {
+    if (!mongoose.Types.ObjectId.isValid(ownerAdminId)) {
+      throw new Error("Invalid ownerAdminId");
+    }
+
     const ownerObj = toObjectIdStrict(ownerAdminId, "ownerAdminId");
-    if (scope.adminIds !== null && !scope.adminIds.some((id) => String(id) === String(ownerObj))) {
+
+    if (
+      scope.adminIds !== null &&
+      !scope.adminIds.some((id) => String(id) === String(ownerObj))
+    ) {
       throw new Error("You are not allowed to filter this owner");
     }
-    filter.executiveId = ownerObj;
+
+    baseFilter.executiveId = ownerObj;
+  } else {
+    const scopedExecutiveIds = await resolveScopedExecutiveIds({
+      scope,
+      teamRole,
+      revenueHeadId,
+    });
+
+    baseFilter.executiveId = scopedExecutiveIds.length
+      ? { $in: scopedExecutiveIds }
+      : { $in: [] };
   }
 
   if (cleanStr(search)) {
     const regex = new RegExp(cleanStr(search), "i");
-    filter.$or = [
+    baseFilter.$or = [
       { subject: regex },
       { recipientEmail: regex },
       { senderEmail: regex },
@@ -735,16 +838,152 @@ async function listThreads({ actorAdminId, page = 1, limit = 20, search = "", st
     ];
   }
 
-  const [items, total] = await Promise.all([
-    AdminEmailThreadModel.find(filter)
-      .sort({ lastMessageAt: -1 })
-      .skip(skip)
-      .limit(safeLimit)
-      .populate("executiveId", "name email proxyEmail role parentAdmin rootAdmin")
-      .populate("lastActorAdminId", "name email role")
-      .lean(),
-    AdminEmailThreadModel.countDocuments(filter),
-  ]);
+  const messageCollection = AdminEmailMessageModel.collection.name;
+
+  const pipeline = [
+    { $match: baseFilter },
+
+    {
+      $lookup: {
+        from: messageCollection,
+        let: { threadId: "$_id" },
+        pipeline: [
+          {
+            $match: {
+              $expr: { $eq: ["$threadId", "$$threadId"] },
+            },
+          },
+          { $sort: { createdAt: -1, _id: -1 } },
+          { $limit: 1 },
+          {
+            $project: {
+              _id: 1,
+              createdAt: 1,
+              direction: 1,
+              providerStatus: 1,
+            },
+          },
+        ],
+        as: "lastMessageMeta",
+      },
+    },
+
+    {
+      $lookup: {
+        from: messageCollection,
+        let: { threadId: "$_id" },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ["$threadId", "$$threadId"] },
+                  { $eq: ["$direction", "INBOUND"] },
+                ],
+              },
+            },
+          },
+          { $limit: 1 },
+          { $project: { _id: 1, createdAt: 1 } },
+        ],
+        as: "inboundEverMeta",
+      },
+    },
+
+    {
+      $addFields: {
+        latestMessage: { $arrayElemAt: ["$lastMessageMeta", 0] },
+        hasInboundEver: { $gt: [{ $size: "$inboundEverMeta" }, 0] },
+      },
+    },
+
+    {
+      $addFields: {
+        lastProviderStatus: "$latestMessage.providerStatus",
+        computedLastMessageDirection: {
+          $ifNull: ["$latestMessage.direction", "$lastMessageDirection"],
+        },
+        computedLastMessageAt: {
+          $ifNull: ["$latestMessage.createdAt", "$lastMessageAt"],
+        },
+      },
+    },
+  ];
+
+  if (normalizedMailboxView === "REPLIED") {
+    pipeline.push({ $match: { hasInboundEver: true } });
+  } else if (PROVIDER_STATUSES.includes(normalizedMailboxView)) {
+    pipeline.push({ $match: { lastProviderStatus: normalizedMailboxView } });
+  }
+
+  pipeline.push(
+    { $sort: { computedLastMessageAt: -1, _id: -1 } },
+    {
+      $facet: {
+        meta: [{ $count: "total" }],
+        items: [
+          { $skip: skip },
+          { $limit: safeLimit },
+          {
+            $project: {
+              _id: 1,
+              hasInboundEver: 1,
+              lastProviderStatus: 1,
+              computedLastMessageDirection: 1,
+              computedLastMessageAt: 1,
+            },
+          },
+        ],
+      },
+    }
+  );
+
+  const [aggResult] = await AdminEmailThreadModel.aggregate(pipeline);
+
+  const total = aggResult?.meta?.[0]?.total || 0;
+  const stateItems = aggResult?.items || [];
+  const idsInOrder = stateItems.map((item) => String(item._id));
+
+  if (!idsInOrder.length) {
+    return {
+      page: safePage,
+      limit: safeLimit,
+      total,
+      items: [],
+    };
+  }
+
+  const stateById = new Map(
+    stateItems.map((item) => [String(item._id), item])
+  );
+
+  const rawThreads = await AdminEmailThreadModel.find({
+    _id: { $in: idsInOrder },
+  })
+    .populate("executiveId", "name email proxyEmail role parentAdmin rootAdmin")
+    .populate("lastActorAdminId", "name email role")
+    .lean();
+
+  const rawThreadById = new Map(
+    rawThreads.map((thread) => [String(thread._id), thread])
+  );
+
+  const items = idsInOrder
+    .map((id) => {
+      const thread = rawThreadById.get(id);
+      const state = stateById.get(id);
+      if (!thread) return null;
+
+      return {
+        ...thread,
+        hasInboundEver: !!state?.hasInboundEver,
+        lastProviderStatus: state?.lastProviderStatus || null,
+        lastMessageDirection:
+          state?.computedLastMessageDirection || thread.lastMessageDirection,
+        lastMessageAt: state?.computedLastMessageAt || thread.lastMessageAt,
+      };
+    })
+    .filter(Boolean);
 
   return {
     page: safePage,

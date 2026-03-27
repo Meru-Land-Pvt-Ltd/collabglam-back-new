@@ -4,7 +4,7 @@ const bcrypt = require("bcryptjs");
 const { Schema } = mongoose;
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const DEFAULT_FREE_PLAN_ID = "dcd11cf7-50ca-4891-ae15-5045080f72fe";
+const DEFAULT_FREE_PLAN_ID = "4c6e497d-a6f9-4c3b-8d64-65bf843be685";
 
 const subscriptionFeatureSchema = new Schema(
   {

@@ -71,17 +71,32 @@ function buildSubscriptionFromPlan(plan, options = {}) {
 
   const featureSnapshot = (plan.features || []).map((feature) => ({
     key: feature.key,
+    value: feature.value ?? null,
     limit: featureValueToLimit(feature.value),
     used: 0,
+    note: feature.note ?? null,
+    resetsEvery: null,
+    resetsAt: null,
   }));
 
   return {
     planId: plan.planId,
     planName: plan.name,
+    role: plan.role,
+    planRef: plan._id,
+    monthlyCost: plan.monthlyCost ?? 0,
+    annualCost: plan.annualCost ?? 0,
+    billingCycle: options.billingCycle || "monthly",
+    autoRenew: plan.autoRenew ?? false,
+    status: plan.status || "active",
+    durationMins: plan.durationMins ?? 43200,
     startedAt: now,
     expiresAt,
     features: featureSnapshot,
-    billingCycle: options.billingCycle || "monthly",
+    internalCredits: {
+      used: 0,
+      resetsAt: null,
+    },
   };
 }
 
