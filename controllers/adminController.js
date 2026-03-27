@@ -5,6 +5,15 @@ const Admin = require("../models/admin");
 const { AdminModel, ROLES } = require("../models/master");
 const Brand = require("../models/brand");
 const { InfluencerModel: Influencer } = require("../models/influencer");
+const { AgeRangeModel: AgeRange } = require("../models/ageRange");
+const ContentLanguage = require("../models/language");
+const { InfluencerTierModel: InfluencerTier } = require("../models/influencerTier");
+const { ProductServiceGoalModel } = require("../models/productServiceGoal");
+const { ContentFormatModel: ContentFormat } = require("../models/contentFormat");
+const { PreferredHashtagModel: PreferredHashtag } = require("../models/preferredHashtag");
+const Country = require("../models/country");
+const { Category } = require("../models/categories");
+
 const Campaign = require("../models/campaign");
 const Milestone = require("../models/milestone");
 const Modash = require("../models/modash");
@@ -920,6 +929,65 @@ exports.getByInfluencerId = async (req, res) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 };
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(String(id));
+
+const toObjectIds = (ids = []) => {
+  return [...new Set(ids.map((id) => String(id)).filter(isValidObjectId))].map(
+    (id) => new mongoose.Types.ObjectId(id)
+  );
+};
+
+const getDocById = async (Model, id) => {
+  if (!Model || !id || !isValidObjectId(id)) return null;
+  return await Model.findById(id).lean();
+};
+
+const getDocsByIds = async (Model, ids = []) => {
+  if (!Model || !Array.isArray(ids) || !ids.length) return [];
+
+  const objectIds = toObjectIds(ids);
+  if (!objectIds.length) return [];
+
+  const docs = await Model.find({ _id: { $in: objectIds } }).lean();
+  const docsMap = new Map(docs.map((doc) => [String(doc._id), doc]));
+
+  return ids.map((id) => docsMap.get(String(id))).filter(Boolean);
+};
+
+const buildSubcategoryDetails = (categoryDoc, subcategoryIds = []) => {
+  if (!categoryDoc || !Array.isArray(subcategoryIds)) return [];
+
+  // case 1: subcategories stored inside category document
+  const nestedSubcategories =
+    categoryDoc.subcategories ||
+    categoryDoc.subcategory ||
+    categoryDoc.children ||
+    [];
+
+  if (Array.isArray(nestedSubcategories) && nestedSubcategories.length) {
+    const subMap = new Map(
+      nestedSubcategories.map((sub) => [String(sub._id), sub])
+    );
+
+    return subcategoryIds
+      .map((id) => {
+        const sub = subMap.get(String(id));
+        if (!sub) return null;
+
+        return {
+          _id: sub._id,
+          name: sub.name || sub.subcategoryName || "",
+          categoryId: categoryDoc._id,
+          categoryName: categoryDoc.name || categoryDoc.categoryName || "",
+          ...sub,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  // case 2: fallback from campaign.categories if available
+  return [];
+};
 
 exports.getCampaignById = async (req, res) => {
   try {
@@ -957,14 +1025,74 @@ exports.getCampaignById = async (req, res) => {
       return res.status(404).json({ message: "Campaign not found." });
     }
 
-    return res.json(campaign);
+    // category details
+    const categoryDetails = await getDocById(Category, campaign.categoryId);
+
+    // if your project has Brand model, uncomment and use this
+    // const brandDetails = await getDocById(Brand, campaign.brandId);
+
+    const [
+      campaignGoalDetails,
+      influencerTierDetails,
+      contentFormatDetails,
+      contentLanguageDetails,
+      preferredHashtagDetails,
+      targetCountryDetails,
+      targetAgeRangeDetails,
+    ] = await Promise.all([
+      getDocsByIds(ProductServiceGoalModel, campaign.campaignGoals),
+      getDocsByIds(InfluencerTier, campaign.influencerTierIds),
+      getDocsByIds(ContentFormat, campaign.contentFormats),
+      getDocsByIds(ContentLanguage, campaign.contentLanguageIds),
+      getDocsByIds(PreferredHashtag, campaign.preferredHashtags),
+      getDocsByIds(Country, campaign.targetCountryIds),
+      getDocsByIds(AgeRange, campaign.targetAgeRanges),
+    ]);
+
+    let subcategoryDetails = buildSubcategoryDetails(
+      categoryDetails,
+      campaign.subcategoryIds || []
+    );
+
+    // fallback: if campaign.categories already has names, use that
+    if (!subcategoryDetails.length && Array.isArray(campaign.categories)) {
+      subcategoryDetails = campaign.categories.map((item) => ({
+        _id: item.subcategoryId,
+        name: item.subcategoryName,
+        categoryId: item.categoryId,
+        categoryName: item.categoryName,
+      }));
+    }
+
+    const fullCampaign = {
+      ...campaign,
+
+      // full detail objects
+      brandDetails: null, // replace with brandDetails after adding Brand model
+      categoryDetails: categoryDetails || null,
+      subcategoryDetails: subcategoryDetails || [],
+      campaignGoalDetails: campaignGoalDetails || [],
+      influencerTierDetails: influencerTierDetails || [],
+      contentFormatDetails: contentFormatDetails || [],
+      contentLanguageDetails: contentLanguageDetails || [],
+      preferredHashtagDetails: preferredHashtagDetails || [],
+      targetCountryDetails: targetCountryDetails || [],
+      targetAgeRangeDetails: targetAgeRangeDetails || [],
+    };
+
+    return res.status(200).json({
+      message: "Campaign fetched successfully.",
+      data: fullCampaign,
+    });
   } catch (error) {
     console.error("Error in getCampaignById:", error);
     return res.status(500).json({
       message: "Internal server error while fetching campaign.",
+      error: error.message,
     });
   }
 };
+
 
 exports.getCampaignsByBrandId = async (req, res) => {
   try {

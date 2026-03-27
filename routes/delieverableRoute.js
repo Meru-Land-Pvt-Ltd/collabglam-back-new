@@ -11,7 +11,7 @@ const {
   getAllDeliverables,
 } = require("../controllers/delieverableController");
 const { influencerAuth } = require("../auth/influencerAuth");
-const {brandAuth} = require("../auth/brandAuth");
+const { brandAuth } = require("../auth/brandAuth");
 const brandOrInfluencerAuth = require("../auth/brandOrInfluencerAuth");
 
 // 1) POST - create (always pending)
@@ -24,7 +24,10 @@ router.post(
 
 // 3) GET - list campaign-wise
 router.get("/campaign/:campaignId", listDeliverablesByCampaign);
-router.get("/influencer/:influencerId", listInfluencerDeliverablesByCampaign);
+router.get(
+  "/influencer/:influencerId/campaign/:campaignId",
+  listInfluencerDeliverablesByCampaign
+);
 router.get("/influencer/campaign/:campaignId", listInfluencerDeliverablesByCampaign2);
 router.get("/getall", getAllDeliverables);
 

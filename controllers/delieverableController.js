@@ -399,7 +399,7 @@ exports.listDeliverablesByCampaign = async (req, res) => {
 // { influencerId: ObjectId, campaignId: ObjectId, platform, createdAt }
 exports.listInfluencerDeliverablesByCampaign = async (req, res) => {
   try {
-    const { influencerId } = req.params;
+    const { influencerId, campaignId } = req.params;
 
     if (!influencerId || !isValidObjectId(influencerId)) {
       return res.status(400).json({
@@ -408,35 +408,39 @@ exports.listInfluencerDeliverablesByCampaign = async (req, res) => {
       });
     }
 
-    const invites = await CampaignInvite.find({ influencerId: toObjectId(influencerId) })
-      .select("campaignId platform createdAt")
+    if (!campaignId || !isValidObjectId(campaignId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid campaignId is required.",
+      });
+    }
+
+    const invites = await CampaignInvite.find({
+      influencerId: toObjectId(influencerId),
+      campaignId: toObjectId(campaignId),
+    })
+      .select("campaignId influencerId platform createdAt")
       .sort({ createdAt: -1 })
       .lean();
 
-    const campaignIds = [...new Set(invites.map((x) => x.campaignId).filter(Boolean).map(String))];
+    const campaign = await Campaign.findOne({
+      _id: toObjectId(campaignId),
+    })
+      .select("campaignTitle")
+      .lean();
 
-    const campaigns = campaignIds.length
-      ? await Campaign.find({ _id: { $in: campaignIds.map(toObjectId) } })
-          .select("campaignTitle")
-          .lean()
-      : [];
-
-    const campaignMap = new Map(campaigns.map((c) => [String(c._id), c]));
-
-    const docs = invites.map((inv) => {
-      const c = campaignMap.get(String(inv.campaignId)) || null;
-      return {
-        platform: inv.platform,
-        createdAt: inv.createdAt,
-        campaignId: String(inv.campaignId),
-        campaign: c
-          ? {
-              _id: String(c._id),
-              campaignTitle: c.campaignTitle,
-            }
-          : null,
-      };
-    });
+    const docs = invites.map((inv) => ({
+      influencerId: String(inv.influencerId),
+      campaignId: String(inv.campaignId),
+      platform: inv.platform,
+      createdAt: inv.createdAt,
+      campaign: campaign
+        ? {
+            _id: String(campaign._id),
+            campaignTitle: campaign.campaignTitle,
+          }
+        : null,
+    }));
 
     return res.status(200).json({
       success: true,

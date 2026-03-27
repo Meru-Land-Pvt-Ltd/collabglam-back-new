@@ -1152,6 +1152,51 @@ async function getBrandById(req, res, next) {
   }
 }
 
+async function getBrandLiteById(req, res, next) {
+  const requestId = req.requestId || "";
+
+  try {
+    const id =
+      req.query.brandId ||
+      req.query.id ||
+      req.params.brandId ||
+      req.params.id;
+
+    if (!id) {
+      throw new ValidationError("Query parameter brandId or id is required.");
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      throw new ValidationError("Invalid brand id.");
+    }
+
+    const brand = await BrandModel.findById(id)
+      .select("name proxyEmail profilePic subscriptionDetails subscription")
+      .lean()
+      .exec();
+
+    if (!brand) {
+      throw new NotFoundError("Brand not found.");
+    }
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.OK,
+      {
+        brandId: String(brand._id),
+        name: brand.name || "",
+        proxyEmail: brand.proxyEmail || "",
+        profilePic: brand.profilePic || "",
+        subscriptionDetails:
+          brand.subscriptionDetails ?? brand.subscription ?? null,
+      },
+      requestId
+    );
+  } catch (err) {
+    return handleControllerError(next, err, "getBrandLiteById");
+  }
+}
+
 module.exports = {
   sendSignupOtp,
   verifyOtpSignUp,
@@ -1161,4 +1206,5 @@ module.exports = {
   verifyOtpForgotBrand,
   updatePasswordBrand,
   getBrandById,
+  getBrandLiteById,
 };
