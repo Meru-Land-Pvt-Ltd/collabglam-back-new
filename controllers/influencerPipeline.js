@@ -1268,18 +1268,27 @@ exports.getBrandPitchSheetByCampaign = async (req, res) => {
   try {
     const campaignId = cleanStr(req.query.campaignId);
     const brandId = cleanStr(req.query.brandId || req.body?.brandId);
+    const actor = req.admin || null;
+    const isAdminViewer = !!getActorAdminId(actor);
 
     if (!campaignId || !mongoose.Types.ObjectId.isValid(campaignId)) {
       return res.status(400).json({ error: 'Valid campaignId is required' });
     }
 
-    if (!brandId) {
-      return res.status(401).json({ error: 'Brand login required' });
-    }
+    if (isAdminViewer) {
+      const allowedCampaign = await ensureCampaignAccess(actor, campaignId);
+      if (!allowedCampaign) {
+        return res.status(403).json({ error: 'You are not allowed to access this pitch sheet' });
+      }
+    } else {
+      if (!brandId) {
+        return res.status(401).json({ error: 'Brand login required' });
+      }
 
-    const allowedCampaign = await ensureBrandCampaignAccess(brandId, campaignId);
-    if (!allowedCampaign) {
-      return res.status(403).json({ error: 'You are not allowed to access this pitch sheet' });
+      const allowedCampaign = await ensureBrandCampaignAccess(brandId, campaignId);
+      if (!allowedCampaign) {
+        return res.status(403).json({ error: 'You are not allowed to access this pitch sheet' });
+      }
     }
 
     const rows = await InfluencerPipeline.find({
@@ -1291,6 +1300,7 @@ exports.getBrandPitchSheetByCampaign = async (req, res) => {
 
     return res.json({
       success: true,
+      viewerType: isAdminViewer ? 'admin' : 'brand',
       data: {
         campaignId,
         items: rows.map((row) => ({
@@ -1304,7 +1314,7 @@ exports.getBrandPitchSheetByCampaign = async (req, res) => {
           country: row.country,
           additionalInfo: row.additionalInfo,
           selectionReason: row.selectionReason,
-          goodFit: row.goodFit,
+          ...(isAdminViewer ? {} : { goodFit: row.goodFit }),
           rateUsd: row.rateUsd,
           ourFeePct: row.ourFeePct,
           comments: row.comments,

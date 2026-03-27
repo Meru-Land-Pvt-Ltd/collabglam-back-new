@@ -1,4 +1,3 @@
-// models/adminEmailThread.js
 const mongoose = require("mongoose");
 
 const adminEmailThreadSchema = new mongoose.Schema(
@@ -6,6 +5,12 @@ const adminEmailThreadSchema = new mongoose.Schema(
     pipelineId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "InfluencerPipeline",
+      default: null,
+      index: true,
+    },
+    brandOutreachId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "BrandOutreach",
       default: null,
       index: true,
     },
@@ -99,6 +104,11 @@ const adminEmailThreadSchema = new mongoose.Schema(
 adminEmailThreadSchema.index(
   { pipelineId: 1 },
   { unique: true, partialFilterExpression: { pipelineId: { $type: "objectId" } } }
+);
+
+adminEmailThreadSchema.index(
+  { brandOutreachId: 1 },
+  { unique: true, partialFilterExpression: { brandOutreachId: { $type: "objectId" } } }
 );
 
 adminEmailThreadSchema.index({ executiveId: 1, recipientEmail: 1 });

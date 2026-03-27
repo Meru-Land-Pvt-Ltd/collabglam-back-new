@@ -9,6 +9,8 @@ const {
   composeManualEmailService,
   getPipelineRecipientsForComposeService,
   sendSelectedPipelineEmailsService,
+  getBrandOutreachRecipientsForComposeService,
+  sendSelectedBrandOutreachEmailsService,
 } = require("../services/adminEmail.service");
 
 function getLoggedInAdminId(req) {
@@ -267,6 +269,59 @@ async function sendSelectedPipelineEmailsController(req, res) {
   }
 }
 
+async function getBrandOutreachRecipientsForCompose(req, res) {
+  try {
+    const adminId = assertAuth(req, res);
+    if (!adminId) return;
+
+    const { brandOutreachIds } = req.body;
+
+    const result = await getBrandOutreachRecipientsForComposeService({
+      actorAdminId: adminId,
+      brandOutreachIds,
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: { items: result },
+    });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      message: error?.message || "Failed to fetch selected brand outreach recipients",
+    });
+  }
+}
+
+async function sendSelectedBrandOutreachEmailsController(req, res) {
+  try {
+    const adminId = assertAuth(req, res);
+    if (!adminId) return;
+
+    const { brandOutreachIds, subject, text, html, ownerAdminId } = req.body;
+
+    const result = await sendSelectedBrandOutreachEmailsService({
+      actorAdminId: adminId,
+      brandOutreachIds,
+      subject,
+      text,
+      html,
+      ownerAdminId,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Selected brand outreach emails sent successfully",
+      data: result,
+    });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      message: error?.message || "Failed to send selected brand outreach emails",
+    });
+  }
+}
+
 module.exports = {
   getMailboxScope,
   sendBulkCsv,
@@ -277,4 +332,6 @@ module.exports = {
   updateThread,
   getPipelineRecipientsForCompose,
   sendSelectedPipelineEmailsController,
+  getBrandOutreachRecipientsForCompose,
+  sendSelectedBrandOutreachEmailsController,
 };

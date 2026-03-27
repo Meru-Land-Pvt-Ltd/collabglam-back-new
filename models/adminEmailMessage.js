@@ -1,4 +1,3 @@
-// models/adminEmailMessage.js
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
 
@@ -13,6 +12,12 @@ const adminEmailMessageSchema = new Schema(
     pipelineId: {
       type: Schema.Types.ObjectId,
       ref: "InfluencerPipeline",
+      default: null,
+      index: true,
+    },
+    brandOutreachId: {
+      type: Schema.Types.ObjectId,
+      ref: "BrandOutreach",
       default: null,
       index: true,
     },
@@ -120,6 +125,7 @@ const adminEmailMessageSchema = new Schema(
 
 adminEmailMessageSchema.index({ threadId: 1, createdAt: 1 });
 adminEmailMessageSchema.index({ pipelineId: 1, createdAt: 1 });
+adminEmailMessageSchema.index({ brandOutreachId: 1, createdAt: 1 });
 adminEmailMessageSchema.index({ campaignId: 1, createdAt: 1 });
 
 module.exports =

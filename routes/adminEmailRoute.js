@@ -7,6 +7,8 @@ const {
   reply,
   getPipelineRecipientsForCompose,
   sendSelectedPipelineEmailsController,
+  getBrandOutreachRecipientsForCompose,
+  sendSelectedBrandOutreachEmailsController,
   getMailboxScope,
   composeEmail,
   updateThread
@@ -36,4 +38,7 @@ router.get("/templates", adminAuth, getTemplates);
 router.post("/templates", adminAuth, createTemplate);
 router.post("/templates/:templateId/update", adminAuth, updateTemplate);
 router.post("/templates/:templateId/delete", adminAuth, removeTemplate);
+
+router.post("/brand-outreach/recipients", adminAuth, getBrandOutreachRecipientsForCompose);
+router.post("/brand-outreach/send-selected", adminAuth, sendSelectedBrandOutreachEmailsController);
 module.exports = router;

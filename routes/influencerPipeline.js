@@ -4,7 +4,7 @@ const express = require('express');
 const router = express.Router();
 
 const ctrl = require('../controllers/influencerPipeline');
-const { adminAuth } = require('../middlewares/adminAuth');
+const { adminAuth, optionalAdminAuth } = require('../middlewares/adminAuth');
 
 // create / bulk actions
 router.post('/bulk-add', adminAuth, ctrl.bulkAddToOutreach);
@@ -19,7 +19,7 @@ router.post('/campaign/:campaignId/portal', adminAuth, ctrl.generatePortalLink);
 router.post('/milestones/add', adminAuth, ctrl.addMilestone);
 router.post('/move-to-roster', adminAuth, ctrl.moveToRoster);
 router.post('/create', adminAuth, ctrl.createPipelineRow);
-router.get('/brand-sheet', ctrl.getBrandPitchSheetByCampaign);
+router.get('/brand-sheet', optionalAdminAuth, ctrl.getBrandPitchSheetByCampaign);
 router.post('/brand-sheet/:id/good-fit', ctrl.updateBrandPitchGoodFit);
 router.post('/pitch/send-invitation', adminAuth, ctrl.sendCampaignInvitationFromPitch);
 // fetch

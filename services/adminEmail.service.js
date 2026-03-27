@@ -24,6 +24,7 @@ const {
   assertThreadScope,
   assertOwnerAssignable,
 } = require("../utils/adminEmailAccess");
+const { BrandOutreach } = require("../models/brandOutreach");
 
 const region = process.env.AWS_REGION || "us-east-1";
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -103,6 +104,34 @@ function parseRecipientsFromCsv(csvBuffer) {
     });
 }
 
+function buildBrandOutreachTemplate({ brandName, replyToEmail, executiveName }) {
+  const safeName = cleanStr(brandName) || "there";
+
+  return {
+    subject: "Partnership Opportunity",
+    text: `Hi ${safeName},
+
+We would love to explore a partnership opportunity with your brand.
+
+If this sounds relevant, please reply to this email and we can discuss details.
+
+Best,
+${executiveName}
+
+Reply here: ${replyToEmail}
+`,
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+        <p>Hi ${safeName},</p>
+        <p>We would love to explore a partnership opportunity with your brand.</p>
+        <p>If this sounds relevant, please reply to this email and we can discuss details.</p>
+        <p>Best,<br/>${executiveName}</p>
+        <p><b>Reply here:</b> ${replyToEmail}</p>
+      </div>
+    `,
+  };
+}
+
 function mapAdminRoleToThreadRole(role) {
   const allowedRoles = [ROLES.SUPER_ADMIN, ROLES.REVENUE_HEAD, ROLES.IME, ROLES.BME];
   if (!allowedRoles.includes(role)) throw new Error("Unsupported admin role");
@@ -155,6 +184,7 @@ async function getAdminSender(adminId) {
 
 async function createOrGetThread({
   pipelineId = null,
+  brandOutreachId = null,
   campaignId = null,
   executiveId,
   role,
@@ -167,6 +197,8 @@ async function createOrGetThread({
 
   if (pipelineId) {
     thread = await AdminEmailThreadModel.findOne({ pipelineId });
+  } else if (brandOutreachId) {
+    thread = await AdminEmailThreadModel.findOne({ brandOutreachId });
   } else {
     thread = await AdminEmailThreadModel.findOne({ executiveId, recipientEmail });
   }
@@ -174,6 +206,7 @@ async function createOrGetThread({
   if (!thread) {
     thread = await AdminEmailThreadModel.create({
       pipelineId,
+      brandOutreachId,
       campaignId,
       executiveId,
       role: mapAdminRoleToThreadRole(role),
@@ -193,13 +226,13 @@ async function createOrGetThread({
     return thread;
   }
 
-  // IMPORTANT: reassign thread owner to the current selected owner/sender
   thread.executiveId = executiveId;
   thread.role = mapAdminRoleToThreadRole(role);
   thread.senderEmail = senderEmail;
   thread.recipientEmail = recipientEmail;
   thread.subject = subject || thread.subject;
   thread.pipelineId = pipelineId || thread.pipelineId || null;
+  thread.brandOutreachId = brandOutreachId || thread.brandOutreachId || null;
   thread.campaignId = campaignId || thread.campaignId || null;
   thread.lastMessageAt = new Date();
   thread.lastMessageDirection = "OUTBOUND";
@@ -240,6 +273,7 @@ async function saveOutboundAndSend({
   const emailMessage = await AdminEmailMessageModel.create({
     threadId: thread._id,
     pipelineId: thread.pipelineId || null,
+    brandOutreachId: thread.brandOutreachId || null,
     campaignId: thread.campaignId || null,
     actorAdminId: actorAdminId || executiveId,
     ownerAdminId: executiveId,
@@ -270,6 +304,10 @@ async function saveOutboundAndSend({
     emailTags.push({ Name: "pipelineId", Value: String(thread.pipelineId) });
   }
 
+  if (thread.brandOutreachId) {
+    emailTags.push({ Name: "brandOutreachId", Value: String(thread.brandOutreachId) });
+  }
+
   if (thread.campaignId) {
     emailTags.push({ Name: "campaignId", Value: String(thread.campaignId) });
   }
@@ -297,6 +335,7 @@ async function saveOutboundAndSend({
       executiveId: String(executiveId),
       actorAdminId: String(actorAdminId || executiveId),
       pipelineId: thread.pipelineId ? String(thread.pipelineId) : null,
+      brandOutreachId: thread.brandOutreachId ? String(thread.brandOutreachId) : null,
       campaignId: thread.campaignId ? String(thread.campaignId) : null,
       to,
       cc,
@@ -338,7 +377,6 @@ async function saveOutboundAndSend({
     }
   );
 
-  // CENTRAL PIPELINE UPDATE
   if (thread.pipelineId) {
     try {
       const outboundCount = await AdminEmailMessageModel.countDocuments({
@@ -374,6 +412,46 @@ async function saveOutboundAndSend({
     }
   }
 
+  if (thread.brandOutreachId) {
+    try {
+      const outboundCount = await AdminEmailMessageModel.countDocuments({
+        threadId: thread._id,
+        direction: "OUTBOUND",
+      });
+
+      const brandUpdate = {
+        updatedByAdmin: executiveId,
+        dateLastContact: new Date(),
+      };
+
+      if (outboundCount >= 1) {
+        brandUpdate.outreached = true;
+      }
+
+      if (outboundCount >= 2) {
+        brandUpdate.followUp1 = true;
+        brandUpdate.followUp1SentAt = new Date();
+      }
+
+      if (outboundCount >= 3) {
+        brandUpdate.followUp2 = true;
+        brandUpdate.followUp2SentAt = new Date();
+      }
+
+      if (outboundCount >= 4) {
+        brandUpdate.followUp3 = true;
+        brandUpdate.followUp3SentAt = new Date();
+      }
+
+      await BrandOutreach.updateOne(
+        { _id: thread.brandOutreachId },
+        { $set: brandUpdate }
+      );
+    } catch (error) {
+      console.error("Brand outreach update after email send failed:", error?.message || error);
+    }
+  }
+
   return {
     threadId: String(thread._id),
     emailMessageId: String(emailMessage._id),
@@ -381,6 +459,235 @@ async function saveOutboundAndSend({
     replyToEmail: thread.replyToEmail,
     s3Key,
   };
+}
+
+async function sendSelectedBrandOutreachEmailsService({
+  actorAdminId,
+  brandOutreachIds,
+  subject,
+  text,
+  html,
+  ownerAdminId = null,
+}) {
+  await getActorAdmin(actorAdminId);
+
+  const targetOwnerId = ownerAdminId
+    ? await assertOwnerAssignable(actorAdminId, ownerAdminId)
+    : toObjectIdStrict(actorAdminId, "actorAdminId");
+
+  const { adminId: execObj, admin, from, executiveName } = await getAdminSender(targetOwnerId);
+
+  const validIds = Array.isArray(brandOutreachIds)
+    ? brandOutreachIds.map((id) => cleanStr(id)).filter((id) => mongoose.Types.ObjectId.isValid(id))
+    : [];
+
+  if (!validIds.length) throw new Error("brandOutreachIds are required");
+
+  const rows = await BrandOutreach.find({
+    _id: { $in: validIds },
+  }).lean();
+
+  if (!rows.length) throw new Error("No valid brand outreach rows found");
+
+  const finalSubject = cleanStr(subject) || "Partnership Opportunity";
+  const results = [];
+
+  for (const row of rows) {
+    try {
+      const to = cleanEmail(row.emailOfPerson);
+      if (!to || !isValidEmail(to)) {
+        results.push({
+          brandOutreachId: String(row._id),
+          email: row.emailOfPerson || "",
+          name: row.brandName || "",
+          success: false,
+          error: "Valid email missing",
+        });
+        continue;
+      }
+
+      const recipientName = cleanStr(row.brandName) || "there";
+
+      const thread = await createOrGetThread({
+        brandOutreachId: row._id,
+        executiveId: execObj,
+        role: admin.role,
+        senderEmail: from,
+        recipientEmail: to,
+        subject: finalSubject,
+        actorAdminId,
+      });
+
+      let finalText = text;
+      let finalHtml = html;
+      let finalEmailSubject = finalSubject;
+
+      if (!finalText && !finalHtml) {
+        const templ = buildBrandOutreachTemplate({
+          brandName: recipientName,
+          replyToEmail: thread.replyToEmail,
+          executiveName,
+        });
+
+        finalText = templ.text;
+        finalHtml = templ.html;
+        finalEmailSubject = templ.subject || finalSubject;
+      }
+
+      const sent = await saveOutboundAndSend({
+        thread,
+        to,
+        from,
+        subject: finalEmailSubject,
+        text: finalText,
+        html: finalHtml,
+        executiveId: execObj,
+        actorAdminId,
+        meta: {
+          source: "BRAND_OUTREACH_SELECTION",
+          recipientName,
+          role: admin.role,
+          brandOutreachId: String(row._id),
+        },
+      });
+
+      results.push({
+        brandOutreachId: String(row._id),
+        email: to,
+        name: recipientName,
+        success: true,
+        ...sent,
+      });
+    } catch (error) {
+      results.push({
+        brandOutreachId: String(row._id),
+        email: row.emailOfPerson || "",
+        name: row.brandName || "",
+        success: false,
+        error: error?.message || "Failed",
+      });
+    }
+  }
+
+  return {
+    total: results.length,
+    sent: results.filter((r) => r.success).length,
+    failed: results.filter((r) => !r.success).length,
+    results,
+  };
+}
+
+async function getBrandThreadConversationState({
+  brandOutreachId = null,
+  recipientEmail = null,
+  actorAdminId,
+}) {
+  const email = cleanEmail(recipientEmail);
+
+  const emptyState = {
+    threadId: null,
+    outboundCount: 0,
+    outreachSentAt: null,
+    followUp1SentAt: null,
+    followUp2SentAt: null,
+    followUp3SentAt: null,
+    replyChecked: false,
+    repliedAt: null,
+    replyText: "",
+  };
+
+  const scope = await getActorScope(actorAdminId);
+
+  let thread = null;
+
+  if (brandOutreachId) {
+    const rowObj = toObjectIdStrict(brandOutreachId, "brandOutreachId");
+
+    const filter = { brandOutreachId: rowObj };
+    if (scope.adminIds !== null) {
+      filter.executiveId = { $in: scope.adminIds };
+    }
+
+    thread = await AdminEmailThreadModel.findOne(filter)
+      .sort({ lastMessageAt: -1 })
+      .lean();
+  }
+
+  if (!thread && email) {
+    const filter = { recipientEmail: email };
+    if (scope.adminIds !== null) {
+      filter.executiveId = { $in: scope.adminIds };
+    }
+
+    thread = await AdminEmailThreadModel.findOne(filter)
+      .sort({ lastMessageAt: -1 })
+      .lean();
+  }
+
+  if (!thread) return emptyState;
+
+  const messages = await AdminEmailMessageModel.find({ threadId: thread._id })
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const outbound = messages.filter((m) => m.direction === "OUTBOUND");
+  const inbound = messages.filter((m) => m.direction === "INBOUND");
+  const firstInbound = inbound[0] || null;
+
+  return {
+    threadId: String(thread._id),
+    outboundCount: outbound.length,
+    outreachSentAt: outbound[0]?.createdAt || null,
+    followUp1SentAt: outbound[1]?.createdAt || null,
+    followUp2SentAt: outbound[2]?.createdAt || null,
+    followUp3SentAt: outbound[3]?.createdAt || null,
+    replyChecked: !!firstInbound,
+    repliedAt: firstInbound?.createdAt || null,
+    replyText: cleanStr(firstInbound?.textPreview || firstInbound?.htmlPreview),
+  };
+}
+
+async function getBrandOutreachRecipientsForComposeService({
+  actorAdminId,
+  brandOutreachIds,
+}) {
+  await getActorAdmin(actorAdminId);
+
+  const validIds = Array.isArray(brandOutreachIds)
+    ? brandOutreachIds.map((id) => cleanStr(id)).filter((id) => mongoose.Types.ObjectId.isValid(id))
+    : [];
+
+  if (!validIds.length) throw new Error("brandOutreachIds are required");
+
+  const rows = await BrandOutreach.find({
+    _id: { $in: validIds },
+  }).lean();
+
+  const rowObjectIds = rows.map((row) => row._id);
+  const threads = await AdminEmailThreadModel.find({
+    brandOutreachId: { $in: rowObjectIds },
+  })
+    .select("brandOutreachId replyToEmail _id")
+    .lean();
+
+  const threadByRowId = new Map(
+    threads.map((item) => [String(item.brandOutreachId), item])
+  );
+
+  return rows
+    .filter((row) => cleanEmail(row.emailOfPerson))
+    .map((row) => {
+      const thread = threadByRowId.get(String(row._id));
+      return {
+        brandOutreachId: String(row._id),
+        name: cleanStr(row.brandName) || cleanStr(row.emailOfPerson),
+        email: cleanEmail(row.emailOfPerson),
+        website: cleanStr(row.website),
+        status: row.moveToNetwork ? "network" : "outreach",
+        threadId: thread?._id ? String(thread._id) : null,
+        replyToEmail: thread?.replyToEmail || null,
+      };
+    });
 }
 
 async function getMailboxScopeService({ actorAdminId }) {
@@ -977,5 +1284,8 @@ module.exports = {
   composeManualEmailService,
   getPipelineRecipientsForComposeService,
   sendSelectedPipelineEmailsService,
-  getThreadConversationState
+  getThreadConversationState,
+  getBrandOutreachRecipientsForComposeService,
+  sendSelectedBrandOutreachEmailsService,
+  getBrandThreadConversationState,
 };

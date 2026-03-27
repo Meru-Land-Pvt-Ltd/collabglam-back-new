@@ -8,6 +8,59 @@ function normalizeKey(value) {
     .replace(/\s+/g, "_");
 }
 
+async function optionalAdminAuth(req, res, next) {
+  try {
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : null;
+
+    if (!token) {
+      req.admin = null;
+      return next();
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    const admin = await AdminModel.findById(decoded.adminId || decoded.id).select(
+      "email name role status access proxyEmail parentAdmin rootAdmin"
+    );
+
+    if (!admin) {
+      req.admin = null;
+      return next();
+    }
+
+    req.admin = {
+      _id: String(admin._id),
+      adminId: String(admin._id),
+      email: admin.email || decoded.email,
+      name: admin.name || "",
+      proxyEmail: admin.proxyEmail || "",
+      role: String(admin.role || "").trim().toLowerCase(),
+      status: String(admin.status || "").toLowerCase(),
+      parentAdmin: admin.parentAdmin ? String(admin.parentAdmin) : null,
+      rootAdmin: admin.rootAdmin ? String(admin.rootAdmin) : null,
+      access: Array.isArray(admin.access)
+        ? admin.access.map((a) => ({
+            key: normalizeKey(a?.key),
+            name: a?.name ? String(a.name) : undefined,
+            isEdit: Boolean(a?.isEdit),
+            isDelete: Boolean(a?.isDelete),
+            isManager: Boolean(a?.isManager),
+          }))
+        : [],
+      iat: decoded.iat,
+      exp: decoded.exp,
+    };
+
+    return next();
+  } catch (err) {
+    req.admin = null;
+    return next();
+  }
+}
+
 async function adminAuth(req, res, next) {
   try {
     const header = req.headers.authorization;
@@ -94,4 +147,5 @@ async function adminAuth(req, res, next) {
 
 module.exports = {
   adminAuth,
+  optionalAdminAuth
 };

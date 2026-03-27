@@ -259,8 +259,8 @@ async function enrichBrandsWithAssignments(brandDocs = []) {
 
   const assignees = uniqueAssigneeIds.length
     ? await ASSIGNEE_MODEL.find({ _id: { $in: uniqueAssigneeIds } })
-        .select("_id name email")
-        .lean()
+      .select("_id name email")
+      .lean()
     : [];
 
   const assigneeMap = {};
@@ -299,6 +299,109 @@ async function enrichBrandsWithAssignments(brandDocs = []) {
       idmId: assignment?.idmId || null,
     };
   });
+}
+
+async function getScopedCampaignBrandKeysForAdmin(actor = {}) {
+  const scopedBrandObjectIds = await getScopedBrandIdsForAdmin(actor);
+
+  // super admin => no restriction
+  if (scopedBrandObjectIds === null) return null;
+
+  // BME / IME / RH with nothing assigned => no campaigns
+  if (!Array.isArray(scopedBrandObjectIds) || !scopedBrandObjectIds.length) {
+    return [];
+  }
+
+  const brands = await Brand.find({
+    _id: { $in: scopedBrandObjectIds },
+  })
+    .select("_id brandId")
+    .lean();
+
+  const keys = new Set();
+
+  for (const brand of brands) {
+    if (brand?._id) keys.add(String(brand._id));
+    if (brand?.brandId) keys.add(String(brand.brandId));
+  }
+
+  return [...keys];
+}
+
+function getCampaignSortField(sortBy) {
+  const map = {
+    campaignTitle: "campaignTitle",
+    name: "campaignTitle",
+    goal: "goal",
+    startDate: "timeline.startDate",
+    endDate: "timeline.endDate",
+    budget: "budget",
+    applicantCount: "applicantCount",
+    isActive: "isActive",
+    createdAt: "createdAt",
+  };
+
+  return map[sortBy] || "createdAt";
+}
+
+function buildCampaignBaseFilter({ search, statusFlag, brandKeys, requestedBrandId }) {
+  const filter = {};
+
+  if (Array.isArray(brandKeys)) {
+    if (!brandKeys.length) {
+      filter.brandId = { $in: [] };
+      return filter;
+    }
+
+    filter.brandId = { $in: brandKeys };
+  }
+
+  if (requestedBrandId) {
+    const requested = String(requestedBrandId).trim();
+
+    if (filter.brandId?.$in) {
+      if (!filter.brandId.$in.includes(requested)) {
+        filter.brandId = { $in: [] };
+        return filter;
+      }
+      filter.brandId = requested;
+    } else {
+      filter.brandId = requested;
+    }
+  }
+
+  if (statusFlag === 1) filter.isActive = 1;
+  if (statusFlag === 2) filter.isActive = 0;
+
+  const re = safeRegex(search);
+  if (re) {
+    filter.$or = [
+      { campaignTitle: re },
+      { productOrServiceName: re },
+      { brandName: re },
+      { description: re },
+      { goal: re },
+    ];
+  }
+
+  return filter;
+}
+
+function toCampaignSummary(doc = {}) {
+  return {
+    _id: doc._id,
+    brandId: doc.brandId || "",
+    campaignId: doc.campaignsId || String(doc._id || ""),
+    name: doc.campaignTitle || doc.productOrServiceName || "—",
+    startDate: doc.timeline?.startDate || null,
+    endDate: doc.timeline?.endDate || null,
+    budget: Number(doc.budget || 0),
+    goal: doc.goal || "",
+    applicantCount: Number(doc.applicantCount || 0),
+    isActive: Number(doc.isActive || 0),
+    isDraft: Number(doc.isDraft || 0),
+    campaignStatus: doc.campaignStatus || "",
+  };
 }
 
 exports.adminAssignBrandPlan = async (req, res) => {
@@ -468,26 +571,64 @@ exports.verifyAdminToken = (req, res, next) => {
   });
 };
 
+async function resolveActorFromMaster(actor = {}) {
+  let adminId = String(actor?.adminId || actor?._id || "").trim();
+  let email = String(actor?.email || "").trim().toLowerCase();
+  let role = String(actor?.role || "").trim().toLowerCase();
+
+  const validRoles = new Set(Object.values(ROLES));
+
+  const mustResolve =
+    !adminId ||
+    !isObjectId(adminId) ||
+    !role ||
+    !validRoles.has(role);
+
+  if (!mustResolve) {
+    return { adminId, email, role };
+  }
+
+  const or = [];
+  if (isObjectId(adminId)) or.push({ _id: toObjectId(adminId) });
+  if (email) or.push({ email });
+
+  if (!or.length) {
+    return { adminId: "", email, role: "" };
+  }
+
+  const masterAdmin = await AdminModel.findOne({ $or: or })
+    .select("_id email role parentAdmin rootAdmin")
+    .lean();
+
+  if (!masterAdmin) {
+    return { adminId: "", email, role: "" };
+  }
+
+  return {
+    adminId: String(masterAdmin._id),
+    email: String(masterAdmin.email || "").toLowerCase(),
+    role: String(masterAdmin.role || "").trim().toLowerCase(),
+  };
+}
+
 async function getScopedBrandIdsForAdmin(actor = {}) {
   const role = String(actor?.role || "").trim().toLowerCase();
   const adminId = String(actor?.adminId || actor?._id || "").trim();
 
-  // fail closed
   if (!adminId) return [];
 
-  if (role === ROLES.SUPER_ADMIN) {
-    return null; // all brands
+  // both super_admin and revenue_head can see all brands
+  if (role === ROLES.SUPER_ADMIN || role === ROLES.REVENUE_HEAD) {
+    return null;
   }
 
   const roleToField = {
-    [ROLES.REVENUE_HEAD]: "RHId",
     [ROLES.BME]: "bdmId",
     [ROLES.IME]: "idmId",
   };
 
   const assignmentField = roleToField[role];
 
-  // unknown role should see nothing
   if (!assignmentField) {
     return [];
   }
@@ -550,24 +691,24 @@ exports.getAllBrands = async (req, res) => {
 
     const filtered = re
       ? enrichedBrands.filter((brand) =>
-          [
-            brand.name,
-            brand.brandName,
-            brand.email,
-            brand.phone,
-            brand.callingcode,
-            brand.companySize,
-            brand.industry,
-            brand.planName,
-            brand.status,
-            brand.assignedRh,
-            brand.assignedRm,
-            brand.assignedBme,
-            brand.assignedBm,
-            brand.assignedIme,
-            brand.assignedIm,
-          ].some((value) => re.test(String(value || "")))
-        )
+        [
+          brand.name,
+          brand.brandName,
+          brand.email,
+          brand.phone,
+          brand.callingcode,
+          brand.companySize,
+          brand.industry,
+          brand.planName,
+          brand.status,
+          brand.assignedRh,
+          brand.assignedRm,
+          brand.assignedBme,
+          brand.assignedBm,
+          brand.assignedIme,
+          brand.assignedIm,
+        ].some((value) => re.test(String(value || "")))
+      )
       : enrichedBrands;
 
     const allowedSortFields = new Set([
@@ -666,35 +807,26 @@ exports.getAllCampaigns = async (req, res) => {
     const sortBy = String(req.body?.sortBy || "createdAt").trim();
     const sortOrder = normalizeSortOrder(req.body?.sortOrder, "desc");
     const statusFlag = Number.parseInt(req.body?.type, 10) || 0;
+    const brandId = String(req.body?.brandId || "").trim();
 
-    const filter = {};
-    const re = safeRegex(search);
+    const actor = req.admin || {};
+    const visibleBrandKeys = await getScopedCampaignBrandKeysForAdmin(actor);
 
-    if (re) {
-      filter.$or = [
-        { brandName: re },
-        { productOrServiceName: re },
-        { description: re },
-      ];
-    }
+    const filter = buildCampaignBaseFilter({
+      search,
+      statusFlag,
+      brandKeys: visibleBrandKeys,
+      requestedBrandId: brandId,
+    });
 
-    if (statusFlag === 1) filter.isActive = 1;
-    if (statusFlag === 2) filter.isActive = 0;
+    const field = getCampaignSortField(sortBy);
+    const dir = sortOrder === "asc" ? 1 : -1;
 
     const total = await Campaign.countDocuments(filter);
-    const allowedSortFields = new Set([
-      "brandName",
-      "productOrServiceName",
-      "createdAt",
-      "timeline.startDate",
-      "timeline.endDate",
-    ]);
-    const field = allowedSortFields.has(sortBy) ? sortBy : "createdAt";
-    const dir = sortOrder === "asc" ? 1 : -1;
 
     const campaigns = await Campaign.find(filter)
       .select("-__v")
-      .sort({ [field]: dir })
+      .sort({ [field]: dir, createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit)
       .lean();
@@ -703,8 +835,10 @@ exports.getAllCampaigns = async (req, res) => {
       page,
       limit,
       total,
-      totalPages: Math.ceil(total / limit),
+      totalPages: Math.max(1, Math.ceil(total / limit)),
       status: statusFlag,
+      sortBy,
+      sortOrder,
       campaigns,
     });
   } catch (error) {
@@ -789,13 +923,36 @@ exports.getByInfluencerId = async (req, res) => {
 
 exports.getCampaignById = async (req, res) => {
   try {
-    const campaignsId = String(req.query?.id || "").trim();
+    const id = String(
+      req.query?.id || req.body?.campaignId || req.body?._id || ""
+    ).trim();
 
-    if (!campaignsId) {
-      return res.status(400).json({ message: "Query parameter id (campaignsId) is required." });
+    if (!id) {
+      return res.status(400).json({
+        message: "Query parameter id or body campaignId is required.",
+      });
     }
 
-    const campaign = await Campaign.findOne({ campaignsId }).populate("interestId", "name");
+    const actor = req.admin || {};
+    const visibleBrandKeys = await getScopedCampaignBrandKeysForAdmin(actor);
+
+    const filter = {
+      $or: [{ campaignsId: id }],
+    };
+
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      filter.$or.push({ _id: new mongoose.Types.ObjectId(id) });
+    }
+
+    if (Array.isArray(visibleBrandKeys)) {
+      if (!visibleBrandKeys.length) {
+        return res.status(404).json({ message: "Campaign not found." });
+      }
+      filter.brandId = { $in: visibleBrandKeys };
+    }
+
+    const campaign = await Campaign.findOne(filter).lean();
+
     if (!campaign) {
       return res.status(404).json({ message: "Campaign not found." });
     }
@@ -803,7 +960,9 @@ exports.getCampaignById = async (req, res) => {
     return res.json(campaign);
   } catch (error) {
     console.error("Error in getCampaignById:", error);
-    return res.status(500).json({ message: "Internal server error while fetching campaign." });
+    return res.status(500).json({
+      message: "Internal server error while fetching campaign.",
+    });
   }
 };
 
@@ -1434,38 +1593,48 @@ exports.getAllPayments = async (req, res) => {
 
 exports.getAllCampaignsLite = async (req, res) => {
   try {
+    const page = parsePositiveInt(req.body?.page, 1);
+    const limit = parsePositiveInt(req.body?.limit, 10);
     const search = String(req.body?.search || "").trim();
+    const sortBy = String(req.body?.sortBy || "createdAt").trim();
+    const sortOrder = normalizeSortOrder(req.body?.sortOrder, "desc");
     const statusFlag = Number.parseInt(req.body?.type, 10) || 0;
-    const brandId = String(req.body?.brandId ?? req.body?.brand_id ?? req.body?.brand ?? "").trim();
+    const brandId = String(req.body?.brandId || "").trim();
 
-    const filter = {};
+    const actor = req.admin || {};
+    const visibleBrandKeys = await getScopedCampaignBrandKeysForAdmin(actor);
 
-    if (brandId) {
-      filter.brandId = brandId;
-    }
+    const filter = buildCampaignBaseFilter({
+      search,
+      statusFlag,
+      brandKeys: visibleBrandKeys,
+      requestedBrandId: brandId,
+    });
 
-    if (search) {
-      filter.productOrServiceName = safeRegex(search);
-    }
+    const field = getCampaignSortField(sortBy);
+    const dir = sortOrder === "asc" ? 1 : -1;
 
-    if (statusFlag === 1) filter.isActive = 1;
-    if (statusFlag === 2) filter.isActive = 0;
+    const total = await Campaign.countDocuments(filter);
 
     const rows = await Campaign.find(filter)
-      .select("brandId campaignsId productOrServiceName")
-      .sort({ createdAt: -1 })
+      .select(
+        "_id brandId campaignsId campaignTitle productOrServiceName goal budget applicantCount isActive isDraft campaignStatus timeline.startDate timeline.endDate createdAt"
+      )
+      .sort({ [field]: dir, createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
       .lean();
 
-    const campaigns = rows.map((campaign) => ({
-      brandId: campaign.brandId,
-      campaignsId: campaign.campaignsId || null,
-      productOrServiceName: campaign.productOrServiceName,
-    }));
+    const campaigns = rows.map(toCampaignSummary);
 
     return res.status(200).json({
+      page,
+      limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
       status: statusFlag,
-      brandId: brandId || null,
-      total: campaigns.length,
+      sortBy,
+      sortOrder,
       campaigns,
     });
   } catch (error) {

@@ -1,46 +1,64 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const { login, getAllBrands, getList, getAllCampaigns, getBrandById,
-  getByInfluencerId, getCampaignById, getCampaignsByBrandId, adminGetInfluencerById,
-  adminGetInfluencerList, adminAddYouTubeEmail, listMissingEmail, updateMissingEmail, checkMissingEmailByHandle,
-  getAllPayments, adminAssignBrandPlan, adminAssignInfluencerPlan, getAllCampaignsLite
-} = require('../controllers/adminController');
+
+const {
+  login,
+  getAllBrands,
+  getList,
+  getAllCampaigns,
+  getAllCampaignsLite,
+  getBrandById,
+  getByInfluencerId,
+  getCampaignById,
+  getCampaignsByBrandId,
+  adminGetInfluencerById,
+  adminGetInfluencerList,
+  adminAddYouTubeEmail,
+  listMissingEmail,
+  updateMissingEmail,
+  checkMissingEmailByHandle,
+  getAllPayments,
+  adminAssignBrandPlan,
+  adminAssignInfluencerPlan,
+} = require("../controllers/adminController");
+
 const { adminAuth } = require("../middlewares/adminAuth");
 
 const {
   adminListPayouts,
-  adminMarkMilestonePaid
-} = require('../controllers/milestoneController');
+  adminMarkMilestonePaid,
+} = require("../controllers/milestoneController");
 
-// POST /admin/create
-router.post('/login', login);
-router.post('/brand/getlist', adminAuth, getAllBrands);
-router.post('/influencer/getlist', getList);
-router.post('/campaign/getlist', adminAuth, getAllCampaigns);
-router.post('/campaign/lite', adminAuth, getAllCampaignsLite);
+router.post("/login", login);
 
+router.post("/brand/getlist", adminAuth, getAllBrands);
+router.post("/influencer/getlist", adminAuth, getList);
 
-// GET /admin/brand/getById
-router.get('/brand/getById', adminAuth, getBrandById);
-router.get('/influencer/getById', getByInfluencerId);
-router.get('/campaign/getById', getCampaignById);
-router.post('/campaign/getByBrandId', adminAuth, getCampaignsByBrandId);
+// full campaign payload, but now scoped
+router.post("/campaign/getlist", adminAuth, getAllCampaigns);
 
-router.get('/influencer/byId', adminGetInfluencerById);
-router.post('/influencer/list', adminGetInfluencerList);
+// fast summary payload for listing page
+router.post("/campaign/lite", adminAuth, getAllCampaignsLite);
 
-router.post('/milestone/payout', adminListPayouts);
-router.post('/milestone/update', adminMarkMilestonePaid);
+router.get("/brand/getById", adminAuth, getBrandById);
+router.get("/influencer/getById", adminAuth, getByInfluencerId);
+router.get("/campaign/getById", adminAuth, getCampaignById);
+router.post("/campaign/getByBrandId", adminAuth, getCampaignsByBrandId);
 
-router.post('/addYouTubeEmail', adminAddYouTubeEmail);
+router.get("/influencer/byId", adminAuth, adminGetInfluencerById);
+router.post("/influencer/list", adminAuth, adminGetInfluencerList);
 
-router.post('/listMissingEmail', listMissingEmail);
-router.post('/updateMissingEmail', updateMissingEmail);
-router.post('/checkstatus', checkMissingEmailByHandle);
+router.post("/milestone/payout", adminAuth, adminListPayouts);
+router.post("/milestone/update", adminAuth, adminMarkMilestonePaid);
 
-router.post('/getpayments', getAllPayments);
+router.post("/addYouTubeEmail", adminAuth, adminAddYouTubeEmail);
+router.post("/listMissingEmail", adminAuth, listMissingEmail);
+router.post("/updateMissingEmail", adminAuth, updateMissingEmail);
+router.post("/checkstatus", adminAuth, checkMissingEmailByHandle);
 
-router.post('/assignBrandPlan', adminAssignBrandPlan);
-router.post('/assignInfluencerPlan', adminAssignInfluencerPlan);
+router.post("/getpayments", adminAuth, getAllPayments);
+
+router.post("/assignBrandPlan", adminAuth, adminAssignBrandPlan);
+router.post("/assignInfluencerPlan", adminAuth, adminAssignInfluencerPlan);
 
 module.exports = router;
