@@ -9,6 +9,7 @@ const  brandOrInfluencerAuth  = require("../auth/brandOrInfluencerAuth");
 
 // 1. Create a new campaign
 router.post("/create", verifyBrandOrAdmin, campaignController.createCampaign);
+router.post("/create-ai", campaignController.prefillCampaignWithAI);
 
 // 2. Edit manual campaign
 router.put("/update-manual", brandAuth, campaignController.updateManualCampaign);

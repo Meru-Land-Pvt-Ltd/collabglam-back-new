@@ -1646,26 +1646,27 @@ exports.createCampaign = async (req, res) => {
 // ===============================
 const buildAIPrompt = (ui) => `
 You are an expert campaign strategist for influencer marketing.
-Return only valid JSON.
+Your job: infer missing MANUAL form fields from the given Please Fill the Required Fields.
 
 STRICT RULES:
-- Output MUST be ONLY valid JSON.
-- DO NOT change source IDs.
-- For ID fields use IDs only from allowedOptions.
-- Always include all keys.
+- Output MUST be ONLY valid JSON (no markdown, no explanations).
+- DO NOT change any source IDs (categoryId, subcategoryIds, targetCountryIds, targetAgeRanges).
+- For fields that require IDs, you MUST pick IDs ONLY from allowedOptions lists.
+- Always include ALL JSON keys listed in "Output JSON keys".
+- If unsure, pick reasonable defaults.
 
-REQUIRED:
-- campaignGoals
-- influencerTierIds
-- contentFormats
-- platformSelection
-- paymentType
-- campaignBudget
-- numberOfInfluencers
-- startAt
-- endAt
+REQUIRED MANUAL FIELDS TO FILL:
+- campaignGoals (>=1)
+- influencerTierIds (>=1)
+- contentFormats (>=1)
+- platformSelection (>=1) only from: youtube, instagram, tiktok
+- paymentType one of: Milestone, Fixed, Gifting
+- campaignBudget >= 0 (integer)
+- numberOfInfluencers >= 1 (integer)
+- startAt / endAt: ISO local datetime WITHOUT timezone offset. Example: "2026-02-04T09:00"
+  Ensure endAt > startAt. Prefer startAt tomorrow 09:00 and endAt 7-14 days later.
 
-OPTIONAL:
+OPTIONAL FIELDS (may be empty):
 - minFollowers
 - maxFollowers
 - contentLanguageIds
@@ -1673,7 +1674,11 @@ OPTIONAL:
 - additionalNotes
 - campaignType
 
-OUTPUT KEYS:
+DESCRIPTION ENHANCEMENT:
+- Create an improved, brand-friendly, clear, polished "enhancedDescription" using the source description.
+- Keep it concise, structured, and suitable for influencers.
+
+Output JSON keys (ALL of these must exist, even if empty arrays/blank strings):
 enhancedTitle,
 enhancedDescription,
 campaignGoals,
@@ -4386,6 +4391,21 @@ exports.getCampaignsByBrandId = async (req, res) => {
 
     const tz = getCampaignTimezone(req.body);
     const nowUtc = DateTime.utc();
+    
+    await Campaign.updateMany(
+      {
+        brandId: toObjectId(brandId),
+        status: "scheduled",
+        scheduledAt: { $lte: nowUtc.toJSDate() },
+      },
+      {
+        $set: {
+          status: "active",
+          isActive: 1,
+          publishedAt: nowUtc.toJSDate(),
+        },
+      }
+    );
 
     const page = clampInt(req.body.page, 1, 1, 1000000);
     const limit = clampInt(req.body.limit, 20, 1, 200);
@@ -4588,14 +4608,42 @@ exports.getCampaignsByBrandId = async (req, res) => {
         return { unit: "expired", value: 0, text: expiredText };
       }
 
+      const totalSeconds = Math.floor(diffMs / 1000);
+      const totalMinutes = Math.floor(diffMs / (1000 * 60));
       const totalHours = Math.floor(diffMs / (1000 * 60 * 60));
       const totalDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
-      if (totalHours < 24) {
-        return { unit: "hours", value: totalHours, text: `${totalHours}h left` };
+      if (totalSeconds < 60) {
+        return {
+          unit: "seconds",
+          value: totalSeconds,
+          text: `${totalSeconds}s left`,
+        };
       }
 
-      return { unit: "days", value: totalDays, text: `${totalDays}d left` };
+      if (totalMinutes < 60) {
+        const seconds = totalSeconds % 60;
+        return {
+          unit: "minutes",
+          value: totalMinutes,
+          text: seconds > 0 ? `${totalMinutes}m ${seconds}s left` : `${totalMinutes}m left`,
+        };
+      }
+
+      if (totalHours < 24) {
+        const minutes = totalMinutes % 60;
+        return {
+          unit: "hours",
+          value: totalHours,
+          text: minutes > 0 ? `${totalHours}h ${minutes}m left` : `${totalHours}h left`,
+        };
+      }
+
+      return {
+        unit: "days",
+        value: totalDays,
+        text: `${totalDays}d left`,
+      };
     };
 
     // ---------------- Build filter ----------------
@@ -4789,57 +4837,81 @@ exports.getCampaignsByBrandId = async (req, res) => {
     );
 
     // ---------------- Build response ----------------
-    const out = items.map((c) => {
-      const cid = String(c._id);
-      const cat = isOid(String(c.categoryId || "")) ? catMap.get(String(c.categoryId)) : null;
-      const contractStats = contractMap.get(cid) || {
-        contractsCount: 0,
-        acceptedCount: 0,
-        assignedCount: 0,
-      };
+    const out = items
+      .map((c) => {
+        const cid = String(c._id);
+        const cat = isOid(String(c.categoryId || "")) ? catMap.get(String(c.categoryId)) : null;
+        const contractStats = contractMap.get(cid) || {
+          contractsCount: 0,
+          acceptedCount: 0,
+          assignedCount: 0,
+        };
 
-      return {
-        campaignId: cid,
-        campaignTitle: clean(c.campaignTitle),
-        status: c.status,
-
-        createdAt: c.createdAt ?? null,
-        updatedAt: c.updatedAt ?? null,
-        publishedAt: c.publishedAt ?? null,
-        scheduledAt: c.scheduledAt ?? null,
-        startAt: c.startAt ?? null,
-        endAt: c.endAt ?? null,
-
-        category: cat
-          ? { id: String(cat._id), name: String(cat.name || "") }
-          : null,
-
-        numberOfInfluencers:
-          typeof c.numberOfInfluencers === "number" ? c.numberOfInfluencers : null,
-
-        campaignBudget:
-          typeof c.campaignBudget === "number" ? c.campaignBudget : 0,
-
-        contractsCount: contractStats.contractsCount,
-        acceptedContracts: contractStats.acceptedCount,
-        assignedContracts: contractStats.assignedCount,
-
-        expireIn: timeRemaining(c.endAt || null, nowUtc, "Expired"),
-        scheduleIn:
+        const expireIn = timeRemaining(c.endAt || null, nowUtc, "Expired");
+        const rawScheduleIn =
           c.status === "scheduled"
             ? timeRemaining(c.scheduledAt || null, nowUtc, "Expired")
-            : { unit: null, value: null, text: null },
+            : { unit: null, value: null, text: null };
 
-        startIn: timeRemaining(c.startAt || null, nowUtc, "Started"),
+        const scheduledJustExpired =
+          c.status === "scheduled" &&
+          rawScheduleIn &&
+          rawScheduleIn.unit === "expired" &&
+          Number(rawScheduleIn.value) === 0;
 
-        platformSelection: Array.isArray(c.platformSelection) ? c.platformSelection : [],
-        productImages: Array.isArray(c.productImages) ? c.productImages : [],
+        const effectiveStatus = scheduledJustExpired ? "active" : c.status;
 
-        byAi: Number(c.byAi || 0),
-        isActive: Number(c.isActive || 0),
-        isDraft: Number(c.isDraft || 0),
-      };
-    });
+        const scheduleIn = scheduledJustExpired
+          ? { unit: null, value: null, text: null }
+          : rawScheduleIn;
+
+        const startIn = scheduledJustExpired
+          ? { unit: null, value: null, text: null }
+          : timeRemaining(c.startAt || null, nowUtc, "Started");
+
+        return {
+          campaignId: cid,
+          campaignTitle: clean(c.campaignTitle),
+          status: effectiveStatus,
+
+          createdAt: c.createdAt ?? null,
+          updatedAt: c.updatedAt ?? null,
+          publishedAt: scheduledJustExpired ? (c.scheduledAt ?? c.publishedAt ?? null) : (c.publishedAt ?? null),
+          scheduledAt: c.scheduledAt ?? null,
+          startAt: c.startAt ?? null,
+          endAt: c.endAt ?? null,
+
+          category: cat
+            ? { id: String(cat._id), name: String(cat.name || "") }
+            : null,
+
+          numberOfInfluencers:
+            typeof c.numberOfInfluencers === "number" ? c.numberOfInfluencers : null,
+
+          campaignBudget:
+            typeof c.campaignBudget === "number" ? c.campaignBudget : 0,
+
+          contractsCount: contractStats.contractsCount,
+          acceptedContracts: contractStats.acceptedCount,
+          assignedContracts: contractStats.assignedCount,
+
+          expireIn,
+          scheduleIn,
+          startIn,
+
+          platformSelection: Array.isArray(c.platformSelection) ? c.platformSelection : [],
+          productImages: Array.isArray(c.productImages) ? c.productImages : [],
+
+          byAi: Number(c.byAi || 0),
+          isActive: scheduledJustExpired ? 1 : Number(c.isActive || 0),
+          isDraft: Number(c.isDraft || 0),
+        };
+      })
+      .filter((item) => {
+        const requestedStatus = clean(req.body.status);
+        if (!requestedStatus) return true;
+        return String(item.status) === requestedStatus;
+      });
 
     return ApiResponse.sendOk(
       res,
