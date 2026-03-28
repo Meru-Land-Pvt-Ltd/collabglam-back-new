@@ -4391,7 +4391,7 @@ exports.getCampaignsByBrandId = async (req, res) => {
 
     const tz = getCampaignTimezone(req.body);
     const nowUtc = DateTime.utc();
-    
+
     await Campaign.updateMany(
       {
         brandId: toObjectId(brandId),
@@ -4810,6 +4810,7 @@ exports.getCampaignsByBrandId = async (req, res) => {
           $group: {
             _id: "$campaignId",
             contractsCount: { $sum: 1 },
+            applicantCount: { $sum: 1 },
             acceptedCount: {
               $sum: {
                 $cond: [{ $eq: ["$isAccepted", 1] }, 1, 0],
@@ -4830,6 +4831,7 @@ exports.getCampaignsByBrandId = async (req, res) => {
         String(d._id),
         {
           contractsCount: Number(d.contractsCount || 0),
+          applicantCount: Number(d.applicantCount || 0),
           acceptedCount: Number(d.acceptedCount || 0),
           assignedCount: Number(d.assignedCount || 0),
         },
@@ -4843,6 +4845,7 @@ exports.getCampaignsByBrandId = async (req, res) => {
         const cat = isOid(String(c.categoryId || "")) ? catMap.get(String(c.categoryId)) : null;
         const contractStats = contractMap.get(cid) || {
           contractsCount: 0,
+          applicantCount: 0,
           acceptedCount: 0,
           assignedCount: 0,
         };
@@ -4891,7 +4894,8 @@ exports.getCampaignsByBrandId = async (req, res) => {
           campaignBudget:
             typeof c.campaignBudget === "number" ? c.campaignBudget : 0,
 
-          contractsCount: contractStats.contractsCount,
+
+          applicantCount: contractStats.applicantCount,
           acceptedContracts: contractStats.acceptedCount,
           assignedContracts: contractStats.assignedCount,
 
