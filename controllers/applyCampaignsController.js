@@ -7,7 +7,6 @@ const { createAndEmit } = require('../utils/notifier');
 const Modash = require('../models/modash');
 const Brand = require('../models/brand');
 const { sendMail } = require('../utils/mailer');
-
 const ACTIVE_CONTRACT_STATUSES = [
   'draft',
   'sent',
@@ -495,59 +494,348 @@ exports.getListByCampaign = async (req, res) => {
     return res.status(400).json({ message: 'campaignId is required' });
   }
 
-  const parseFlag = (value) => {
-    if (value === 1 || value === '1' || value === true || value === 'true') return 1;
-    if (value === 0 || value === '0' || value === false || value === 'false') return 0;
-    return undefined;
-  };
-
   try {
-    const record = await ApplyCampaign.findOne({ campaignId: String(campaignId) }).lean();
+    const normalizeText = (value) => String(value ?? '').trim().toLowerCase();
+    const normalizeStatus = (value) => String(value ?? '').trim().toUpperCase();
+    const normalizeRole = (value) => String(value ?? '').trim().toLowerCase();
 
-    if (!record) {
-      return res.status(200).json({
-        meta: {
-          total: 0,
-          page: Number(page),
-          limit: Number(limit),
-          totalPages: 0
-        },
-        applicantCount: 0,
-        statusCounts: {
-          total: 0,
-          applied: 0,
-          active: 0,
-          shortlisted: 0,
-          undecided: 0,
-          rejected: 0,
-          invited: 0,
-          completed: 0
-        },
-        isContracted: 0,
-        contractId: null,
-        influencers: []
+    const toArray = (value) => {
+      if (value == null || value === '') return [];
+      if (Array.isArray(value)) {
+        return value.map((v) => String(v ?? '').trim()).filter(Boolean);
+      }
+      return String(value)
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean);
+    };
+
+    const getNested = (obj, path) => {
+      try {
+        return path
+          .split('.')
+          .reduce((acc, key) => (acc == null ? undefined : acc[key]), obj);
+      } catch {
+        return undefined;
+      }
+    };
+
+    const toNumber = (value) => {
+      if (value == null) return null;
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+
+      const cleaned = String(value).replace(/[%,$\s,]/g, '');
+      const num = Number(cleaned);
+      return Number.isFinite(num) ? num : null;
+    };
+
+    const getFirstNumber = (obj, paths = []) => {
+      for (const path of paths) {
+        const value = getNested(obj, path);
+        const num = toNumber(value);
+        if (num != null) return num;
+      }
+      return null;
+    };
+
+    const getFirstText = (obj, paths = []) => {
+      for (const path of paths) {
+        const value = getNested(obj, path);
+        if (value != null && String(value).trim()) {
+          return String(value).trim();
+        }
+      }
+      return null;
+    };
+
+    const serializeModashProfile = (profile) => {
+      if (!profile) return null;
+      return {
+        ...profile,
+        _id: profile._id ? String(profile._id) : null,
+        influencerId: profile.influencerId ? String(profile.influencerId) : null
+      };
+    };
+
+    const getFollowersFromProfile = (profile) => {
+      return (
+        getFirstNumber(profile, [
+          'followers',
+          'followerCount',
+          'followersCount',
+          'audienceSize',
+          'audience_size',
+          'stats.followers',
+          'metrics.followers',
+          'profile.followers'
+        ]) || 0
+      );
+    };
+
+    const getEngagementRateFromProfile = (profile) => {
+      let value = getFirstNumber(profile, [
+        'engagementRate',
+        'engagement_rate',
+        'avgEngagementRate',
+        'avg_engagement_rate',
+        'er',
+        'stats.engagementRate',
+        'metrics.engagementRate',
+        'engagement.rate'
+      ]);
+
+      if (value == null) return null;
+
+      // if stored as decimal like 0.045 => 4.5%
+      if (value > 0 && value <= 1) {
+        value = value * 100;
+      }
+
+      return Number(value.toFixed(2));
+    };
+
+    const getPlatformFromProfile = (profile) => {
+      return getFirstText(profile, [
+        'provider',
+        'platform',
+        'channel',
+        'source',
+        'network'
+      ]);
+    };
+
+    const resolveTierFromFollowers = (followers) => {
+      const n = Number(followers) || 0;
+
+      if (n >= 1000 && n <= 10000) return 'nano';
+      if (n > 10000 && n <= 50000) return 'micro';
+      if (n > 50000 && n <= 250000) return 'mid-tier';
+      if (n > 250000 && n <= 1000000) return 'macro';
+      if (n > 1000000) return 'mega';
+      return null;
+    };
+
+    const normalizeTierToken = (value) => {
+      const token = normalizeText(value);
+      if (token.includes('nano')) return 'nano';
+      if (token.includes('micro')) return 'micro';
+      if (token.includes('mid')) return 'mid-tier';
+      if (token.includes('macro')) return 'macro';
+      if (token.includes('mega')) return 'mega';
+      return token;
+    };
+
+    const matchesTier = (followers, selectedTiers) => {
+      if (!selectedTiers.length) return true;
+      const tier = resolveTierFromFollowers(followers);
+      if (!tier) return false;
+      return selectedTiers.map(normalizeTierToken).includes(tier);
+    };
+
+    const normalizeEngagementBucket = (value) =>
+      normalizeText(value).replace(/\s+/g, '').replace('–', '-').replace('—', '-');
+
+    const matchesEngagementRate = (rate, selectedBuckets) => {
+      if (!selectedBuckets.length) return true;
+      if (rate == null) return false;
+
+      const buckets = selectedBuckets.map(normalizeEngagementBucket);
+
+      return buckets.some((bucket) => {
+        if (bucket === 'all') return true;
+        if (bucket === '0-2%') return rate >= 0 && rate <= 2;
+        if (bucket === '2-5%') return rate > 2 && rate <= 5;
+        if (bucket === '5-8%') return rate > 5 && rate <= 8;
+        if (bucket === '8-12%') return rate > 8 && rate <= 12;
+        if (bucket === '12%+' || bucket === '12+') return rate > 12;
+        return false;
       });
-    }
+    };
 
-    const applicantStatusMap = new Map();
-    for (const applicant of record.applicants || []) {
-      if (!applicant?.influencerId) continue;
+    const matchesPlatform = (value, selectedPlatforms) => {
+      if (!selectedPlatforms.length) return true;
+      return selectedPlatforms.map(normalizeText).includes(normalizeText(value));
+    };
 
-      applicantStatusMap.set(String(applicant.influencerId), {
-        isShortlisted: applicant.isShortlisted === 1 ? 1 : 0,
-        isUndicided: applicant.isUndicided === 1 ? 1 : 0,
-        isRejected: applicant.isRejected === 1 ? 1 : 0
-      });
-    }
+    // CATEGORY FILTER ONLY FROM InfluencerModel.categories ARRAY
+    const matchesCategoryIds = (rowCategoryIds, selectedCategoryIds) => {
+      if (!selectedCategoryIds.length) return true;
+      const current = (rowCategoryIds || []).map(String);
+      return selectedCategoryIds.some((id) => current.includes(String(id)));
+    };
 
-    const decisionFilters = {};
-    const shortlistedFlag = parseFlag(isShortlisted);
-    const undecidedFlag = parseFlag(isUndicided);
-    const rejectedFlag = parseFlag(isRejected);
+    const resolveApplicantDate = (applicant, recordCreatedAt) => {
+      return applicant?.appliedAt || applicant?.updatedAt || recordCreatedAt || null;
+    };
 
-    if (shortlistedFlag !== undefined) decisionFilters.isShortlisted = shortlistedFlag;
-    if (undecidedFlag !== undefined) decisionFilters.isUndicided = undecidedFlag;
-    if (rejectedFlag !== undefined) decisionFilters.isRejected = rejectedFlag;
+    const resolveApplicantFallbackStatus = (applicant) => {
+      if (Number(applicant?.isShortlisted) === 1) return 'shortlisted';
+      if (Number(applicant?.isUndicided) === 1) return 'not confirm';
+      if (Number(applicant?.isRejected) === 1) return 'rejected';
+      return '';
+    };
+
+    const resolveApplicantStatuses = (applicant) => {
+      const fallback = resolveApplicantFallbackStatus(applicant);
+      const statusBrand = String(applicant?.statusBrand || '').trim() || fallback;
+      const statusInfluencer = String(applicant?.statusInfluencer || '').trim() || fallback;
+
+      return {
+        statusBrand,
+        statusInfluencer
+      };
+    };
+
+    const matchesDateFilter = (rowDate, rawDateFilter) => {
+      if (!rawDateFilter || rawDateFilter === 'all') return true;
+      if (!rowDate) return false;
+
+      const valueDate = new Date(rowDate);
+      if (Number.isNaN(valueDate.getTime())) return false;
+
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+      if (typeof rawDateFilter === 'object' && rawDateFilter !== null) {
+        const from = rawDateFilter.from ? new Date(rawDateFilter.from) : null;
+        const to = rawDateFilter.to ? new Date(rawDateFilter.to) : null;
+
+        if (from && !Number.isNaN(from.getTime()) && valueDate < from) return false;
+        if (to && !Number.isNaN(to.getTime())) {
+          const end = new Date(to);
+          end.setHours(23, 59, 59, 999);
+          if (valueDate > end) return false;
+        }
+        return true;
+      }
+
+      const token = normalizeText(rawDateFilter).replace(/\s+/g, '');
+
+      if (token === 'today') {
+        return valueDate >= todayStart;
+      }
+
+      if (token === 'last7days' || token === '7days') {
+        const start = new Date(todayStart);
+        start.setDate(start.getDate() - 6);
+        return valueDate >= start;
+      }
+
+      if (token === 'last30days' || token === '30days') {
+        const start = new Date(todayStart);
+        start.setDate(start.getDate() - 29);
+        return valueDate >= start;
+      }
+
+      return true;
+    };
+
+    const resolveLifecycleFlags = (contract) => {
+      if (!contract) {
+        return {
+          lifecycleStatus: null,
+          isInvited: 0,
+          isActive: 0,
+          isCompleted: 0
+        };
+      }
+
+      const lifecycleStatus = normalizeText(
+        contract.status ||
+          contract.contractStatus ||
+          contract.lifecycleStatus ||
+          contract.currentStatus
+      );
+
+      const awaitingRole = normalizeText(
+        contract.awaitingRole ||
+          contract.awaiting_role ||
+          contract.awaiting?.role
+      );
+
+      const isRejectedContract = Number(contract?.isRejected) === 1;
+
+      const isCompleted =
+        lifecycleStatus === 'completed' || lifecycleStatus === 'complete' ? 1 : 0;
+
+      const isInvited =
+        lifecycleStatus === 'invited' ||
+        lifecycleStatus === 'invite_sent' ||
+        lifecycleStatus === 'pending' ||
+        (lifecycleStatus === 'ready_to_sign' && awaitingRole === 'influencer')
+          ? 1
+          : 0;
+
+      const blockedActiveStatuses = new Set([
+        '',
+        'rejected',
+        'declined',
+        'cancelled',
+        'canceled',
+        'completed',
+        'complete'
+      ]);
+
+      const isActive =
+        isCompleted === 0 &&
+        isInvited === 0 &&
+        !isRejectedContract &&
+        !blockedActiveStatuses.has(lifecycleStatus) &&
+        !!lifecycleStatus
+          ? 1
+          : 0;
+
+      return {
+        lifecycleStatus,
+        isInvited,
+        isActive,
+        isCompleted
+      };
+    };
+
+    const getFinalStatus = (row) => {
+      if (row.isCompleted === 1) return 'completed';
+      if (row.isActive === 1) return 'active';
+      if (row.isInvited === 1) return 'invited';
+      if (row.isRejected === 1) return 'rejected';
+      if (row.isShortlisted === 1) return 'shortlisted';
+      if (row.isUndicided === 1) return 'undecided';
+      return 'applied';
+    };
+
+    const matchesInfluencerType = (row, rawType) => {
+      const type = normalizeText(rawType);
+
+      if (!type || type === 'all' || type === 'all influencer') {
+        return true;
+      }
+
+      if (type === 'undicided') {
+        return row.finalStatus === 'undecided';
+      }
+
+      return row.finalStatus === type;
+    };
+
+    const getPriorityRank = (status) => {
+      switch (status) {
+        case 'shortlisted':
+          return 1;
+        case 'active':
+          return 2;
+        case 'invited':
+          return 3;
+        case 'undecided':
+          return 4;
+        case 'rejected':
+          return 5;
+        case 'completed':
+          return 6;
+        case 'applied':
+        default:
+          return 7;
+      }
+    };
 
     const sortRows = (rows, presetSort, rawSortField, rawSortOrder) => {
       const list = [...rows];
@@ -681,7 +969,12 @@ exports.getListByCampaign = async (req, res) => {
 
     if (!record) {
       return res.status(200).json({
-        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
+        meta: {
+          total: 0,
+          page: Number(page),
+          limit: Number(limit),
+          totalPages: 0
+        },
         applicantCount: 0,
         statusCounts: {
           total: 0,
@@ -842,8 +1135,9 @@ exports.getListByCampaign = async (req, res) => {
       const primaryPlatform = getPlatformFromProfile(chosenRaw) || null;
 
       let handle = null;
-      if (chosen) {
-        handle = (chosen.handle || chosen.username || chosen.fullname || '').trim() || null;
+      if (chosenRaw) {
+        handle =
+          (chosenRaw.handle || chosenRaw.username || chosenRaw.fullname || '').trim() || null;
       }
       if (handle && !handle.startsWith('@')) {
         handle = '@' + handle;
@@ -967,9 +1261,14 @@ exports.getListByCampaign = async (req, res) => {
         if (!c) return true;
 
         const status = normalizeStatus(c.status || c.contractStatus);
-        const awaitingRole = normalizeRole(c.awaitingRole || c.awaiting_role || c.awaiting?.role);
+        const awaitingRole = normalizeRole(
+          c.awaitingRole || c.awaiting_role || c.awaiting?.role
+        );
 
-        if (status === 'READY_TO_SIGN' && awaitingRole === 'collabglam') return false;
+        if (status === 'READY_TO_SIGN' && awaitingRole === 'collabglam') {
+          return false;
+        }
+
         return true;
       });
     }
@@ -1050,7 +1349,6 @@ exports.getListByCampaign = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
-
 /**
  * POST /ApplyCampaigns/approve
  * Body: { campaignId, influencerId }

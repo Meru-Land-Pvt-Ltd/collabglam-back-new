@@ -3,6 +3,7 @@ const { Types } = require("mongoose");
 const multer = require("multer");
 const OpenAI = require("openai");
 const { DateTime } = require("luxon");
+const { normalizeAndUploadProductImages } = require("../utils/uploadBase64ImagesToS3.js");
 
 const Campaign = require("../models/campaign");
 const Brand = require("../models/brand");
@@ -1577,6 +1578,7 @@ exports.createCampaign = async (req, res) => {
   const requestId = getRequestId(req);
 
   try {
+    
     const geo = await detectGeoFromRequest(req);
     const campaignTz = getCampaignTimezone(req.body);
 
@@ -1613,12 +1615,21 @@ exports.createCampaign = async (req, res) => {
 
     req.body.campaignTimezone = campaignTz;
 
+    // upload base64 product images to s3 and replace request body value
+    const uploadedProductImages = await normalizeAndUploadProductImages(
+      req.body.productImages
+    );
+
+    req.body.productImages = uploadedProductImages;
+
     const docToCreate = buildCampaignDoc(req.body, geo, status, 0, timing, {
       brandName: String(brandDoc.name || brandDoc.brandName || ""),
       createdBy: actor,
       approvalMode: actor.role === "admin" ? "admin_review" : "direct",
       categoryName: v?.rel?.cat?.name || "",
-      subcategoryNames: Array.isArray(v?.rel?.subs) ? v.rel.subs.map((s) => String(s.name || "")) : [],
+      subcategoryNames: Array.isArray(v?.rel?.subs)
+        ? v.rel.subs.map((s) => String(s.name || ""))
+        : [],
     });
 
     const created = await Campaign.create(docToCreate);
@@ -3786,59 +3797,38 @@ exports.getSubcategories = async (req, res) => {
 
 
 exports.viewCampaignByIdForBrand = async (req, res) => {
-  const requestId = getRequestId(req);
-
   try {
-    const user = req.user || {};
+    const { brandId, campaignId } = req.body;
 
-    const tokenBrandRaw = String(
-      user.brandId ?? user.id ?? user._id ?? user.userId ?? ""
-    ).trim();
-
-    if (!tokenBrandRaw) {
-      return fail(res, 401, "UNAUTHORIZED", "Invalid brand token", requestId);
+    if (!brandId || !campaignId) {
+      return res.status(400).json({
+        success: false,
+        message: "brandId and campaignId are required",
+      });
     }
 
-    const tokenBrandDoc = await findBrandDocByAnyId(tokenBrandRaw);
-    if (!tokenBrandDoc) {
-      return fail(res, 401, "UNAUTHORIZED", "Brand not found from token", requestId);
-    }
-
-    const bodyBrandId = clean(req.body.brandId);
-    if (!bodyBrandId) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid brandId is required", requestId);
-    }
-
-    const allowedBrandIds = new Set([
-      String(tokenBrandDoc._id),
-      String(tokenBrandDoc.brandId || "")
-    ]);
-
-    if (!allowedBrandIds.has(String(bodyBrandId))) {
-      return fail(res, 403, "FORBIDDEN", "brandId does not match token", requestId);
-    }
-
-    const campaignId = clean(req.body.campaignId);
-    if (!campaignId || !isOid(campaignId)) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
-    }
-
-    const filter = buildCampaignLookupFilter(campaignId, tokenBrandDoc._id);
-    if (!filter) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
-    }
-
-    const campaign = await Campaign.findOne(filter)
-      .select("-productImages")
-      .lean();
+    const campaign = await Campaign.findOne({
+      _id: campaignId,
+      brandId: brandId,
+    }).lean();
 
     if (!campaign) {
-      return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
+      return res.status(404).json({
+        success: false,
+        message: "Campaign not found",
+      });
     }
 
-    return ApiResponse.sendOk(res, 200, { doc: campaign }, requestId);
+    return res.status(200).json({
+      success: true,
+      doc: campaign,
+    });
   } catch (err) {
-    return sendControllerError(res, requestId, err);
+    console.error("viewCampaignByIdForBrand error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
   }
 };
 
@@ -4712,7 +4702,7 @@ exports.getCampaignsByBrandId = async (req, res) => {
             "subcategoryIds",
             "numberOfInfluencers",
             "platformSelection",
-           
+            "productImages",
             "createdAt",
             "updatedAt",
             "scheduledAt",
