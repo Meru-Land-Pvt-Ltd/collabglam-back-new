@@ -99,6 +99,13 @@ exports.createMilestone = async (req, res) => {
     throw err;
   };
 
+  const isSigned = (value) => {
+    if (typeof value === "boolean") return value;
+    if (value == null) return false;
+    if (typeof value === "string") return value.trim() !== "";
+    return true;
+  };
+
   try {
     const {
       brandId,
@@ -119,7 +126,9 @@ exports.createMilestone = async (req, res) => {
     }
 
     if (isNaN(amountNum) || amountNum <= 0) {
-      return res.status(400).json({ message: "amount must be a valid number > 0" });
+      return res.status(400).json({
+        message: "amount must be a valid number > 0",
+      });
     }
 
     let responsePayload = null;
@@ -153,15 +162,16 @@ exports.createMilestone = async (req, res) => {
           .session(session);
       }
 
-      if (contractDoc) {
-        const st = String(contractDoc.status || "").toUpperCase();
-        const canCreateMilestone =
-          st === CONTRACT_STATUS.CONTRACT_SIGNED ||
-          st === CONTRACT_STATUS.MILESTONES_CREATED;
+      if (!contractDoc) {
+        abort(400, "Contract not found. Please create and sign the contract first.");
+      }
 
-        if (!canCreateMilestone) {
-          abort(400, "Contract must be fully signed before creating milestones.");
-        }
+      const canCreateMilestone =
+        isSigned(contractDoc.signatureBrand) &&
+        isSigned(contractDoc.signatureInfluencer);
+
+      if (!canCreateMilestone) {
+        abort(400, "Contract must be fully signed before creating milestones.");
       }
 
       // 3) milestone doc
@@ -252,7 +262,9 @@ exports.createMilestone = async (req, res) => {
       const createdEntry = doc.milestoneHistory[doc.milestoneHistory.length - 1];
 
       // 8) Freeze only AFTER milestone save succeeds
-      const freezeIndex = (wallet.freezes || []).findIndex(
+      wallet.freezes = Array.isArray(wallet.freezes) ? wallet.freezes : [];
+
+      const freezeIndex = wallet.freezes.findIndex(
         (f) =>
           String(f.brandId) === String(brandId) &&
           String(f.campaignId) === String(campaignId) &&

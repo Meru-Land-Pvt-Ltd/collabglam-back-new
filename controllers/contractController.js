@@ -5,18 +5,29 @@ const moment = require("moment-timezone");
 const puppeteer = require("puppeteer");
 const fs = require("fs");
 const path = require("path");
-
+const InfluencerSignature = require("../models/influencerSignature");
 // Models & template
 const Campaign = require("../models/campaign");
 const Brand = require("../models/brand");
+const Modash = require("../models/modash");  
 const { InfluencerModel: Influencer } = require("../models/influencer");
-
+const ApplyCampaign = require("../models/applyCampaign"); 
 const Contract = require("../models/contract");
 const MASTER_TEMPLATE = require("../template/ContractTemplate");
-
+const BrandSignature = require('../models/brandSignature');
 const { createAndEmit } = require("../utils/notifier");
 const { CONTRACT_STATUS } = require("../constants/contract");
+function markEdit(contract, byRole, byUserId, editedFields) {
+  if (!Array.isArray(editedFields) || editedFields.length === 0) return;
 
+  contract.isEdit = true;
+  contract.isEditBy = byRole;
+  contract.editedFields = editedFields;
+  contract.lastEdit = { isEdit: true, by: byRole, at: new Date(), fields: editedFields };
+
+  bumpVersion(contract, byRole, byUserId, editedFields);
+  addAudit(contract, byRole, "EDITED", { fields: editedFields });
+}
 // Optional email + reminders
 let EmailSvc = {};
 try {
@@ -128,12 +139,17 @@ const ALLOWED_BRAND_PATHS = [
 
 const ALLOWED_INFLUENCER_PATHS = [
   "content.influencer.legalName",
-  "content.influencer.contactName",
-  "content.influencer.postingHandleUrl",
-  "content.influencer.contactEmail",
-  "content.influencer.contactPhone",
-  "content.influencer.whatsApp",
-  "content.influencer.address",
+  "content.influencer.email",
+  "content.influencer.phone",
+  "content.influencer.taxFormType",
+  "content.influencer.taxId",
+  "content.influencer.addressLine1",
+  "content.influencer.addressLine2",
+  "content.influencer.city",
+  "content.influencer.state",
+  "content.influencer.zipPostalCode",
+  "content.influencer.country",
+  "content.influencer.notes",
 ];
 
 // --- Fixed CollabGlam signature for display ---
@@ -1072,13 +1088,13 @@ function buildTokenMap(contract) {
   };
 }
 
-function renderTemplate(templateText, tokenMap) {
-  return (templateText || "").replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, rawKey) => {
-    const key = rawKey.replace(/\s*\(.*?\)\s*$/, "");
-    const v = tokenMap[key];
-    return v === undefined || v === null ? "" : String(v);
-  });
-}
+// function renderTemplate(templateText, tokenMap) {
+//   return (templateText || "").replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, rawKey) => {
+//     const key = rawKey.replace(/\s*\(.*?\)\s*$/, "");
+//     const v = tokenMap[key];
+//     return v === undefined || v === null ? "" : String(v);
+//   });
+// }
 
 function injectTrustedHtmlPlaceholders(legalHTML, contract) {
   const tokens = buildTokenMap(contract);
@@ -1186,131 +1202,194 @@ function legalTextToHTML(raw) {
   return out.join("\n");
 }
 
-function signaturePanelHTML(contract) {
-  const tz = tzOr(contract);
-  const brandLabel = contract?.content?.brand?.legalName || contract.brandName || "—";
-  const influencerLabel = contract?.content?.influencer?.legalName || contract.influencerName || "—";
+// function signaturePanelHTML(contract) {
+//   const tz = tzOr(contract);
+//   const brandLabel = contract?.content?.brand?.legalName || contract.brandName || "—";
+//   const influencerLabel = contract?.content?.influencer?.legalName || contract.influencerName || "—";
 
-  const roles = [
-    {
-      key: "brand",
-      header: "BRAND",
-      entityLabel: brandLabel,
-    },
-    {
-      key: "influencer",
-      header: "INFLUENCER",
-      entityLabel: influencerLabel,
-    },
-    {
-      key: "collabglam",
-      header: "COLLABGLAM LLC",
-      entityLabel: "CollabGlam LLC",
-    },
-  ];
+//   const roles = [
+//     {
+//       key: "brand",
+//       header: "BRAND",
+//       entityLabel: brandLabel,
+//     },
+//     {
+//       key: "influencer",
+//       header: "INFLUENCER",
+//       entityLabel: influencerLabel,
+//     },
+//     {
+//       key: "collabglam",
+//       header: "COLLABGLAM LLC",
+//       entityLabel: "CollabGlam LLC",
+//     },
+//   ];
 
-  const headerRow = roles
-    .map(({ header }) => `<th style="text-align:center;background:#fff;font-weight:700;">${esc(header)}</th>`)
-    .join("");
+//   const headerRow = roles
+//     .map(({ header }) => `<th style="text-align:center;background:#fff;font-weight:700;">${esc(header)}</th>`)
+//     .join("");
 
-  const sigCells = [];
-  const nameCells = [];
-  const titleCells = [];
-  const dateCells = [];
+//   const sigCells = [];
+//   const nameCells = [];
+//   const titleCells = [];
+//   const dateCells = [];
 
-  for (const { key, entityLabel } of roles) {
-    const s = contract.signatures?.[key] || {};
-    const isCollabGlam = key === "collabglam";
-    const imgSrc = s.sigImageDataUrl || (isCollabGlam ? COLLABGLAM_FIXED_SIG_DATA_URL : null);
-    const when = s.at
-      ? formatDateTZ(s.at, tz, "MMMM D, YYYY")
-      : contract?.content?.campaign?.effectiveDate
-        ? formatDateTZ(contract.content.campaign.effectiveDate, tz, "MMMM D, YYYY")
-        : "";
+//   for (const { key, entityLabel } of roles) {
+//     const s = contract.signatures?.[key] || {};
+//     const isCollabGlam = key === "collabglam";
+//     const imgSrc = s.sigImageDataUrl || (isCollabGlam ? COLLABGLAM_FIXED_SIG_DATA_URL : null);
+//     const when = s.at
+//       ? formatDateTZ(s.at, tz, "MMMM D, YYYY")
+//       : contract?.content?.campaign?.effectiveDate
+//         ? formatDateTZ(contract.content.campaign.effectiveDate, tz, "MMMM D, YYYY")
+//         : "";
 
-    // Resolve display name: use signed name, fallback to entity label
-    const displayName = s.name || entityLabel || "";
+//     // Resolve display name: use signed name, fallback to entity label
+//     const displayName = s.name || entityLabel || "";
 
-    const sigContent = imgSrc
-      ? `<img class="sigimg" alt="Signature" src="${esc(imgSrc)}" style="max-height:50pt;max-width:100%;display:block;">`
-      : `<div style="height:50pt;"></div>`;
+//     const sigContent = imgSrc
+//       ? `<img class="sigimg" alt="Signature" src="${esc(imgSrc)}" style="max-height:50pt;max-width:100%;display:block;">`
+//       : `<div style="height:50pt;"></div>`;
 
-    sigCells.push(`<td style="height:60pt;vertical-align:bottom;padding:4pt;">${sigContent}</td>`);
-    nameCells.push(`<td style="padding:4pt;"><strong>Name:</strong> ${esc(displayName)}</td>`);
-    titleCells.push(`<td style="padding:4pt;"><strong>Title:</strong> ${esc(s.title || "")}</td>`);
-    dateCells.push(`<td style="padding:4pt;"><strong>Date:</strong> ${esc(when)}</td>`);
-  }
+//     sigCells.push(`<td style="height:60pt;vertical-align:bottom;padding:4pt;">${sigContent}</td>`);
+//     nameCells.push(`<td style="padding:4pt;"><strong>Name:</strong> ${esc(displayName)}</td>`);
+//     titleCells.push(`<td style="padding:4pt;"><strong>Title:</strong> ${esc(s.title || "")}</td>`);
+//     dateCells.push(`<td style="padding:4pt;"><strong>Date:</strong> ${esc(when)}</td>`);
+//   }
 
-  return `
-    <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:10pt;">
-      <thead>
-        <tr>${headerRow}</tr>
-      </thead>
-      <tbody>
-        <tr>${sigCells.join("")}</tr>
-        <tr>${nameCells.join("")}</tr>
-        <tr>${titleCells.join("")}</tr>
-        <tr>${dateCells.join("")}</tr>
-      </tbody>
-    </table>
-  `;
-}
-function renderContractHTML({ contract, templateText }) {
-  let legalHTML = legalTextToHTML(templateText);
-  legalHTML = legalHTML.replace('<div id="__SIG_PANEL__"></div>', signaturePanelHTML(contract));
-  legalHTML = injectTrustedHtmlPlaceholders(legalHTML, contract);
+//   return `
+//     <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:10pt;">
+//       <thead>
+//         <tr>${headerRow}</tr>
+//       </thead>
+//       <tbody>
+//         <tr>${sigCells.join("")}</tr>
+//         <tr>${nameCells.join("")}</tr>
+//         <tr>${titleCells.join("")}</tr>
+//         <tr>${dateCells.join("")}</tr>
+//       </tbody>
+//     </table>
+//   `;
+// }
+// async function attachSignaturesToContract(contractDoc) {
+//   if (!contractDoc) return contractDoc;
 
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <style>
-    @page { size: A4; margin: 18mm 16mm; }
-    * { box-sizing: border-box; }
-    html, body { height: 100%; }
-    body { font-family: "Times New Roman", Times, serif; color: #000; font-size: 10.5pt; line-height: 1.35; }
-    main { max-width: 100%; }
-    img, table { max-width: 100%; }
+//   const contract = contractDoc.toObject ? contractDoc.toObject() : { ...contractDoc };
 
-    h1, h2, h3 { font-weight: 700; color: #000; margin: 10pt 0 6pt; }
-    h1 { font-size: 13pt; text-align: center; text-transform: uppercase; letter-spacing: .2px; }
-    h2 { font-size: 11pt; }
-    h3 { font-size: 10.5pt; }
+//   if (!contract.signatures) contract.signatures = {};
+//   if (!contract.signatures.brand) contract.signatures.brand = {};
+//   if (!contract.signatures.influencer) contract.signatures.influencer = {};
 
-    p { margin: 0 0 5pt; text-align: justify; color: #000; orphans: 3; widows: 3; }
+//   const lookups = [
+//     {
+//       contractField: "signatureBrand", // contract field
+//       sigKey: "brand",                 // goes into contract.signatures.brand
+//       model: BrandSignature,           // change model only if needed
+//     },
+//     {
+//       contractField: "influencerBrand", // or "signatureInfluencer" if this is your real field name
+//       sigKey: "influencer",             // goes into contract.signatures.influencer
+//       model: InfluencerSignature,       // change model only if needed
+//     },
+//   ];
 
-    .secno { font-weight: 700; }
-    .muted { color: #444; }
+//   for (const item of lookups) {
+//     const value = contract[item.contractField];
+//     if (!value) continue;
 
-    .signatures { margin: 10pt 0 6pt; display: grid; grid-template-columns: 1fr 1fr; gap: 10pt; }
-    .signature-block { border: 1px solid #000; padding: 8pt; break-inside: avoid; page-break-inside: avoid; }
-    .sigrole { font-weight: 700; margin-bottom: 4pt; }
-    .sigimg { display: block; max-height: 60pt; max-width: 100%; margin: 0 0 6pt; }
-    .sigmeta { font-size: 9.5pt; color: #000; }
+//     let row = null;
 
-    table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 9.5pt; margin: 6pt 0; }
-    thead { display: table-header-group; }
-    tr { break-inside: avoid; page-break-inside: avoid; }
-    th, td {
-      border: 1px solid #000;
-      padding: 3pt 4pt;
-      vertical-align: top;
-      word-break: break-word;
-      overflow-wrap: anywhere;
-      hyphens: auto;
-    }
-    th { text-align: left; background: #fff; font-weight: 700; }
-    tr:nth-child(even) td { background: #fafafa; }
+//     // first try by custom field
+//     row = await item.model.findOne({ signature: value }).select("signature").lean();
+//     console.log("row", row);
 
-    .signature-block { break-inside: avoid; page-break-inside: avoid; }
-  </style>
-</head>
-<body>
-  <main>${legalHTML}</main>
-</body>
-</html>`;
-}
+//     // fallback by _id
+//     if (!row && mongoose.Types.ObjectId.isValid(value)) {
+//       row = await item.model.findById(value).select("signature").lean();
+//     }
+
+//     if (row?.signature) {
+//       contract.signatures[item.sigKey] = {
+//         ...contract.signatures[item.sigKey],
+//         sigImageDataUrl: row.signature,
+//       };
+//     }
+//   }
+
+//   return contract;
+// }
+
+// function signaturePanelHTML(contract) {
+//   return `
+//     <div class="signatures">
+//       <div class="signature-block">
+//         <div class="sigrole">Brand Signature</div>
+//         ${contract.brandSignature ? `<img class="sigimg" src="${contract.brandSignature}" alt="Brand Signature" />` : ""}
+//       </div>
+
+//       <div class="signature-block">
+//         <div class="sigrole">Influencer Signature</div>
+//         ${contract.influencerSignature ? `<img class="sigimg" src="${contract.influencerSignature}" alt="Influencer Signature" />` : ""}
+//       </div>
+//     </div>
+//   `;
+// }
+// function renderContractHTML({ contract, templateText }) {
+//   let legalHTML = legalTextToHTML(templateText);
+//   legalHTML = legalHTML.replace('<div id="__SIG_PANEL__"></div>', signaturePanelHTML(contract));
+//   legalHTML = injectTrustedHtmlPlaceholders(legalHTML, contract);
+
+//   return `<!DOCTYPE html>
+// <html lang="en">
+// <head>
+//   <meta charset="utf-8"/>
+//   <meta name="viewport" content="width=device-width,initial-scale=1"/>
+//   <style>
+//     @page { size: A4; margin: 18mm 16mm; }
+//     * { box-sizing: border-box; }
+//     html, body { height: 100%; }
+//     body { font-family: "Times New Roman", Times, serif; color: #000; font-size: 10.5pt; line-height: 1.35; }
+//     main { max-width: 100%; }
+//     img, table { max-width: 100%; }
+
+//     h1, h2, h3 { font-weight: 700; color: #000; margin: 10pt 0 6pt; }
+//     h1 { font-size: 13pt; text-align: center; text-transform: uppercase; letter-spacing: .2px; }
+//     h2 { font-size: 11pt; }
+//     h3 { font-size: 10.5pt; }
+
+//     p { margin: 0 0 5pt; text-align: justify; color: #000; orphans: 3; widows: 3; }
+
+//     .secno { font-weight: 700; }
+//     .muted { color: #444; }
+
+//     .signatures { margin: 10pt 0 6pt; display: grid; grid-template-columns: 1fr 1fr; gap: 10pt; }
+//     .signature-block { border: 1px solid #000; padding: 8pt; break-inside: avoid; page-break-inside: avoid; }
+//     .sigrole { font-weight: 700; margin-bottom: 4pt; }
+//     .sigimg { display: block; max-height: 60pt; max-width: 100%; margin: 0 0 6pt; }
+//     .sigmeta { font-size: 9.5pt; color: #000; }
+
+//     table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 9.5pt; margin: 6pt 0; }
+//     thead { display: table-header-group; }
+//     tr { break-inside: avoid; page-break-inside: avoid; }
+//     th, td {
+//       border: 1px solid #000;
+//       padding: 3pt 4pt;
+//       vertical-align: top;
+//       word-break: break-word;
+//       overflow-wrap: anywhere;
+//       hyphens: auto;
+//     }
+//     th { text-align: left; background: #fff; font-weight: 700; }
+//     tr:nth-child(even) td { background: #fafafa; }
+
+//     .signature-block { break-inside: avoid; page-break-inside: avoid; }
+//   </style>
+// </head>
+// <body>
+//   <main>${legalHTML}</main>
+// </body>
+// </html>`;
+// }
 
 // ============================ Puppeteer Shared Browser ============================
 let sharedBrowserPromise = null;
@@ -2004,19 +2083,27 @@ exports.initiate = async (req, res) => {
       campaignId,
       content: contentInput = {},
       requestedEffectiveDate,
+      signature,
       requestedEffectiveDateTimezone,
       preview = false,
       isResend = false,
       resendOf,
+      signatureBrand, // NEW
     } = req.body;
 
     assertRequired(req.body, ["brandId", "influencerId", "campaignId"]);
 
     const mongoose = require("mongoose");
 
-    if (!mongoose.Types.ObjectId.isValid(campaignId)) return respondError(res, "Invalid campaignId", 400);
-    if (!mongoose.Types.ObjectId.isValid(brandId)) return respondError(res, "Invalid brandId", 400);
-    if (!mongoose.Types.ObjectId.isValid(influencerId)) return respondError(res, "Invalid influencerId", 400);
+    if (!mongoose.Types.ObjectId.isValid(campaignId)) {
+      return respondError(res, "Invalid campaignId", 400);
+    }
+    if (!mongoose.Types.ObjectId.isValid(brandId)) {
+      return respondError(res, "Invalid brandId", 400);
+    }
+    if (!mongoose.Types.ObjectId.isValid(influencerId)) {
+      return respondError(res, "Invalid influencerId", 400);
+    }
 
     const [campaign, brandDoc, influencerDoc] = await Promise.all([
       Campaign.findById(campaignId),
@@ -2062,7 +2149,8 @@ exports.initiate = async (req, res) => {
       extraRevisionFee: 0,
       escrowAMLFlags: "",
       collabglamSignatoryName: "",
-      collabglamSignatoryEmail: process.env.COLLABGLAM_SIGNATORY_EMAIL || "",
+      collabglamSignatoryEmail:
+        process.env.COLLABGLAM_SIGNATORY_EMAIL || "",
       legalTemplateVersion: 1,
       legalTemplateText: MASTER_TEMPLATE,
       legalTemplateHistory: [
@@ -2089,10 +2177,33 @@ exports.initiate = async (req, res) => {
     /* ── Requested effective date ── */
     const requestedDateBuilt = requestedEffectiveDate
       ? buildRequestedEffectiveDate(
-        requestedEffectiveDate,
-        requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ
-      )
+          requestedEffectiveDate,
+          requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ
+        )
       : undefined;
+
+    const cleanSignatureBrand =
+      typeof signatureBrand === "string" ? signatureBrand.trim() : "";
+
+    const hasBrandSignature = Boolean(cleanSignatureBrand);
+
+    const brandSignatureMeta = hasBrandSignature
+      ? {
+          signed: true,
+          byUserId: req.user?.id,
+          name:
+            brandDoc.contactName ||
+            brandDoc.ownerName ||
+            brandDoc.legalName ||
+            brandDoc.name ||
+            "",
+          email: brandDoc.email || "",
+          at: new Date(),
+          signatureImageDataUrl: cleanSignatureBrand,
+        }
+      : {
+          signed: false,
+        };
 
     /* ── Shared base document ── */
     const base = {
@@ -2100,13 +2211,14 @@ exports.initiate = async (req, res) => {
       influencerId,
       campaignId,
       paymentType: getCampaignPaymentType(campaign, contentInput),
-
       status: CONTRACT_STATUS.BRAND_SENT_DRAFT,
       awaitingRole: "influencer",
       version: 0,
       editsLockedAt: null,
-
       requiredSigners: ["brand", "influencer"],
+
+      // NEW: simple top-level brand signature string
+      signatureBrand: cleanSignatureBrand || "",
 
       acceptances: {
         brand: { accepted: false },
@@ -2117,7 +2229,7 @@ exports.initiate = async (req, res) => {
         influencer: { confirmed: false },
       },
       signatures: {
-        brand: { signed: false },
+        brand: brandSignatureMeta,
         influencer: { signed: false },
         collabglam: { signed: false },
       },
@@ -2125,10 +2237,9 @@ exports.initiate = async (req, res) => {
       content,
       other,
       admin,
-
       requestedEffectiveDate: requestedDateBuilt,
-      requestedEffectiveDateTimezone: requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ,
-
+      requestedEffectiveDateTimezone:
+        requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ,
       brandName: content.brand.legalName,
       brandAddress: content.brand.billingAddress,
       influencerName: content.influencer.legalName,
@@ -2138,12 +2249,16 @@ exports.initiate = async (req, res) => {
 
     /* ════════════════════════════════════════
        PREVIEW — return PDF, no DB write
-    ════════════════════════════════════════ */
+       ════════════════════════════════════════ */
     if (preview && !isResend) {
       const tmp = { ...base };
+
       const tokens = buildTokenMap(tmp);
       const text = renderTemplate(tmp.admin.legalTemplateText, tokens);
-      const html = renderContractHTML({ contract: tmp, templateText: text });
+      const html = renderContractHTML({
+        contract: tmp,
+        templateText: text,
+      });
 
       return renderPDFWithPuppeteer({
         html,
@@ -2159,10 +2274,12 @@ exports.initiate = async (req, res) => {
 
     /* ════════════════════════════════════════
        RESEND — supersede parent, create child
-    ════════════════════════════════════════ */
+       ════════════════════════════════════════ */
     if (isResend && resendOf) {
       const parent = await Contract.findOne({ contractId: resendOf });
-      if (!parent) return respondError(res, "resendOf contract not found", 404);
+      if (!parent) {
+        return respondError(res, "resendOf contract not found", 404);
+      }
 
       if (
         String(parent.brandId) !== String(brandId) ||
@@ -2188,19 +2305,57 @@ exports.initiate = async (req, res) => {
         userEmail: req.user?.email,
       });
 
+      // NEW: save signatureBrand simply + mark brand signed on resend
+      if (hasBrandSignature) {
+        child.signatureBrand = cleanSignatureBrand;
+        child.signatures = child.signatures || {};
+        child.signatures.brand = {
+          ...(child.signatures.brand || {}),
+          signed: true,
+          byUserId: req.user?.id,
+          name:
+            brandDoc.contactName ||
+            brandDoc.ownerName ||
+            brandDoc.legalName ||
+            brandDoc.name ||
+            "",
+          email: brandDoc.email || "",
+          at: new Date(),
+          signatureImageDataUrl: cleanSignatureBrand,
+        };
+        child.awaitingRole = "influencer";
+
+        addAudit(child, "brand", "SIGNED_ON_INITIATE", {
+          role: "brand",
+          name:
+            brandDoc.contactName ||
+            brandDoc.ownerName ||
+            brandDoc.legalName ||
+            brandDoc.name ||
+            "",
+          email: brandDoc.email || "",
+        });
+      }
+
       await child.save();
 
       parent.supersededBy = child.contractId;
       parent.resentAt = new Date();
       parent.status = CONTRACT_STATUS.SUPERSEDED;
+
       addAudit(parent, "system", "RESENT", {
         to: child.contractId,
         by: req.user?.email || "system",
       });
+
       await parent.save();
 
       await Campaign.updateOne(campaignQuery(campaignId), {
-        $set: { isContracted: 1, contractId: child.contractId, isAccepted: 0 },
+        $set: {
+          isContracted: 1,
+          contractId: child.contractId,
+          isAccepted: 0,
+        },
       });
 
       await createAndEmit({
@@ -2211,7 +2366,7 @@ exports.initiate = async (req, res) => {
         message: `Updated contract for "${campaign.productOrServiceName || "Campaign"}".`,
         entityType: "contract",
         entityId: String(child.contractId),
-        actionPath: `/influencer/my-campaign`,
+        actionPath: "/influencer/my-campaign",
         meta: { campaignId, brandId, influencerId, resendOf: parent.contractId },
       });
 
@@ -2227,24 +2382,37 @@ exports.initiate = async (req, res) => {
         meta: { campaignId, influencerId, resendOf: parent.contractId },
       });
 
-      const infEmailResend = getEmailForRole({ contract: child, role: "influencer", influencerDoc });
+      const infEmailResend = getEmailForRole({
+        contract: child,
+        role: "influencer",
+        influencerDoc,
+      });
+
       await safeSendEmail({
         contract: child,
         templateKey: "contract_new_received_influencer",
         to: infEmailResend,
         recipientRole: "influencer",
-        recipientName: getNameForRole({ contract: child, role: "influencer", influencerDoc }),
+        recipientName: getNameForRole({
+          contract: child,
+          role: "influencer",
+          influencerDoc,
+        }),
       });
 
       await safeStartReminder(child, "influencer");
       await safeClearReminder(child.contractId, "brand");
 
-      return respondOK(res, { message: "Resent contract created", contract: child }, 201);
+      return respondOK(
+        res,
+        { message: "Resent contract created", contract: child },
+        201
+      );
     }
 
     /* ════════════════════════════════════════
        NORMAL SEND — create new contract
-    ════════════════════════════════════════ */
+       ════════════════════════════════════════ */
     const contract = new Contract({
       ...base,
       lastSentAt: new Date(),
@@ -2259,7 +2427,49 @@ exports.initiate = async (req, res) => {
       status: contract.status,
     });
 
+    // NEW: audit brand signature at initiate
+    if (hasBrandSignature) {
+      addAudit(contract, "brand", "SIGNED_ON_INITIATE", {
+        role: "brand",
+        name:
+          brandDoc.contactName ||
+          brandDoc.ownerName ||
+          brandDoc.legalName ||
+          brandDoc.name ||
+          "",
+        email: brandDoc.email || "",
+      });
+    }
+   if (!signatureBrand) {
+    return res.status(400).json({ message: "Brand signature is required to initiate contract." });s
+   }
+    await ApplyCampaign.updateOne(
+      {
+        campaignId: String(contract.campaignId),
+        "applicants.influencerId": String(contract.influencerId),
+      },
+      {
+        $set: {
+          "applicants.$.contractId": String(contract.contractId),
+          "applicants.$.statusInfluencer": "contract-send",
+          "applicants.$.statusBrand": "under-influencer-review",
+        },
+      }
+    );
     await contract.save();
+    await ApplyCampaign.updateOne(
+      {
+        campaignId: String(contract.campaignId),
+        "applicants.influencerId": String(contract.influencerId),
+      },
+      {
+        $set: {
+          "applicants.$.contractId": String(contract._id),
+          "applicants.$.statusInfluencer": "contractAccept",
+          "applicants.$.statusBrand": "under-brand-review",
+        },
+      }
+    );
 
     await Campaign.updateOne(campaignQuery(campaignId), {
       $set: { isContracted: 1 },
@@ -2273,7 +2483,7 @@ exports.initiate = async (req, res) => {
       message: `Contract created for "${campaign.productOrServiceName || "Campaign"}".`,
       entityType: "contract",
       entityId: String(contract.contractId),
-      actionPath: `/influencer/my-campaign`,
+      actionPath: "/influencer/my-campaign",
       meta: { campaignId, brandId, influencerId },
     });
 
@@ -2289,13 +2499,22 @@ exports.initiate = async (req, res) => {
       meta: { campaignId, influencerId },
     });
 
-    const infEmail = getEmailForRole({ contract, role: "influencer", influencerDoc });
+    const infEmail = getEmailForRole({
+      contract,
+      role: "influencer",
+      influencerDoc,
+    });
+
     await safeSendEmail({
       contract,
       templateKey: "contract_new_received_influencer",
       to: infEmail,
       recipientRole: "influencer",
-      recipientName: getNameForRole({ contract, role: "influencer", influencerDoc }),
+      recipientName: getNameForRole({
+        contract,
+        role: "influencer",
+        influencerDoc,
+      }),
     });
 
     await safeStartReminder(contract, "influencer");
@@ -2303,11 +2522,19 @@ exports.initiate = async (req, res) => {
 
     return respondOK(
       res,
-      { message: "Contract initialized successfully", contract },
+      {
+        message: "Contract initialized successfully",
+        contract,
+      },
       201
     );
   } catch (err) {
-    return respondError(res, err.message || "initiate error", err.status || 500, err);
+    return respondError(
+      res,
+      err.message || "initiate error",
+      err.status || 500,
+      err
+    );
   }
 };
 
@@ -2316,7 +2543,7 @@ exports.viewed = async (req, res) => {
     const { contractId, role } = req.body;
     assertRequired(req.body, ["contractId"]);
 
-    const contract = await Contract.findOne({ contractId });
+    const contract = await Contract.findOne({ _id:contractId });
     if (!contract) return respondError(res, "Contract not found", 404);
 
     const who = roleFromReq(req, role);
@@ -2340,85 +2567,75 @@ exports.viewed = async (req, res) => {
 
 exports.influencerConfirm = async (req, res) => {
   try {
-    const { contractId, influencer: influencerData = {}, preview = false } = req.body;
+    const { contractId, influencer: influencerData = {},signatureInfluencer, preview = false } = req.body;
     assertRequired(req.body, ["contractId"]);
 
-    const contract = await Contract.findOne({ contractId });
+    const contract = await Contract.findOne({ _id:contractId });
     if (!contract) return respondError(res, "Contract not found", 404);
     requireNotLocked(contract);
 
     if (contract.editsLockedAt) {
-      return respondError(
-        res,
-        "Contract is locked for signing; edits/accept changes are disabled",
-        400
-      );
+      return respondError(res, "Contract is locked for signing; edits/accept changes are disabled", 400);
     }
 
-    const incoming = {
-      content: {
-        influencer: {
-          legalName: influencerData?.legalName,
-          contactName: influencerData?.contactName,
-          postingHandleUrl: influencerData?.postingHandleUrl,
-          contactEmail: influencerData?.contactEmail,
-          contactPhone: influencerData?.contactPhone,
-          whatsApp: influencerData?.whatsApp,
-          address: influencerData?.address,
-        },
-      },
+    const safeInfluencer = {
+      dataAccess: {},
+      ...influencerData,
+      dataAccess: influencerData?.dataAccess || {},
     };
 
     if (preview) {
       const tmp = contract.toObject?.() || contract;
-      tmp.content = mergeDeep(tmp.content || {}, incoming.content || {});
+      tmp.influencer = { ...(tmp.influencer || {}), ...safeInfluencer };
 
       const tokens = buildTokenMap(tmp);
       const text = renderTemplate(tmp.admin?.legalTemplateText || MASTER_TEMPLATE, tokens);
       const html = renderContractHTML({ contract: tmp, templateText: text });
 
+      const headerTitle = "COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)";
+      const headerDate =
+        tokens["Agreement.EffectiveDateTime"] ||
+        tokens["Agreement.EffectiveDateLong"] ||
+        "Pending";
+
       return renderPDFWithPuppeteer({
         html,
         res,
         filename: `Contract-Influencer-Preview-${contractId}.pdf`,
-        headerTitle: CONTRACT_PDF_TITLE,
-        headerDate:
-          tokens["Agreement.EffectiveDateTime"] ||
-          tokens["Agreement.EffectiveDateLong"] ||
-          "Pending",
+        headerTitle,
+        headerDate,
       });
     }
 
-    contract.content = contract.content || {};
+    const before = { influencer: contract.influencer?.toObject?.() || contract.influencer };
+    contract.influencer = { ...(contract.influencer || {}), ...safeInfluencer };
+    const after = { influencer: contract.influencer };
 
-    const changedPaths = applyAllowedDeepUpdates(
-      contract,
-      incoming,
-      ALLOWED_INFLUENCER_PATHS
-    );
-
-    if (changedPaths.length) {
-      bumpVersion(contract, "influencer", req.user?.id, changedPaths);
+    const editedFields = computeEditedFields(before, after, ["influencer"]);
+    if (editedFields.length) {
+      markEdit(contract, "influencer", req.user?.id, editedFields);
       contract.status = CONTRACT_STATUS.INFLUENCER_EDITED;
       contract.awaitingRole = "brand";
       resetAcceptancesForNewVersion(contract);
     }
 
     markAccepted(contract, "influencer", req.user?.id);
+
     const sync = syncStatusFromAcceptances(contract);
     contract.isAccepted = 1;
 
     addAudit(contract, "influencer", "INFLUENCER_ACCEPTED", {
-      editedFields: changedPaths,
+      editedFields,
       version: contract.version,
       nextRole: sync.nextRole,
     });
 
     await contract.save();
 
-    await Campaign.updateOne(campaignQuery(contract.campaignId), {
-      $set: { isAccepted: 1, isContracted: 1, contractId: contract.contractId },
-    });
+    await Campaign.updateOne(
+      campaignQuery(contract.campaignId),
+      { $set: { isAccepted: 1, isContracted: 1, contractId: contract.contractId } }
+    );
 
     await createAndEmit({
       recipientType: "brand",
@@ -2436,7 +2653,7 @@ exports.influencerConfirm = async (req, res) => {
       influencerId: String(contract.influencerId),
       type: "contract.confirm.influencer.self",
       title: "You accepted the contract",
-      message: `You accepted “${contract.content?.campaign?.campaignTitleOrId || contract.brandName || "Contract"}”.`,
+      message: `You accepted “${contract.brand?.campaignTitle || contract.brandName || "Contract"}”.`,
       entityType: "contract",
       entityId: String(contract.contractId),
       actionPath: `/influencer/my-campaign`,
@@ -2488,7 +2705,18 @@ exports.brandConfirm = async (req, res) => {
     addAudit(contract, "brand", "BRAND_ACCEPTED", { version: contract.version });
 
     await contract.save();
-
+   await ApplyCampaign.updateOne(
+  {
+    campaignId: String(contract.campaignId),
+    'applicants.influencerId': String(contract.influencerId)
+  },
+  {
+    $set: {
+      'applicants.$.statusBrand': 'contractAccept',
+      
+    }
+  }
+);
     await createAndEmit({
       recipientType: "influencer",
       influencerId: String(contract.influencerId),
@@ -2706,68 +2934,75 @@ exports.preview = async (req, res) => {
   }
 };
 
-exports.viewContractPdf = async (req, res) => {
-  let contract;
-  try {
-    const { contractId } = req.body;
-    assertRequired(req.body, ["contractId"]);
+// exports.viewContractPdf = async (req, res) => {
+//   let contract;
+//   try {
+//     const { contractId } = req.body;
+//     assertRequired(req.body, ["contractId"]);
 
-    contract = await Contract.findOne({ contractId });
-    if (!contract) return respondError(res, "Contract not found", 404);
+//     contract = await Contract.findOne({ _id:contractId });
+//     if (!contract) return respondError(res, "Contract not found", 404);
 
-    const text =
-      contract.lockedAt && contract.renderedTextSnapshot
-        ? contract.renderedTextSnapshot
-        : renderTemplate(
-          contract.admin?.legalTemplateText || MASTER_TEMPLATE,
-          buildTokenMap(contract)
-        );
+//     // only added this line
+//     const contractWithSignatures = await attachSignaturesToContract(contract);
 
-    const html = renderContractHTML({ contract, templateText: text });
-    const tokens = buildTokenMap(contract);
+//     const text =
+//       contract.lockedAt && contract.renderedTextSnapshot
+//         ? contract.renderedTextSnapshot
+//         : renderTemplate(
+//             contract.admin?.legalTemplateText || MASTER_TEMPLATE,
+//             buildTokenMap(contract)
+//           );
 
-    return renderPDFWithPuppeteer({
-      html,
-      res,
-      filename: `Contract-${contractId}.pdf`,
-      headerTitle: CONTRACT_PDF_TITLE,
-      headerDate:
-        tokens["Agreement.EffectiveDateTime"] ||
-        tokens["Agreement.EffectiveDateLong"] ||
-        "Pending",
-    });
-  } catch (err) {
-    console.error("viewContractPdf error:", err);
+//     const html = renderContractHTML({
+//       contract: contractWithSignatures,
+//       templateText: text,
+//     });
 
-    try {
-      const templateText = renderTemplate(
-        contract?.admin?.legalTemplateText || MASTER_TEMPLATE,
-        buildTokenMap(contract || {})
-      );
-      const doc = new PDFDocument({ margin: 50 });
+//     const tokens = buildTokenMap(contract);
 
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader(
-        "Content-Disposition",
-        `inline; filename=Contract-${contract?.contractId || "Unknown"}.pdf`
-      );
+//     return renderPDFWithPuppeteer({
+//       html,
+//       res,
+//       filename: `Contract-${contractId}.pdf`,
+//       headerTitle: CONTRACT_PDF_TITLE,
+//       headerDate:
+//         tokens["Agreement.EffectiveDateTime"] ||
+//         tokens["Agreement.EffectiveDateLong"] ||
+//         "Pending",
+//     });
+//   } catch (err) {
+//     console.error("viewContractPdf error:", err);
 
-      doc.pipe(res);
-      doc.fontSize(18).text(CONTRACT_PDF_TITLE, { align: "center" }).moveDown();
+//     try {
+//       const templateText = renderTemplate(
+//         contract?.admin?.legalTemplateText || MASTER_TEMPLATE,
+//         buildTokenMap(contract || {})
+//       );
+//       const doc = new PDFDocument({ margin: 50 });
 
-      const paragraphs = String(templateText || "").split(/\n\s*\n/);
-      paragraphs.forEach((p, i) => {
-        doc.text(p, { align: "justify" });
-        if (i < paragraphs.length - 1) doc.moveDown();
-      });
+//       res.setHeader("Content-Type", "application/pdf");
+//       res.setHeader(
+//         "Content-Disposition",
+//         `inline; filename=Contract-${contract?.contractId || "Unknown"}.pdf`
+//       );
 
-      doc.end();
-      return;
-    } catch (e2) {
-      return respondError(res, "fallback PDF also failed", 500, e2);
-    }
-  }
-};
+//       doc.pipe(res);
+//       doc.fontSize(18).text(CONTRACT_PDF_TITLE, { align: "center" }).moveDown();
+
+//       const paragraphs = String(templateText || "").split(/\n\s*\n/);
+//       paragraphs.forEach((p, i) => {
+//         doc.text(p, { align: "justify" });
+//         if (i < paragraphs.length - 1) doc.moveDown();
+//       });
+
+//       doc.end();
+//       return;
+//     } catch (e2) {
+//       return respondError(res, "fallback PDF also failed", 500, e2);
+//     }
+//   }
+// };
 
 exports.sign = async (req, res) => {
   try {
@@ -2993,11 +3228,15 @@ exports.brandUpdateFields = async (req, res) => {
     } = req.body;
 
     assertRequired(req.body, ["contractId", "brandId"]);
-
-    const contract = await Contract.findOne({ contractId, brandId });
+    
+    const contract = await Contract.findOne({ _id:contractId });
     if (!contract) return respondError(res, "Contract not found", 404);
 
     requireNotLocked(contract);
+
+    if(contract.isFinalUpdate){
+      return res.status(400).json({ message: "Contract has been finalized; further edits are not allowed." });
+    }
 
     if (contract.editsLockedAt) {
       return respondError(
@@ -3120,6 +3359,12 @@ exports.brandUpdateFields = async (req, res) => {
       contract?.content?.scheduleA?.commercial?.currency || "USD";
 
     await contract.save();
+    if(contract.signatureBrand!="",contract.signatureInfluencer!=""){
+      contract.editsLockedAt = new Date();
+      contract.isFinalUpdate=true
+      await contract.save();
+    }
+
 
     await createAndEmit({
       recipientType: "influencer",
@@ -3172,7 +3417,7 @@ exports.influencerUpdateFields = async (req, res) => {
     const { contractId, influencerUpdates = {} } = req.body;
     assertRequired(req.body, ["contractId"]);
 
-    const contract = await Contract.findOne({ contractId });
+    const contract = await Contract.findOne({ _id:contractId });
     if (!contract) return respondError(res, "Contract not found", 404);
 
     requireNotLocked(contract);
@@ -3280,15 +3525,20 @@ exports.getContract = async (req, res) => {
             billingAddress: c.content?.brand?.billingAddress || "",
           },
 
-          influencer: {
-            legalName: c.content?.influencer?.legalName || "",
-            contactName: c.content?.influencer?.contactName || "",
-            postingHandleUrl: c.content?.influencer?.postingHandleUrl || "",
-            contactEmail: c.content?.influencer?.contactEmail || "",
-            contactPhone: c.content?.influencer?.contactPhone || "",
-            whatsApp: c.content?.influencer?.whatsApp || "",
-            address: c.content?.influencer?.address || "",
-          },
+         influencer: {
+  legalName: c.content?.influencer?.legalName || "",
+  email: c.content?.influencer?.email || "",
+  phone: c.content?.influencer?.phone || "",
+  taxFormType: c.content?.influencer?.taxFormType || "W-9",
+  taxId: c.content?.influencer?.taxId || "",
+  addressLine1: c.content?.influencer?.addressLine1 || "",
+  addressLine2: c.content?.influencer?.addressLine2 || "",
+  city: c.content?.influencer?.city || "",
+  state: c.content?.influencer?.state || "",
+  zipPostalCode: c.content?.influencer?.zipPostalCode || "",
+  country: c.content?.influencer?.country || "",
+  notes: c.content?.influencer?.notes || "",
+},
 
           campaign: {
             campaignTitleOrId: c.content?.campaign?.campaignTitleOrId || "",
@@ -3436,6 +3686,17 @@ exports.reject = async (req, res) => {
 
     addAudit(contract, "influencer", "REJECTED", { reason });
     await contract.save();
+    await ApplyCampaign.updateOne(
+  {
+    campaignId: String(contract.campaignId),
+    'applicants.influencerId': String(contract.influencerId)
+  },
+  {
+    $set: {
+      'applicants.$.statusInfluencer': 'rejected'
+    }
+  }
+);
 
     await Campaign.updateOne(campaignQuery(contract.campaignId), {
       $set: { isContracted: 0, contractId: null, isAccepted: 0 },
@@ -3653,10 +3914,24 @@ exports.initiateBulk = async (req, res) => {
 
     const results = await Promise.allSettled(
       influencerIds.map(async (influencerId) => {
-        const influencerDoc = await Influencer.findById(influencerId);
+        const [influencerDoc, modashDoc] = await Promise.all([
+          Influencer.findById(influencerId),
+          Modash.findOne({ influencerId: String(influencerId) }),
+        ]);
+
         if (!influencerDoc) {
           throw new Error(`Influencer not found: ${influencerId}`);
         }
+
+        // Modash first, then fallback to influencer collection
+        const resolvedHandle =
+          modashDoc?.handle ||
+          modashDoc?.username ||
+          modashDoc?.instagramHandle ||
+          modashDoc?.instagram?.username ||
+          influencerDoc?.handle ||
+          influencerDoc?.profileUrl ||
+          "";
 
         // remove single-influencer values from shared bulk payload
         const safeContentInput = JSON.parse(JSON.stringify(contentInput || {}));
@@ -3667,8 +3942,7 @@ exports.initiateBulk = async (req, res) => {
             safeContentInput.scheduleA.deliverables.map((row, index) => ({
               ...row,
               srNo: Number(row?.srNo ?? index + 1),
-              platformHandle:
-                influencerDoc?.handle || influencerDoc?.profileUrl || row?.platformHandle || "",
+              platformHandle: resolvedHandle || row?.platformHandle || "",
             }));
         }
 
@@ -3686,7 +3960,7 @@ exports.initiateBulk = async (req, res) => {
             contactName: influencerDoc.contactName || influencerDoc.name || "",
             email: influencerDoc.email || "",
             country: influencerDoc.country || "",
-            handle: influencerDoc.handle || "",
+            handle: resolvedHandle,
           },
           autoCalcs: {},
         };
@@ -3694,18 +3968,34 @@ exports.initiateBulk = async (req, res) => {
         const content = createDefaultContent({
           campaign,
           brandDoc,
-          influencerDoc,
+          influencerDoc: {
+            ...(typeof influencerDoc.toObject === "function"
+              ? influencerDoc.toObject()
+              : influencerDoc),
+            handle: resolvedHandle,
+          },
           admin,
           requestedEffectiveDate,
           requestedEffectiveDateTimezone,
           contentInput: safeContentInput,
         });
 
+        if (!content.influencer) content.influencer = {};
+        content.influencer.postingHandleUrl = resolvedHandle;
+        content.influencer.legalName =
+          content.influencer.legalName || influencerDoc.legalName || influencerDoc.name || "";
+        content.influencer.contactName =
+          content.influencer.contactName || influencerDoc.contactName || influencerDoc.name || "";
+        content.influencer.contactEmail =
+          content.influencer.contactEmail || influencerDoc.email || "";
+        content.influencer.address =
+          content.influencer.address || influencerDoc.address || "";
+
         const requestedDateBuilt = requestedEffectiveDate
           ? buildRequestedEffectiveDate(
-            requestedEffectiveDate,
-            requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ
-          )
+              requestedEffectiveDate,
+              requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ
+            )
           : undefined;
 
         const contract = new Contract({
@@ -3748,7 +4038,7 @@ exports.initiateBulk = async (req, res) => {
           brandAddress: content.brand.billingAddress,
           influencerName: content.influencer.legalName,
           influencerAddress: content.influencer.address,
-          influencerHandle: content.influencer.postingHandleUrl,
+          influencerHandle: resolvedHandle,
 
           lastSentAt: new Date(),
           isAssigned: 1,
@@ -3761,6 +4051,7 @@ exports.initiateBulk = async (req, res) => {
           campaignId,
           status: contract.status,
           bulk: true,
+          modashHandle: resolvedHandle,
         });
 
         await contract.save();
@@ -3800,6 +4091,7 @@ exports.initiateBulk = async (req, res) => {
         return {
           influencerId,
           contractId: contract.contractId,
+          handle: resolvedHandle,
         };
       })
     );
@@ -3878,5 +4170,652 @@ exports.getCurrency = async (req, res) => {
     return respondOK(res, { currency: { code: String(code).toUpperCase(), ...cur } });
   } catch (err) {
     return respondError(res, "getCurrency error", 500, err);
+  }
+};
+
+exports.uploadBrandSignature = async (req, res) => {
+  try {
+    const { brandId } = req.body || {};
+
+    if (!brandId) {
+      return res.status(400).json({ message: 'brandId is required' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'signature file is required' });
+    }
+
+    const base64Signature = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+
+    await BrandSignature.updateMany(
+      {
+        brandId: String(brandId),
+        status: 'active'
+      },
+      {
+        $set: { status: 'inactive' }
+      }
+    );
+
+    const created = await BrandSignature.create({
+      brandId: String(brandId),
+      signature: base64Signature,
+      mimeType: req.file.mimetype || '',
+      originalName: req.file.originalname || '',
+      status: 'active'
+    });
+
+    return res.status(200).json({
+      message: 'Brand signature uploaded successfully',
+      data: created
+    });
+  } catch (err) {
+    console.error('Error in uploadBrandSignature:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.getBrandSignature = async (req, res) => {
+  try {
+    const { brandId } = req.params;
+
+    if (!brandId) {
+      return res.status(400).json({ message: 'brandId is required' });
+    }
+
+    const signature = await BrandSignature.findOne({
+      brandId: String(brandId),
+      status: 'active'
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (!signature) {
+      return res.status(404).json({ message: 'Active brand signature not found' });
+    }
+
+    return res.status(200).json({
+      message: 'Brand signature fetched successfully',
+      data: signature
+    });
+  } catch (err) {
+    console.error('Error in getBrandSignature:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+exports.uploadInfluencerSignature = async (req, res) => {
+  try {
+    const { influencerId } = req.body || {};
+
+    if (!influencerId) {
+      return res.status(400).json({ message: 'influencerId is required' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'signature file is required' });
+    }
+
+    const base64Signature = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+
+    await InfluencerSignature.updateMany(
+      {
+        influencerId: String(influencerId),
+        status: 'active'
+      },
+      {
+        $set: { status: 'inactive' }
+      }
+    );
+
+    const created = await InfluencerSignature.create({
+      influencerId: String(influencerId),
+      signature: base64Signature,
+      mimeType: req.file.mimetype || '',
+      originalName: req.file.originalname || '',
+      status: 'active'
+    });
+
+    return res.status(200).json({
+      message: 'Influencer signature uploaded successfully',
+      data: created
+    });
+  } catch (err) {
+    console.error('Error in uploadInfluencerSignature:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+exports.getInfluencerSignature = async (req, res) => {
+  try {
+    const { influencerId } = req.params;
+
+    if (!influencerId) {
+      return res.status(400).json({ message: 'influencerId is required' });
+    }
+
+    const signature = await InfluencerSignature.findOne({
+      influencerId: String(influencerId),
+      status: 'active'
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (!signature) {
+      return res.status(404).json({ message: 'Active influencer signature not found' });
+    }
+
+    return res.status(200).json({
+      message: 'Influencer signature fetched successfully',
+      data: signature
+    });
+  } catch (err) {
+    console.error('Error in getInfluencerSignature:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+
+
+
+
+
+
+const mongoose = require("mongoose");
+
+// keep your existing imports
+// const Contract = require(...)
+// const BrandSignature = require(...)
+// const InfluencerSignature = require(...)
+// const PDFDocument = require("pdfkit");
+function renderTemplate(templateText, tokenMap) {
+  return (templateText || "").replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, rawKey) => {
+    const key = rawKey.replace(/\s*\(.*?\)\s*$/, "");
+    const v = tokenMap?.[key];
+    return v === undefined || v === null ? "" : String(v);
+  });
+}
+async function attachSignaturesToContract(contractDoc) {
+  if (!contractDoc) return contractDoc;
+
+  const contract = contractDoc.toObject ? contractDoc.toObject() : { ...contractDoc };
+
+  if (!contract.signatures) contract.signatures = {};
+  if (!contract.signatures.brand) contract.signatures.brand = {};
+  if (!contract.signatures.influencer) contract.signatures.influencer = {};
+
+  const lookups = [
+    {
+      contractField: "signatureBrand",
+      sigKey: "brand",
+      model: BrandSignature,
+    },
+    {
+      contractField: "influencerBrand", // keep this as your contract field
+      sigKey: "influencer",
+      model: BrandSignature, // use same model if both are in same table
+    },
+  ];
+
+  for (const item of lookups) {
+    const value = contract[item.contractField];
+    if (!value) continue;
+
+    let row = null;
+
+    try {
+      row = await item.model.findById(value).select("signature").lean();
+    } catch (e) {
+      row = null;
+    }
+
+    if (row?.signature) {
+      contract.signatures[item.sigKey] = {
+        ...contract.signatures[item.sigKey],
+        sigImageDataUrl: row.signature,
+      };
+    }
+  }
+
+  return contract;
+}
+
+function signaturePanelHTML(contract) {
+  const tz = tzOr(contract);
+  const brandLabel = contract?.content?.brand?.legalName || contract.brandName || "—";
+  const influencerLabel = contract?.content?.influencer?.legalName || contract.influencerName || "—";
+
+  const roles = [
+    {
+      key: "brand",
+      header: "BRAND",
+      entityLabel: brandLabel,
+    },
+    {
+      key: "influencer",
+      header: "INFLUENCER",
+      entityLabel: influencerLabel,
+    },
+    {
+      key: "collabglam",
+      header: "COLLABGLAM LLC",
+      entityLabel: "CollabGlam LLC",
+    },
+  ];
+
+  const headerRow = roles
+    .map(({ header }) => `<th style="text-align:center;background:#fff;font-weight:700;">${esc(header)}</th>`)
+    .join("");
+
+  const sigCells = [];
+  const nameCells = [];
+  const titleCells = [];
+  const dateCells = [];
+
+  for (const { key, entityLabel } of roles) {
+    const s = contract.signatures?.[key] || {};
+    const isCollabGlam = key === "collabglam";
+    const imgSrc = s.sigImageDataUrl || (isCollabGlam ? COLLABGLAM_FIXED_SIG_DATA_URL : null);
+    const when = s.at
+      ? formatDateTZ(s.at, tz, "MMMM D, YYYY")
+      : contract?.content?.campaign?.effectiveDate
+        ? formatDateTZ(contract.content.campaign.effectiveDate, tz, "MMMM D, YYYY")
+        : "";
+
+    const displayName = s.name || entityLabel || "";
+
+    const sigContent = imgSrc
+      ? `<img class="sigimg" alt="Signature" src="${esc(imgSrc)}" style="max-height:50pt;max-width:100%;display:block;">`
+      : `<div style="height:50pt;"></div>`;
+
+    sigCells.push(`<td style="height:60pt;vertical-align:bottom;padding:4pt;">${sigContent}</td>`);
+    nameCells.push(`<td style="padding:4pt;"><strong>Name:</strong> ${esc(displayName)}</td>`);
+    titleCells.push(`<td style="padding:4pt;"><strong>Title:</strong> ${esc(s.title || "")}</td>`);
+    dateCells.push(`<td style="padding:4pt;"><strong>Date:</strong> ${esc(when)}</td>`);
+  }
+
+  return `
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:10pt;">
+      <thead>
+        <tr>${headerRow}</tr>
+      </thead>
+      <tbody>
+        <tr>${sigCells.join("")}</tr>
+        <tr>${nameCells.join("")}</tr>
+        <tr>${titleCells.join("")}</tr>
+        <tr>${dateCells.join("")}</tr>
+      </tbody>
+    </table>
+  `;
+}
+
+function renderContractHTML({ contract, templateText }) {
+  let legalHTML = legalTextToHTML(templateText);
+  legalHTML = legalHTML.replace('<div id="__SIG_PANEL__"></div>', signaturePanelHTML(contract));
+  legalHTML = injectTrustedHtmlPlaceholders(legalHTML, contract);
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <style>
+    @page { size: A4; margin: 18mm 16mm; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { font-family: "Times New Roman", Times, serif; color: #000; font-size: 10.5pt; line-height: 1.35; }
+    main { max-width: 100%; }
+    img, table { max-width: 100%; }
+
+    h1, h2, h3 { font-weight: 700; color: #000; margin: 10pt 0 6pt; }
+    h1 { font-size: 13pt; text-align: center; text-transform: uppercase; letter-spacing: .2px; }
+    h2 { font-size: 11pt; }
+    h3 { font-size: 10.5pt; }
+
+    p { margin: 0 0 5pt; text-align: justify; color: #000; orphans: 3; widows: 3; }
+
+    .secno { font-weight: 700; }
+    .muted { color: #444; }
+
+    .signatures { margin: 10pt 0 6pt; display: grid; grid-template-columns: 1fr 1fr; gap: 10pt; }
+    .signature-block { border: 1px solid #000; padding: 8pt; break-inside: avoid; page-break-inside: avoid; }
+    .sigrole { font-weight: 700; margin-bottom: 4pt; }
+    .sigimg { display: block; max-height: 60pt; max-width: 100%; margin: 0 0 6pt; }
+    .sigmeta { font-size: 9.5pt; color: #000; }
+
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 9.5pt; margin: 6pt 0; }
+    thead { display: table-header-group; }
+    tr { break-inside: avoid; page-break-inside: avoid; }
+    th, td {
+      border: 1px solid #000;
+      padding: 3pt 4pt;
+      vertical-align: top;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      hyphens: auto;
+    }
+    th { text-align: left; background: #fff; font-weight: 700; }
+    tr:nth-child(even) td { background: #fafafa; }
+
+    .signature-block { break-inside: avoid; page-break-inside: avoid; }
+  </style>
+</head>
+<body>
+  <main>${legalHTML}</main>
+</body>
+</html>`;
+}
+
+exports.viewContractPdf = async (req, res) => {
+  let contract;
+  try {
+    const { contractId } = req.body;
+    assertRequired(req.body, ["contractId"]);
+
+    contract = await Contract.findOne({ _id:contractId });
+    if (!contract) return respondError(res, "Contract not found", 404);
+
+    const contractWithSignatures = await attachSignaturesToContract(contract);
+
+    const text =
+      contract.lockedAt && contract.renderedTextSnapshot
+        ? contract.renderedTextSnapshot
+        : renderTemplate(
+            contract.admin?.legalTemplateText || MASTER_TEMPLATE,
+            buildTokenMap(contract)
+          );
+
+    const html = renderContractHTML({
+      contract: contractWithSignatures,
+      templateText: text,
+    });
+
+    const tokens = buildTokenMap(contract);
+
+    return renderPDFWithPuppeteer({
+      html,
+      res,
+      filename: `Contract-${contractId}.pdf`,
+      headerTitle: CONTRACT_PDF_TITLE,
+      headerDate:
+        tokens["Agreement.EffectiveDateTime"] ||
+        tokens["Agreement.EffectiveDateLong"] ||
+        "Pending",
+    });
+  } catch (err) {
+    console.error("viewContractPdf error:", err);
+
+    try {
+      const templateText = renderTemplate(
+        contract?.admin?.legalTemplateText || MASTER_TEMPLATE,
+        buildTokenMap(contract || {})
+      );
+
+      const doc = new PDFDocument({ margin: 50 });
+
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename=Contract-${contract?.contractId || "Unknown"}.pdf`
+      );
+
+      doc.pipe(res);
+      doc.fontSize(18).text(CONTRACT_PDF_TITLE, { align: "center" }).moveDown();
+
+      const paragraphs = String(templateText || "").split(/\n\s*\n/);
+      paragraphs.forEach((p, i) => {
+        doc.text(p, { align: "justify" });
+        if (i < paragraphs.length - 1) doc.moveDown();
+      });
+
+      doc.end();
+      return;
+    } catch (e2) {
+      return respondError(res, "fallback PDF also failed", 500, e2);
+    }
+  }
+};
+
+async function getLatestContract(influencerId, campaignId) {
+  return Contract.findOne({ influencerId, campaignId })
+    .sort({ createdAt: -1 })
+    .lean();
+}
+
+// GET /api/contracts/:influencerId/:campaignId/deliverables
+exports.  getDeliverablesByInfluencerAndCampaign = async (req, res) => {
+  try {
+    const { influencerId, campaignId } = req.params;
+
+    if (!influencerId || !campaignId) {
+      return res.status(400).json({
+        success: false,
+        message: "influencerId and campaignId are required",
+      });
+    }
+
+    const contract = await Contract.findOne(
+      { influencerId, campaignId },
+      {
+        influencerId: 1,
+        campaignId: 1,
+        contractId: 1,
+        paymentType: 1,
+        "content.scheduleA.deliverables": 1,
+      }
+    )
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (!contract) {
+      return res.status(404).json({
+        success: false,
+        message: "Contract not found",
+      });
+    }
+
+    const deliverables = contract?.content?.scheduleA?.deliverables || [];
+
+    return res.status(200).json({
+      success: true,
+      message: "Deliverables fetched successfully",
+      data: {
+        contractId: contract.contractId,
+        influencerId: contract.influencerId,
+        campaignId: contract.campaignId,
+        paymentType: contract.paymentType,
+        totalDeliverables: deliverables.length,
+        deliverables,
+      },
+    });
+  } catch (error) {
+    console.error("getDeliverablesByInfluencerAndCampaign error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch deliverables",
+      error: error.message,
+    });
+  }
+};
+
+// GET /api/contracts/:influencerId/:campaignId/milestones
+exports.getMilestonesByInfluencerAndCampaign = async (req, res) => {
+  try {
+    const { influencerId, campaignId } = req.params;
+
+    if (!influencerId || !campaignId) {
+      return res.status(400).json({
+        success: false,
+        message: "influencerId and campaignId are required",
+      });
+    }
+
+    const contract = await Contract.findOne(
+      { influencerId, campaignId },
+      {
+        influencerId: 1,
+        campaignId: 1,
+        contractId: 1,
+        paymentType: 1,
+        currency: 1,
+        "content.scheduleA.commercial.currency": 1,
+        "content.scheduleA.commercial.totalCampaignFee": 1,
+        "content.scheduleA.commercial.milestones": 1,
+      }
+    )
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (!contract) {
+      return res.status(404).json({
+        success: false,
+        message: "Contract not found",
+      });
+    }
+
+    const commercial = contract?.content?.scheduleA?.commercial || {};
+    const milestones = commercial?.milestones || [];
+
+    return res.status(200).json({
+      success: true,
+      message: "Milestones fetched successfully",
+      data: {
+        contractId: contract.contractId,
+        influencerId: contract.influencerId,
+        campaignId: contract.campaignId,
+        paymentType: contract.paymentType,
+        currency: commercial.currency || contract.currency || "USD",
+        totalCampaignFee: commercial.totalCampaignFee || 0,
+        totalMilestones: milestones.length,
+        milestones,
+      },
+    });
+  } catch (error) {
+    console.error("getMilestonesByInfluencerAndCampaign error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch milestones",
+      error: error.message,
+    });
+  }
+};
+
+// optional combined API
+// GET /api/contracts/:influencerId/:campaignId/scheduleA
+exports.getScheduleADataByInfluencerAndCampaign = async (req, res) => {
+  try {
+    const { influencerId, campaignId } = req.params;
+
+    if (!influencerId || !campaignId) {
+      return res.status(400).json({
+        success: false,
+        message: "influencerId and campaignId are required",
+      });
+    }
+
+    const contract = await Contract.findOne(
+      { influencerId, campaignId },
+      {
+        influencerId: 1,
+        campaignId: 1,
+        contractId: 1,
+        paymentType: 1,
+        "content.scheduleA.deliverables": 1,
+        "content.scheduleA.commercial": 1,
+      }
+    )
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (!contract) {
+      return res.status(404).json({
+        success: false,
+        message: "Contract not found",
+      });
+    }
+
+    const scheduleA = contract?.content?.scheduleA || {};
+    const deliverables = scheduleA?.deliverables || [];
+    const commercial = scheduleA?.commercial || {};
+    const milestones = commercial?.milestones || [];
+
+    return res.status(200).json({
+      success: true,
+      message: "Schedule A data fetched successfully",
+      data: {
+        contractId: contract.contractId,
+        influencerId: contract.influencerId,
+        campaignId: contract.campaignId,
+        paymentType: contract.paymentType,
+        deliverables,
+        milestones,
+        totalDeliverables: deliverables.length,
+        totalMilestones: milestones.length,
+        totalCampaignFee: commercial.totalCampaignFee || 0,
+        currency: commercial.currency || "USD",
+      },
+    });
+  } catch (error) {
+    console.error("getScheduleADataByInfluencerAndCampaign error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch Schedule A data",
+      error: error.message,
+    });
+  }
+};
+
+exports.influencerManage = async (req, res) => {
+  try {
+    const { contractId } = req.params;
+
+    if (!contractId) {
+      return res.status(400).json({
+        success: false,
+        message: "contractId is required",
+      });
+    }
+
+    // Step 1: Find contract by contractId
+    const contract = await Contract.findById(contractId).select("-signatures -admin -other -emailLog -audit -reminders").lean();
+
+    if (!contract) {
+      return res.status(404).json({
+        success: false,
+        message: "Contract not found",
+      });
+    }
+
+    if (!contract.influencerId) {
+      return res.status(404).json({
+        success: false,
+        message: "influencerId not found in contract",
+      });
+    }
+
+    // Step 2: Match influencerId in Modash table
+    const modashData = await Modash.findOne({
+      influencerId: contract.influencerId,
+    });
+
+    if (!modashData) {
+      return res.status(404).json({
+        success: false,
+        message: "Matching influencer not found in Modash",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Influencer data fetched successfully",
+      contract,
+      modashData,
+    });
+  } catch (error) {
+    console.error("influencerManage error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch influencer data",
+      error: error.message,
+    });
   }
 };
