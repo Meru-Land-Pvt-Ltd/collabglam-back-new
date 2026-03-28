@@ -103,12 +103,16 @@ const brandSchema = new Schema(
 
     proxyEmail: {
       type: String,
-      default: "",
+      default: undefined,
       trim: true,
       lowercase: true,
+      set: (value) => {
+        const cleaned = String(value || "").trim().toLowerCase();
+        return cleaned ? cleaned : undefined;
+      },
       validate: {
         validator(value) {
-          return !value || emailRegex.test(value);
+          return value == null || emailRegex.test(value);
         },
         message: "Invalid proxy email",
       },
