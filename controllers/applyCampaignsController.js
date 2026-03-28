@@ -472,7 +472,7 @@ exports.getListByCampaign = async (req, res) => {
     createdPage,
 
     // tabs / status filters
-    filterStatus,   // applied | shortlisted | undecided | rejected | active | invited | completed
+    filterStatus,   // all | applied | shortlisted | undecided | rejected | active | invited | completed
     filter,
     influencerType,
 
@@ -496,8 +496,9 @@ exports.getListByCampaign = async (req, res) => {
   }
 
   try {
-    const normalizeText = (value) =>
-      String(value ?? '').trim().toLowerCase();
+    const normalizeText = (value) => String(value ?? '').trim().toLowerCase();
+    const normalizeStatus = (value) => String(value ?? '').trim().toUpperCase();
+    const normalizeRole = (value) => String(value ?? '').trim().toLowerCase();
 
     const toArray = (value) => {
       if (value == null || value === '') return [];
@@ -512,7 +513,9 @@ exports.getListByCampaign = async (req, res) => {
 
     const getNested = (obj, path) => {
       try {
-        return path.split('.').reduce((acc, key) => (acc == null ? undefined : acc[key]), obj);
+        return path
+          .split('.')
+          .reduce((acc, key) => (acc == null ? undefined : acc[key]), obj);
       } catch {
         return undefined;
       }
@@ -751,6 +754,8 @@ exports.getListByCampaign = async (req, res) => {
           contract.awaiting?.role
       );
 
+      const isRejectedContract = Number(contract?.isRejected) === 1;
+
       const isCompleted =
         lifecycleStatus === 'completed' || lifecycleStatus === 'complete' ? 1 : 0;
 
@@ -762,10 +767,21 @@ exports.getListByCampaign = async (req, res) => {
           ? 1
           : 0;
 
+      const blockedActiveStatuses = new Set([
+        '',
+        'rejected',
+        'declined',
+        'cancelled',
+        'canceled',
+        'completed',
+        'complete'
+      ]);
+
       const isActive =
         isCompleted === 0 &&
         isInvited === 0 &&
-        contract?.isRejected !== 1 &&
+        !isRejectedContract &&
+        !blockedActiveStatuses.has(lifecycleStatus) &&
         !!lifecycleStatus
           ? 1
           : 0;
@@ -778,20 +794,48 @@ exports.getListByCampaign = async (req, res) => {
       };
     };
 
+    const getFinalStatus = (row) => {
+      if (row.isCompleted === 1) return 'completed';
+      if (row.isActive === 1) return 'active';
+      if (row.isInvited === 1) return 'invited';
+      if (row.isRejected === 1) return 'rejected';
+      if (row.isShortlisted === 1) return 'shortlisted';
+      if (row.isUndicided === 1) return 'undecided';
+      return 'applied';
+    };
+
     const matchesInfluencerType = (row, rawType) => {
       const type = normalizeText(rawType);
 
-      if (!type || type === 'all' || type === 'all influencer' || type === 'applied') {
+      if (!type || type === 'all' || type === 'all influencer') {
         return true;
       }
-      if (type === 'shortlisted') return row.isShortlisted === 1;
-      if (type === 'undecided' || type === 'undicided') return row.isUndicided === 1;
-      if (type === 'rejected') return row.isRejected === 1;
-      if (type === 'invited') return row.isInvited === 1;
-      if (type === 'active') return row.isActive === 1;
-      if (type === 'completed') return row.isCompleted === 1;
 
-      return true;
+      if (type === 'undicided') {
+        return row.finalStatus === 'undecided';
+      }
+
+      return row.finalStatus === type;
+    };
+
+    const getPriorityRank = (status) => {
+      switch (status) {
+        case 'shortlisted':
+          return 1;
+        case 'active':
+          return 2;
+        case 'invited':
+          return 3;
+        case 'undecided':
+          return 4;
+        case 'rejected':
+          return 5;
+        case 'completed':
+          return 6;
+        case 'applied':
+        default:
+          return 7;
+      }
     };
 
     const sortRows = (rows, presetSort, rawSortField, rawSortOrder) => {
@@ -807,24 +851,14 @@ exports.getListByCampaign = async (req, res) => {
         return ta - tb;
       };
 
-      const compareNum = (a, b) => (Number(a || 0) - Number(b || 0));
+      const compareNum = (a, b) => Number(a || 0) - Number(b || 0);
 
       if (presetSort) {
         const key = normalizeText(presetSort);
 
         if (key === 'priority') {
-          const rank = (row) => {
-            if (row.isShortlisted === 1) return 1;
-            if (row.isActive === 1) return 2;
-            if (row.isInvited === 1) return 3;
-            if (row.isUndicided === 1) return 4;
-            if (row.isRejected === 1) return 5;
-            if (row.isCompleted === 1) return 6;
-            return 7;
-          };
-
           list.sort((a, b) => {
-            const r = rank(a) - rank(b);
+            const r = getPriorityRank(a.finalStatus) - getPriorityRank(b.finalStatus);
             if (r !== 0) return r;
             return compareDate(b.appliedAt, a.appliedAt);
           });
@@ -878,7 +912,8 @@ exports.getListByCampaign = async (req, res) => {
           createdAt: 'appliedAt',
           price: 'feeAmount',
           brandstatus: 'statusBrand',
-          influencerstatus: 'statusInfluencer'
+          influencerstatus: 'statusInfluencer',
+          status: 'finalStatus'
         };
 
         const requested = String(rawSortField).replace(/\s+/g, '');
@@ -900,13 +935,18 @@ exports.getListByCampaign = async (req, res) => {
           'statusBrand',
           'statusInfluencer',
           'brandStatus',
-          'influencerStatus'
+          'influencerStatus',
+          'finalStatus'
         ]);
 
         if (allowed.has(actualField)) {
           list.sort((a, b) => {
             if (actualField === 'appliedAt') {
               return dir * compareDate(a[actualField], b[actualField]);
+            }
+
+            if (actualField === 'finalStatus') {
+              return dir * (getPriorityRank(a.finalStatus) - getPriorityRank(b.finalStatus));
             }
 
             if (
@@ -939,9 +979,13 @@ exports.getListByCampaign = async (req, res) => {
         applicantCount: 0,
         statusCounts: {
           total: 0,
+          applied: 0,
+          active: 0,
           shortlisted: 0,
           undecided: 0,
-          rejected: 0
+          rejected: 0,
+          invited: 0,
+          completed: 0
         },
         isContracted: 0,
         contractId: null,
@@ -956,23 +1000,6 @@ exports.getListByCampaign = async (req, res) => {
       if (!applicant?.influencerId) continue;
       applicantByInf.set(String(applicant.influencerId), applicant);
     }
-
-    // ALWAYS FROM ApplyCampaign ONLY
-    const statusCounts = applicants.reduce(
-      (acc, applicant) => {
-        acc.total += 1;
-        if (Number(applicant?.isShortlisted) === 1) acc.shortlisted += 1;
-        if (Number(applicant?.isUndicided) === 1) acc.undecided += 1;
-        if (Number(applicant?.isRejected) === 1) acc.rejected += 1;
-        return acc;
-      },
-      {
-        total: 0,
-        shortlisted: 0,
-        undecided: 0,
-        rejected: 0
-      }
-    );
 
     const influencerIds = [
       ...new Set(
@@ -991,8 +1018,17 @@ exports.getListByCampaign = async (req, res) => {
           limit: Number(limit),
           totalPages: 0
         },
-        applicantCount: statusCounts.total,
-        statusCounts,
+        applicantCount: 0,
+        statusCounts: {
+          total: 0,
+          applied: 0,
+          active: 0,
+          shortlisted: 0,
+          undecided: 0,
+          rejected: 0,
+          invited: 0,
+          completed: 0
+        },
         isContracted: 0,
         contractId: null,
         influencers: []
@@ -1011,8 +1047,17 @@ exports.getListByCampaign = async (req, res) => {
           limit: Number(limit),
           totalPages: 0
         },
-        applicantCount: statusCounts.total,
-        statusCounts,
+        applicantCount: 0,
+        statusCounts: {
+          total: 0,
+          applied: 0,
+          active: 0,
+          shortlisted: 0,
+          undecided: 0,
+          rejected: 0,
+          invited: 0,
+          completed: 0
+        },
         isContracted: 0,
         contractId: null,
         influencers: []
@@ -1036,6 +1081,7 @@ exports.getListByCampaign = async (req, res) => {
     }).lean();
 
     const isContractedCampaign = contracts.length > 0 ? 1 : 0;
+
     const contractByInf = new Map(
       contracts
         .filter((c) => c?.influencerId)
@@ -1122,7 +1168,7 @@ exports.getListByCampaign = async (req, res) => {
       const isAccepted = contract?.isAccepted === 1 ? 1 : 0;
       const isContractRejected = contract?.isRejected === 1 ? 1 : 0;
 
-      return {
+      const baseRow = {
         influencerId: infIdStr,
         name: inf.name || '',
         primaryPlatform,
@@ -1140,17 +1186,19 @@ exports.getListByCampaign = async (req, res) => {
         createdAt: appliedAt,
         appliedAt,
 
+        // raw applicant flags
         isShortlisted,
         isUndicided,
         isUndecided: isUndicided,
         isRejected,
 
-        // new applicant status fields from ApplyCampaign.applicants[]
+        // applicant status fields from ApplyCampaign.applicants[]
         statusBrand: applicantStatuses.statusBrand,
         statusInfluencer: applicantStatuses.statusInfluencer,
         brandStatus: applicantStatuses.statusBrand,
         influencerStatus: applicantStatuses.statusInfluencer,
 
+        // lifecycle flags from contract
         isInvited: lifecycle.isInvited,
         isActive: lifecycle.isActive,
         isCompleted: lifecycle.isCompleted,
@@ -1161,13 +1209,49 @@ exports.getListByCampaign = async (req, res) => {
 
         isAssigned,
         isContracted,
-        contractId: contract?.contractId || null,
+        contractId: contract?._id || null,
         feeAmount: contract?.feeAmount || 0,
         isAccepted,
         isContractRejected,
         rejectedReason: isContractRejected ? contract?.rejectedReason || '' : ''
       };
+
+      const finalStatus = getFinalStatus(baseRow);
+
+      return {
+        ...baseRow,
+        finalStatus,
+        status: finalStatus,
+        statusLabel:
+          finalStatus === 'undecided'
+            ? 'Undecided'
+            : finalStatus.charAt(0).toUpperCase() + finalStatus.slice(1)
+      };
     });
+
+    const statusCounts = rows.reduce(
+      (acc, row) => {
+        acc.total += 1;
+        if (row.finalStatus === 'applied') acc.applied += 1;
+        if (row.finalStatus === 'active') acc.active += 1;
+        if (row.finalStatus === 'shortlisted') acc.shortlisted += 1;
+        if (row.finalStatus === 'undecided') acc.undecided += 1;
+        if (row.finalStatus === 'rejected') acc.rejected += 1;
+        if (row.finalStatus === 'invited') acc.invited += 1;
+        if (row.finalStatus === 'completed') acc.completed += 1;
+        return acc;
+      },
+      {
+        total: 0,
+        applied: 0,
+        active: 0,
+        shortlisted: 0,
+        undecided: 0,
+        rejected: 0,
+        invited: 0,
+        completed: 0
+      }
+    );
 
     let filtered = rows;
 
@@ -1200,7 +1284,8 @@ exports.getListByCampaign = async (req, res) => {
           normalizeText(row.primaryPlatform).includes(q) ||
           normalizeText(row.category).includes(q) ||
           normalizeText(row.statusBrand).includes(q) ||
-          normalizeText(row.statusInfluencer).includes(q)
+          normalizeText(row.statusInfluencer).includes(q) ||
+          normalizeText(row.finalStatus).includes(q)
         );
       });
     }
@@ -1257,7 +1342,7 @@ exports.getListByCampaign = async (req, res) => {
         sortOrder
       },
       isContracted: isContractedCampaign,
-      contractId: null,
+      contractId: contracts[0]?._id || null,
       influencers: paged
     });
   } catch (err) {

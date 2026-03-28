@@ -3791,7 +3791,10 @@ exports.viewCampaignByIdForBrand = async (req, res) => {
   try {
     const user = req.user || {};
 
-    const tokenBrandRaw = String(user.brandId ?? user.id ?? user._id ?? user.userId ?? "").trim();
+    const tokenBrandRaw = String(
+      user.brandId ?? user.id ?? user._id ?? user.userId ?? ""
+    ).trim();
+
     if (!tokenBrandRaw) {
       return fail(res, 401, "UNAUTHORIZED", "Invalid brand token", requestId);
     }
@@ -3806,36 +3809,34 @@ exports.viewCampaignByIdForBrand = async (req, res) => {
       return fail(res, 400, "VALIDATION_ERROR", "Valid brandId is required", requestId);
     }
 
-    const bodyBrandDoc = await findBrandDocByAnyId(bodyBrandId);
-    if (!bodyBrandDoc) {
-      return fail(res, 404, "NOT_FOUND", "Brand not found", requestId);
-    }
+    const allowedBrandIds = new Set([
+      String(tokenBrandDoc._id),
+      String(tokenBrandDoc.brandId || "")
+    ]);
 
-    if (String(tokenBrandDoc._id) !== String(bodyBrandDoc._id)) {
+    if (!allowedBrandIds.has(String(bodyBrandId))) {
       return fail(res, 403, "FORBIDDEN", "brandId does not match token", requestId);
     }
 
     const campaignId = clean(req.body.campaignId);
-    if (!campaignId) {
-      return fail(res, 400, "VALIDATION_ERROR", "campaignId is required", requestId);
-    }
-
-    if (!isOid(campaignId)) {
+    if (!campaignId || !isOid(campaignId)) {
       return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
     }
 
-    const filter = buildCampaignLookupFilter(campaignId, bodyBrandDoc._id);
+    const filter = buildCampaignLookupFilter(campaignId, tokenBrandDoc._id);
     if (!filter) {
       return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
     }
 
-    const campaign = await Campaign.findOne(filter);
+    const campaign = await Campaign.findOne(filter)
+      .select("-productImages")
+      .lean();
+
     if (!campaign) {
       return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
     }
 
-    const enriched = (await enrichCampaigns([campaign]))[0];
-    return ApiResponse.sendOk(res, 200, { doc: enriched }, requestId);
+    return ApiResponse.sendOk(res, 200, { doc: campaign }, requestId);
   } catch (err) {
     return sendControllerError(res, requestId, err);
   }
@@ -4711,7 +4712,7 @@ exports.getCampaignsByBrandId = async (req, res) => {
             "subcategoryIds",
             "numberOfInfluencers",
             "platformSelection",
-            "productImages",
+           
             "createdAt",
             "updatedAt",
             "scheduledAt",

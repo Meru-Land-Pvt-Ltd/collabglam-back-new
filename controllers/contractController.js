@@ -9,6 +9,7 @@ const InfluencerSignature = require("../models/influencerSignature");
 // Models & template
 const Campaign = require("../models/campaign");
 const Brand = require("../models/brand");
+const Modash = require("../models/modash");  
 const { InfluencerModel: Influencer } = require("../models/influencer");
 const ApplyCampaign = require("../models/applyCampaign"); 
 const Contract = require("../models/contract");
@@ -138,12 +139,17 @@ const ALLOWED_BRAND_PATHS = [
 
 const ALLOWED_INFLUENCER_PATHS = [
   "content.influencer.legalName",
-  "content.influencer.contactName",
-  "content.influencer.postingHandleUrl",
-  "content.influencer.contactEmail",
-  "content.influencer.contactPhone",
-  "content.influencer.whatsApp",
-  "content.influencer.address",
+  "content.influencer.email",
+  "content.influencer.phone",
+  "content.influencer.taxFormType",
+  "content.influencer.taxId",
+  "content.influencer.addressLine1",
+  "content.influencer.addressLine2",
+  "content.influencer.city",
+  "content.influencer.state",
+  "content.influencer.zipPostalCode",
+  "content.influencer.country",
+  "content.influencer.notes",
 ];
 
 // --- Fixed CollabGlam signature for display ---
@@ -2445,13 +2451,25 @@ exports.initiate = async (req, res) => {
       {
         $set: {
           "applicants.$.contractId": String(contract.contractId),
+          "applicants.$.statusInfluencer": "contract-send",
+          "applicants.$.statusBrand": "under-influencer-review",
+        },
+      }
+    );
+    await contract.save();
+    await ApplyCampaign.updateOne(
+      {
+        campaignId: String(contract.campaignId),
+        "applicants.influencerId": String(contract.influencerId),
+      },
+      {
+        $set: {
+          "applicants.$.contractId": String(contract._id),
           "applicants.$.statusInfluencer": "contractAccept",
           "applicants.$.statusBrand": "under-brand-review",
         },
       }
     );
-    await contract.save();
-
 
     await Campaign.updateOne(campaignQuery(campaignId), {
       $set: { isContracted: 1 },
@@ -3211,7 +3229,7 @@ exports.brandUpdateFields = async (req, res) => {
 
     assertRequired(req.body, ["contractId", "brandId"]);
     
-    const contract = await Contract.findOne({ contractId, brandId });
+    const contract = await Contract.findOne({ _id:contractId });
     if (!contract) return respondError(res, "Contract not found", 404);
 
     requireNotLocked(contract);
@@ -3399,7 +3417,7 @@ exports.influencerUpdateFields = async (req, res) => {
     const { contractId, influencerUpdates = {} } = req.body;
     assertRequired(req.body, ["contractId"]);
 
-    const contract = await Contract.findOne({ contractId });
+    const contract = await Contract.findOne({ _id:contractId });
     if (!contract) return respondError(res, "Contract not found", 404);
 
     requireNotLocked(contract);
@@ -3507,15 +3525,20 @@ exports.getContract = async (req, res) => {
             billingAddress: c.content?.brand?.billingAddress || "",
           },
 
-          influencer: {
-            legalName: c.content?.influencer?.legalName || "",
-            contactName: c.content?.influencer?.contactName || "",
-            postingHandleUrl: c.content?.influencer?.postingHandleUrl || "",
-            contactEmail: c.content?.influencer?.contactEmail || "",
-            contactPhone: c.content?.influencer?.contactPhone || "",
-            whatsApp: c.content?.influencer?.whatsApp || "",
-            address: c.content?.influencer?.address || "",
-          },
+         influencer: {
+  legalName: c.content?.influencer?.legalName || "",
+  email: c.content?.influencer?.email || "",
+  phone: c.content?.influencer?.phone || "",
+  taxFormType: c.content?.influencer?.taxFormType || "W-9",
+  taxId: c.content?.influencer?.taxId || "",
+  addressLine1: c.content?.influencer?.addressLine1 || "",
+  addressLine2: c.content?.influencer?.addressLine2 || "",
+  city: c.content?.influencer?.city || "",
+  state: c.content?.influencer?.state || "",
+  zipPostalCode: c.content?.influencer?.zipPostalCode || "",
+  country: c.content?.influencer?.country || "",
+  notes: c.content?.influencer?.notes || "",
+},
 
           campaign: {
             campaignTitleOrId: c.content?.campaign?.campaignTitleOrId || "",
@@ -3891,10 +3914,24 @@ exports.initiateBulk = async (req, res) => {
 
     const results = await Promise.allSettled(
       influencerIds.map(async (influencerId) => {
-        const influencerDoc = await Influencer.findById(influencerId);
+        const [influencerDoc, modashDoc] = await Promise.all([
+          Influencer.findById(influencerId),
+          Modash.findOne({ influencerId: String(influencerId) }),
+        ]);
+
         if (!influencerDoc) {
           throw new Error(`Influencer not found: ${influencerId}`);
         }
+
+        // Modash first, then fallback to influencer collection
+        const resolvedHandle =
+          modashDoc?.handle ||
+          modashDoc?.username ||
+          modashDoc?.instagramHandle ||
+          modashDoc?.instagram?.username ||
+          influencerDoc?.handle ||
+          influencerDoc?.profileUrl ||
+          "";
 
         // remove single-influencer values from shared bulk payload
         const safeContentInput = JSON.parse(JSON.stringify(contentInput || {}));
@@ -3905,8 +3942,7 @@ exports.initiateBulk = async (req, res) => {
             safeContentInput.scheduleA.deliverables.map((row, index) => ({
               ...row,
               srNo: Number(row?.srNo ?? index + 1),
-              platformHandle:
-                influencerDoc?.handle || influencerDoc?.profileUrl || row?.platformHandle || "",
+              platformHandle: resolvedHandle || row?.platformHandle || "",
             }));
         }
 
@@ -3924,7 +3960,7 @@ exports.initiateBulk = async (req, res) => {
             contactName: influencerDoc.contactName || influencerDoc.name || "",
             email: influencerDoc.email || "",
             country: influencerDoc.country || "",
-            handle: influencerDoc.handle || "",
+            handle: resolvedHandle,
           },
           autoCalcs: {},
         };
@@ -3932,18 +3968,34 @@ exports.initiateBulk = async (req, res) => {
         const content = createDefaultContent({
           campaign,
           brandDoc,
-          influencerDoc,
+          influencerDoc: {
+            ...(typeof influencerDoc.toObject === "function"
+              ? influencerDoc.toObject()
+              : influencerDoc),
+            handle: resolvedHandle,
+          },
           admin,
           requestedEffectiveDate,
           requestedEffectiveDateTimezone,
           contentInput: safeContentInput,
         });
 
+        if (!content.influencer) content.influencer = {};
+        content.influencer.postingHandleUrl = resolvedHandle;
+        content.influencer.legalName =
+          content.influencer.legalName || influencerDoc.legalName || influencerDoc.name || "";
+        content.influencer.contactName =
+          content.influencer.contactName || influencerDoc.contactName || influencerDoc.name || "";
+        content.influencer.contactEmail =
+          content.influencer.contactEmail || influencerDoc.email || "";
+        content.influencer.address =
+          content.influencer.address || influencerDoc.address || "";
+
         const requestedDateBuilt = requestedEffectiveDate
           ? buildRequestedEffectiveDate(
-            requestedEffectiveDate,
-            requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ
-          )
+              requestedEffectiveDate,
+              requestedEffectiveDateTimezone || adminTimezone || DEFAULT_TZ
+            )
           : undefined;
 
         const contract = new Contract({
@@ -3986,7 +4038,7 @@ exports.initiateBulk = async (req, res) => {
           brandAddress: content.brand.billingAddress,
           influencerName: content.influencer.legalName,
           influencerAddress: content.influencer.address,
-          influencerHandle: content.influencer.postingHandleUrl,
+          influencerHandle: resolvedHandle,
 
           lastSentAt: new Date(),
           isAssigned: 1,
@@ -3999,6 +4051,7 @@ exports.initiateBulk = async (req, res) => {
           campaignId,
           status: contract.status,
           bulk: true,
+          modashHandle: resolvedHandle,
         });
 
         await contract.save();
@@ -4038,6 +4091,7 @@ exports.initiateBulk = async (req, res) => {
         return {
           influencerId,
           contractId: contract.contractId,
+          handle: resolvedHandle,
         };
       })
     );
@@ -4705,6 +4759,62 @@ exports.getScheduleADataByInfluencerAndCampaign = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to fetch Schedule A data",
+      error: error.message,
+    });
+  }
+};
+
+exports.influencerManage = async (req, res) => {
+  try {
+    const { contractId } = req.params;
+
+    if (!contractId) {
+      return res.status(400).json({
+        success: false,
+        message: "contractId is required",
+      });
+    }
+
+    // Step 1: Find contract by contractId
+    const contract = await Contract.findById(contractId).select("-signatures -admin -other -emailLog -audit -reminders").lean();
+
+    if (!contract) {
+      return res.status(404).json({
+        success: false,
+        message: "Contract not found",
+      });
+    }
+
+    if (!contract.influencerId) {
+      return res.status(404).json({
+        success: false,
+        message: "influencerId not found in contract",
+      });
+    }
+
+    // Step 2: Match influencerId in Modash table
+    const modashData = await Modash.findOne({
+      influencerId: contract.influencerId,
+    });
+
+    if (!modashData) {
+      return res.status(404).json({
+        success: false,
+        message: "Matching influencer not found in Modash",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Influencer data fetched successfully",
+      contract,
+      modashData,
+    });
+  } catch (error) {
+    console.error("influencerManage error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch influencer data",
       error: error.message,
     });
   }

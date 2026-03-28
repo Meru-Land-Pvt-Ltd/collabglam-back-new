@@ -34,6 +34,7 @@ const {
    getDeliverablesByInfluencerAndCampaign,
   getMilestonesByInfluencerAndCampaign,
   getScheduleADataByInfluencerAndCampaign,
+  influencerManage
 } = require('../controllers/contractController');
 
 // Initiation & viewing
@@ -93,4 +94,5 @@ router.post('/upload', upload.single('signature'), uploadBrandSignature);
 router.get('/signature/:brandId', getBrandSignature);
 router.post('/upload-influencer', upload.single('signature'), uploadInfluencerSignature);
 router.get('/signature-influencer/:influencerId', getInfluencerSignature);
+router.get('/manage/:contractId', influencerManage);
 module.exports = router;
