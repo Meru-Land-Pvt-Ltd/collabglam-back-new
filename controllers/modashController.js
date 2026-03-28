@@ -2299,7 +2299,7 @@ async function getMediaKitLink(req, res) {
       return res.status(404).json({ error: 'Unable to create media kit link' });
     }
 
-    const baseUrl = cleanStr(process.env.FRONTEND_BASE_URL || 'http://localhost:3000');
+    const baseUrl = cleanStr(process.env.CAMPAIGN_BASE_URL || 'http://localhost:3000');
     const link = `${baseUrl}/mediakit/${saved._id}`;
 
     return res.json({

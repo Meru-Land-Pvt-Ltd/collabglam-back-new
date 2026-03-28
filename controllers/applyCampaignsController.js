@@ -7,7 +7,6 @@ const { createAndEmit } = require('../utils/notifier');
 const Modash = require('../models/modash');
 const Brand = require('../models/brand');
 const { sendMail } = require('../utils/mailer');
-
 const ACTIVE_CONTRACT_STATUSES = [
   'draft',
   'sent',
@@ -202,7 +201,8 @@ exports.applyToCampaign = async (req, res) => {
             name: inf.name || '',
             isShortlisted: 0,
             isUndicided: 0,
-            isRejected: 0
+            isRejected: 0,
+            appliedAt: new Date()
           }
         }
       },
@@ -452,32 +452,520 @@ ${dashboardLink}
  *   isRejected     // optional: 1
  * }
  */
+
+
 exports.getListByCampaign = async (req, res) => {
   const {
     campaignId,
     page = 1,
     limit = 10,
     search,
+
+    // generic sorting
     sortField,
-    createdPage,
     sortOrder = 0,
-    isShortlisted,
-    isUndicided,
-    isRejected
+
+    // preset sorting from UI dropdown
+    sortBy, // priority | recentlyAdded | highestEngagement | highestFollower | priceLowToHigh | priceHighToLow
+
+    createdPage,
+
+    // tabs / status filters
+    filterStatus,   // all | applied | shortlisted | undecided | rejected | active | invited | completed
+    filter,
+    influencerType,
+
+    // modash filters
+    engagementRate, // "0-2%" | "2-5%" | "5-8%" | "8-12%" | "12%+" | array
+    influencerTier, // "Nano" | "Micro" | "Mid-tier" | "Macro" | "Mega" | array
+    platform,       // "Instagram" | "Youtube" | "TikTok" | array
+
+    // category filter from InfluencerModel.categories[].categoryId
+    categoryId,     // single category id
+    categoryIds,    // array of category ids
+    category,       // fallback alias if frontend sends category
+
+    // date filter from ApplyCampaign only
+    date,           // "today" | "last7days" | "last30days"
+    dateFilter      // fallback alias or { from, to }
   } = req.body || {};
 
   if (!campaignId) {
     return res.status(400).json({ message: 'campaignId is required' });
   }
 
-  const parseFlag = (value) => {
-    if (value === 1 || value === '1' || value === true || value === 'true') return 1;
-    if (value === 0 || value === '0' || value === false || value === 'false') return 0;
-    return undefined;
-  };
-
   try {
-    const record = await ApplyCampaign.findOne({ campaignId: String(campaignId) }).lean();
+    const normalizeText = (value) => String(value ?? '').trim().toLowerCase();
+    const normalizeStatus = (value) => String(value ?? '').trim().toUpperCase();
+    const normalizeRole = (value) => String(value ?? '').trim().toLowerCase();
+
+    const toArray = (value) => {
+      if (value == null || value === '') return [];
+      if (Array.isArray(value)) {
+        return value.map((v) => String(v ?? '').trim()).filter(Boolean);
+      }
+      return String(value)
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean);
+    };
+
+    const getNested = (obj, path) => {
+      try {
+        return path
+          .split('.')
+          .reduce((acc, key) => (acc == null ? undefined : acc[key]), obj);
+      } catch {
+        return undefined;
+      }
+    };
+
+    const toNumber = (value) => {
+      if (value == null) return null;
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+
+      const cleaned = String(value).replace(/[%,$\s,]/g, '');
+      const num = Number(cleaned);
+      return Number.isFinite(num) ? num : null;
+    };
+
+    const getFirstNumber = (obj, paths = []) => {
+      for (const path of paths) {
+        const value = getNested(obj, path);
+        const num = toNumber(value);
+        if (num != null) return num;
+      }
+      return null;
+    };
+
+    const getFirstText = (obj, paths = []) => {
+      for (const path of paths) {
+        const value = getNested(obj, path);
+        if (value != null && String(value).trim()) {
+          return String(value).trim();
+        }
+      }
+      return null;
+    };
+
+    const serializeModashProfile = (profile) => {
+      if (!profile) return null;
+      return {
+        ...profile,
+        _id: profile._id ? String(profile._id) : null,
+        influencerId: profile.influencerId ? String(profile.influencerId) : null
+      };
+    };
+
+    const getFollowersFromProfile = (profile) => {
+      return (
+        getFirstNumber(profile, [
+          'followers',
+          'followerCount',
+          'followersCount',
+          'audienceSize',
+          'audience_size',
+          'stats.followers',
+          'metrics.followers',
+          'profile.followers'
+        ]) || 0
+      );
+    };
+
+    const getEngagementRateFromProfile = (profile) => {
+      let value = getFirstNumber(profile, [
+        'engagementRate',
+        'engagement_rate',
+        'avgEngagementRate',
+        'avg_engagement_rate',
+        'er',
+        'stats.engagementRate',
+        'metrics.engagementRate',
+        'engagement.rate'
+      ]);
+
+      if (value == null) return null;
+
+      // if stored as decimal like 0.045 => 4.5%
+      if (value > 0 && value <= 1) {
+        value = value * 100;
+      }
+
+      return Number(value.toFixed(2));
+    };
+
+    const getPlatformFromProfile = (profile) => {
+      return getFirstText(profile, [
+        'provider',
+        'platform',
+        'channel',
+        'source',
+        'network'
+      ]);
+    };
+
+    const resolveTierFromFollowers = (followers) => {
+      const n = Number(followers) || 0;
+
+      if (n >= 1000 && n <= 10000) return 'nano';
+      if (n > 10000 && n <= 50000) return 'micro';
+      if (n > 50000 && n <= 250000) return 'mid-tier';
+      if (n > 250000 && n <= 1000000) return 'macro';
+      if (n > 1000000) return 'mega';
+      return null;
+    };
+
+    const normalizeTierToken = (value) => {
+      const token = normalizeText(value);
+      if (token.includes('nano')) return 'nano';
+      if (token.includes('micro')) return 'micro';
+      if (token.includes('mid')) return 'mid-tier';
+      if (token.includes('macro')) return 'macro';
+      if (token.includes('mega')) return 'mega';
+      return token;
+    };
+
+    const matchesTier = (followers, selectedTiers) => {
+      if (!selectedTiers.length) return true;
+      const tier = resolveTierFromFollowers(followers);
+      if (!tier) return false;
+      return selectedTiers.map(normalizeTierToken).includes(tier);
+    };
+
+    const normalizeEngagementBucket = (value) =>
+      normalizeText(value).replace(/\s+/g, '').replace('–', '-').replace('—', '-');
+
+    const matchesEngagementRate = (rate, selectedBuckets) => {
+      if (!selectedBuckets.length) return true;
+      if (rate == null) return false;
+
+      const buckets = selectedBuckets.map(normalizeEngagementBucket);
+
+      return buckets.some((bucket) => {
+        if (bucket === 'all') return true;
+        if (bucket === '0-2%') return rate >= 0 && rate <= 2;
+        if (bucket === '2-5%') return rate > 2 && rate <= 5;
+        if (bucket === '5-8%') return rate > 5 && rate <= 8;
+        if (bucket === '8-12%') return rate > 8 && rate <= 12;
+        if (bucket === '12%+' || bucket === '12+') return rate > 12;
+        return false;
+      });
+    };
+
+    const matchesPlatform = (value, selectedPlatforms) => {
+      if (!selectedPlatforms.length) return true;
+      return selectedPlatforms.map(normalizeText).includes(normalizeText(value));
+    };
+
+    // CATEGORY FILTER ONLY FROM InfluencerModel.categories ARRAY
+    const matchesCategoryIds = (rowCategoryIds, selectedCategoryIds) => {
+      if (!selectedCategoryIds.length) return true;
+      const current = (rowCategoryIds || []).map(String);
+      return selectedCategoryIds.some((id) => current.includes(String(id)));
+    };
+
+    const resolveApplicantDate = (applicant, recordCreatedAt) => {
+      return applicant?.appliedAt || applicant?.updatedAt || recordCreatedAt || null;
+    };
+
+    const resolveApplicantFallbackStatus = (applicant) => {
+      if (Number(applicant?.isShortlisted) === 1) return 'shortlisted';
+      if (Number(applicant?.isUndicided) === 1) return 'not confirm';
+      if (Number(applicant?.isRejected) === 1) return 'rejected';
+      return '';
+    };
+
+    const resolveApplicantStatuses = (applicant) => {
+      const fallback = resolveApplicantFallbackStatus(applicant);
+      const statusBrand = String(applicant?.statusBrand || '').trim() || fallback;
+      const statusInfluencer = String(applicant?.statusInfluencer || '').trim() || fallback;
+
+      return {
+        statusBrand,
+        statusInfluencer
+      };
+    };
+
+    const matchesDateFilter = (rowDate, rawDateFilter) => {
+      if (!rawDateFilter || rawDateFilter === 'all') return true;
+      if (!rowDate) return false;
+
+      const valueDate = new Date(rowDate);
+      if (Number.isNaN(valueDate.getTime())) return false;
+
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+      if (typeof rawDateFilter === 'object' && rawDateFilter !== null) {
+        const from = rawDateFilter.from ? new Date(rawDateFilter.from) : null;
+        const to = rawDateFilter.to ? new Date(rawDateFilter.to) : null;
+
+        if (from && !Number.isNaN(from.getTime()) && valueDate < from) return false;
+        if (to && !Number.isNaN(to.getTime())) {
+          const end = new Date(to);
+          end.setHours(23, 59, 59, 999);
+          if (valueDate > end) return false;
+        }
+        return true;
+      }
+
+      const token = normalizeText(rawDateFilter).replace(/\s+/g, '');
+
+      if (token === 'today') {
+        return valueDate >= todayStart;
+      }
+
+      if (token === 'last7days' || token === '7days') {
+        const start = new Date(todayStart);
+        start.setDate(start.getDate() - 6);
+        return valueDate >= start;
+      }
+
+      if (token === 'last30days' || token === '30days') {
+        const start = new Date(todayStart);
+        start.setDate(start.getDate() - 29);
+        return valueDate >= start;
+      }
+
+      return true;
+    };
+
+    const resolveLifecycleFlags = (contract) => {
+      if (!contract) {
+        return {
+          lifecycleStatus: null,
+          isInvited: 0,
+          isActive: 0,
+          isCompleted: 0
+        };
+      }
+
+      const lifecycleStatus = normalizeText(
+        contract.status ||
+          contract.contractStatus ||
+          contract.lifecycleStatus ||
+          contract.currentStatus
+      );
+
+      const awaitingRole = normalizeText(
+        contract.awaitingRole ||
+          contract.awaiting_role ||
+          contract.awaiting?.role
+      );
+
+      const isRejectedContract = Number(contract?.isRejected) === 1;
+
+      const isCompleted =
+        lifecycleStatus === 'completed' || lifecycleStatus === 'complete' ? 1 : 0;
+
+      const isInvited =
+        lifecycleStatus === 'invited' ||
+        lifecycleStatus === 'invite_sent' ||
+        lifecycleStatus === 'pending' ||
+        (lifecycleStatus === 'ready_to_sign' && awaitingRole === 'influencer')
+          ? 1
+          : 0;
+
+      const blockedActiveStatuses = new Set([
+        '',
+        'rejected',
+        'declined',
+        'cancelled',
+        'canceled',
+        'completed',
+        'complete'
+      ]);
+
+      const isActive =
+        isCompleted === 0 &&
+        isInvited === 0 &&
+        !isRejectedContract &&
+        !blockedActiveStatuses.has(lifecycleStatus) &&
+        !!lifecycleStatus
+          ? 1
+          : 0;
+
+      return {
+        lifecycleStatus,
+        isInvited,
+        isActive,
+        isCompleted
+      };
+    };
+
+    const getFinalStatus = (row) => {
+      if (row.isCompleted === 1) return 'completed';
+      if (row.isActive === 1) return 'active';
+      if (row.isInvited === 1) return 'invited';
+      if (row.isRejected === 1) return 'rejected';
+      if (row.isShortlisted === 1) return 'shortlisted';
+      if (row.isUndicided === 1) return 'undecided';
+      return 'applied';
+    };
+
+    const matchesInfluencerType = (row, rawType) => {
+      const type = normalizeText(rawType);
+
+      if (!type || type === 'all' || type === 'all influencer') {
+        return true;
+      }
+
+      if (type === 'undicided') {
+        return row.finalStatus === 'undecided';
+      }
+
+      return row.finalStatus === type;
+    };
+
+    const getPriorityRank = (status) => {
+      switch (status) {
+        case 'shortlisted':
+          return 1;
+        case 'active':
+          return 2;
+        case 'invited':
+          return 3;
+        case 'undecided':
+          return 4;
+        case 'rejected':
+          return 5;
+        case 'completed':
+          return 6;
+        case 'applied':
+        default:
+          return 7;
+      }
+    };
+
+    const sortRows = (rows, presetSort, rawSortField, rawSortOrder) => {
+      const list = [...rows];
+      const dir = Number(rawSortOrder) === 1 ? -1 : 1;
+
+      const compareText = (a, b) =>
+        String(a ?? '').localeCompare(String(b ?? ''));
+
+      const compareDate = (a, b) => {
+        const ta = a ? new Date(a).getTime() : 0;
+        const tb = b ? new Date(b).getTime() : 0;
+        return ta - tb;
+      };
+
+      const compareNum = (a, b) => Number(a || 0) - Number(b || 0);
+
+      if (presetSort) {
+        const key = normalizeText(presetSort);
+
+        if (key === 'priority') {
+          list.sort((a, b) => {
+            const r = getPriorityRank(a.finalStatus) - getPriorityRank(b.finalStatus);
+            if (r !== 0) return r;
+            return compareDate(b.appliedAt, a.appliedAt);
+          });
+
+          return list;
+        }
+
+        if (key === 'recentlyadded' || key === 'recently added') {
+          list.sort((a, b) => compareDate(b.appliedAt, a.appliedAt));
+          return list;
+        }
+
+        if (key === 'highestengagement' || key === 'highest engagement') {
+          list.sort((a, b) => compareNum(b.engagementRate, a.engagementRate));
+          return list;
+        }
+
+        if (key === 'highestfollower' || key === 'highest follower') {
+          list.sort((a, b) => compareNum(b.audienceSize, a.audienceSize));
+          return list;
+        }
+
+        if (
+          key === 'pricelowtohigh' ||
+          key === 'price low to high' ||
+          key === 'price: low to high'
+        ) {
+          list.sort((a, b) => compareNum(a.feeAmount, b.feeAmount));
+          return list;
+        }
+
+        if (
+          key === 'pricehightolow' ||
+          key === 'price high to low' ||
+          key === 'price: high to low'
+        ) {
+          list.sort((a, b) => compareNum(b.feeAmount, a.feeAmount));
+          return list;
+        }
+      }
+
+      if (rawSortField) {
+        const aliasMap = {
+          profile: 'name',
+          followers: 'audienceSize',
+          follower: 'audienceSize',
+          engagement: 'engagementRate',
+          date: 'appliedAt',
+          applieddate: 'appliedAt',
+          appliedAt: 'appliedAt',
+          createdAt: 'appliedAt',
+          price: 'feeAmount',
+          brandstatus: 'statusBrand',
+          influencerstatus: 'statusInfluencer',
+          status: 'finalStatus'
+        };
+
+        const requested = String(rawSortField).replace(/\s+/g, '');
+        const actualField = aliasMap[requested] || rawSortField;
+
+        const allowed = new Set([
+          'name',
+          'category',
+          'audienceSize',
+          'engagementRate',
+          'appliedAt',
+          'primaryPlatform',
+          'platform',
+          'handle',
+          'feeAmount',
+          'isShortlisted',
+          'isUndicided',
+          'isRejected',
+          'statusBrand',
+          'statusInfluencer',
+          'brandStatus',
+          'influencerStatus',
+          'finalStatus'
+        ]);
+
+        if (allowed.has(actualField)) {
+          list.sort((a, b) => {
+            if (actualField === 'appliedAt') {
+              return dir * compareDate(a[actualField], b[actualField]);
+            }
+
+            if (actualField === 'finalStatus') {
+              return dir * (getPriorityRank(a.finalStatus) - getPriorityRank(b.finalStatus));
+            }
+
+            if (
+              ['audienceSize', 'engagementRate', 'feeAmount', 'isShortlisted', 'isUndicided', 'isRejected']
+                .includes(actualField)
+            ) {
+              return dir * compareNum(a[actualField], b[actualField]);
+            }
+
+            return dir * compareText(a[actualField], b[actualField]);
+          });
+        }
+      }
+
+      return list;
+    };
+
+    const record = await ApplyCampaign.findOne({
+      campaignId: String(campaignId)
+    }).lean();
 
     if (!record) {
       return res.status(200).json({
@@ -488,176 +976,287 @@ exports.getListByCampaign = async (req, res) => {
           totalPages: 0
         },
         applicantCount: 0,
+        statusCounts: {
+          total: 0,
+          applied: 0,
+          active: 0,
+          shortlisted: 0,
+          undecided: 0,
+          rejected: 0,
+          invited: 0,
+          completed: 0
+        },
         isContracted: 0,
         contractId: null,
         influencers: []
       });
     }
 
-    const applicantStatusMap = new Map();
-    for (const applicant of record.applicants || []) {
-      if (!applicant?.influencerId) continue;
+    const applicants = Array.isArray(record.applicants) ? record.applicants : [];
 
-      applicantStatusMap.set(String(applicant.influencerId), {
-        isShortlisted: applicant.isShortlisted === 1 ? 1 : 0,
-        isUndicided: applicant.isUndicided === 1 ? 1 : 0,
-        isRejected: applicant.isRejected === 1 ? 1 : 0
-      });
+    const applicantByInf = new Map();
+    for (const applicant of applicants) {
+      if (!applicant?.influencerId) continue;
+      applicantByInf.set(String(applicant.influencerId), applicant);
     }
 
-    const decisionFilters = {};
-    const shortlistedFlag = parseFlag(isShortlisted);
-    const undecidedFlag = parseFlag(isUndicided);
-    const rejectedFlag = parseFlag(isRejected);
-
-    if (shortlistedFlag !== undefined) decisionFilters.isShortlisted = shortlistedFlag;
-    if (undecidedFlag !== undefined) decisionFilters.isUndicided = undecidedFlag;
-    if (rejectedFlag !== undefined) decisionFilters.isRejected = rejectedFlag;
-
-    const hasDecisionFilter = Object.keys(decisionFilters).length > 0;
-
-    const filteredApplicants = (record.applicants || []).filter((applicant) => {
-      if (!applicant?.influencerId || !isValidObjectId(applicant.influencerId)) return false;
-
-      if (!hasDecisionFilter) return true;
-
-      return Object.entries(decisionFilters).every(([key, expected]) => {
-        return Number(applicant?.[key] || 0) === expected;
-      });
-    });
-
-    const influencerIds = filteredApplicants
-      .map((a) => a.influencerId)
-      .filter((id) => id && isValidObjectId(id))
-      .map(String);
+    const influencerIds = [
+      ...new Set(
+        applicants
+          .map((a) => a?.influencerId)
+          .filter((id) => id && mongoose.isValidObjectId(id))
+          .map(String)
+      )
+    ];
 
     if (!influencerIds.length) {
       return res.status(200).json({
-        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
-        applicantCount: hasDecisionFilter ? 0 : (record.applicants?.length || 0),
+        meta: {
+          total: 0,
+          page: Number(page),
+          limit: Number(limit),
+          totalPages: 0
+        },
+        applicantCount: 0,
+        statusCounts: {
+          total: 0,
+          applied: 0,
+          active: 0,
+          shortlisted: 0,
+          undecided: 0,
+          rejected: 0,
+          invited: 0,
+          completed: 0
+        },
         isContracted: 0,
         contractId: null,
         influencers: []
       });
     }
 
-    const filter = {
-      _id: { $in: influencerIds.map((id) => toObjectId(id)) }
-    };
-
-    if (search?.trim()) {
-      filter.name = { $regex: search.trim(), $options: 'i' };
-    }
-
-    const influencersRaw = await InfluencerModel.find(filter).lean();
+    const influencersRaw = await InfluencerModel.find({
+      _id: { $in: influencerIds.map((id) => new mongoose.Types.ObjectId(id)) }
+    }).lean();
 
     if (!influencersRaw.length) {
       return res.status(200).json({
-        meta: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 },
-        applicantCount: hasDecisionFilter ? 0 : (record.applicants?.length || 0),
+        meta: {
+          total: 0,
+          page: Number(page),
+          limit: Number(limit),
+          totalPages: 0
+        },
+        applicantCount: 0,
+        statusCounts: {
+          total: 0,
+          applied: 0,
+          active: 0,
+          shortlisted: 0,
+          undecided: 0,
+          rejected: 0,
+          invited: 0,
+          completed: 0
+        },
         isContracted: 0,
         contractId: null,
         influencers: []
       });
     }
 
-    
     const modashProfiles = await Modash.find({
       influencerId: { $in: influencerIds }
     }).lean();
 
     const modashByInf = new Map();
-    for (const p of modashProfiles) {
-      if (!p.influencerId) continue;
-      const key = String(p.influencerId);
+    for (const profile of modashProfiles) {
+      if (!profile?.influencerId) continue;
+      const key = String(profile.influencerId);
       if (!modashByInf.has(key)) modashByInf.set(key, []);
-      modashByInf.get(key).push(p);
+      modashByInf.get(key).push(profile);
     }
 
-    const contracts = await Contract.find({ campaignId: String(campaignId) }).lean();
+    const contracts = await Contract.find({
+      campaignId: String(campaignId)
+    }).lean();
+
     const isContractedCampaign = contracts.length > 0 ? 1 : 0;
-    const contractByInf = new Map(contracts.map((c) => [String(c.influencerId), c]));
-    const approvedId = record.approved?.[0]?.influencerId
-      ? String(record.approved[0].influencerId)
-      : null;
-    const applicationCreatedAt = record.createdAt || record._id?.getTimestamp?.() || null;
 
-    const serializeModashProfile = (profile) => {
-      if (!profile) return null;
+    const contractByInf = new Map(
+      contracts
+        .filter((c) => c?.influencerId)
+        .map((c) => [String(c.influencerId), c])
+    );
 
-      return {
-        ...profile,
-        _id: profile._id ? String(profile._id) : null,
-        influencerId: profile.influencerId ? String(profile.influencerId) : null
-      };
-    };
+    const approvedIds = new Set(
+      (record.approved || [])
+        .map((a) => a?.influencerId)
+        .filter(Boolean)
+        .map(String)
+    );
 
-    const condensed = influencersRaw.map((inf) => {
+    const recordCreatedAt =
+      record.createdAt || record._id?.getTimestamp?.() || null;
+
+    const selectedStatus = filterStatus || influencerType || filter || '';
+    const selectedEngagementRates = toArray(engagementRate).filter(
+      (v) => normalizeText(v) !== 'all'
+    );
+    const selectedTiers = toArray(influencerTier).filter(
+      (v) => normalizeText(v) !== 'all'
+    );
+    const selectedPlatforms = toArray(platform).filter(
+      (v) => normalizeText(v) !== 'all'
+    );
+    const selectedCategoryIds = [
+      ...toArray(categoryIds),
+      ...toArray(categoryId),
+      ...toArray(category)
+    ]
+      .map(String)
+      .filter((v, i, arr) => v && arr.indexOf(v) === i);
+
+    const selectedDateFilter = dateFilter || date || null;
+
+    const rows = influencersRaw.map((inf) => {
       const infIdStr = String(inf._id);
+      const applicant = applicantByInf.get(infIdStr) || null;
 
       const rawProfiles = modashByInf.get(infIdStr) || [];
-      const audienceSize = rawProfiles.reduce(
-        (sum, p) => sum + (Number(p?.followers) || 0),
-        0
-      );
-
       const chosenRaw = pickModashProfile(rawProfiles);
       const chosen = serializeModashProfile(chosenRaw);
       const allProfiles = rawProfiles.map(serializeModashProfile);
+
+      const followersFromChosen = getFollowersFromProfile(chosenRaw);
+      const audienceSize =
+        followersFromChosen ||
+        rawProfiles.reduce((sum, p) => sum + (getFollowersFromProfile(p) || 0), 0);
+
+      const engagementRateValue = getEngagementRateFromProfile(chosenRaw);
+      const primaryPlatform = getPlatformFromProfile(chosenRaw) || null;
 
       let handle = null;
       if (chosenRaw) {
         handle =
           (chosenRaw.handle || chosenRaw.username || chosenRaw.fullname || '').trim() || null;
       }
-      if (handle && !handle.startsWith('@')) handle = '@' + handle;
-
-      const primaryPlatform = chosenRaw?.provider || null;
-
-      let categoryName = null;
-      if (Array.isArray(inf.categories) && inf.categories.length > 0) {
-        categoryName = inf.categories[0]?.name || null;
+      if (handle && !handle.startsWith('@')) {
+        handle = '@' + handle;
       }
 
-      const decision = applicantStatusMap.get(infIdStr) || {
-        isShortlisted: 0,
-        isUndicided: 0,
-        isRejected: 0
-      };
+      const influencerCategories = Array.isArray(inf?.categories) ? inf.categories : [];
+      const influencerCategoryIds = influencerCategories
+        .map((c) => c?.categoryId || c?._id || c?.id)
+        .filter(Boolean)
+        .map(String);
 
-      const c = contractByInf.get(infIdStr);
-      const isAssigned = approvedId === infIdStr ? 1 : 0;
-      const isContracted = c ? 1 : 0;
-      const isAccepted = c?.isAccepted === 1 ? 1 : 0;
-      const isRejectedContract = c?.isRejected === 1 ? 1 : 0;
+      const categoryName =
+        influencerCategories.find((c) => c?.name)?.name || null;
 
-      return {
+      const contract = contractByInf.get(infIdStr);
+      const lifecycle = resolveLifecycleFlags(contract);
+
+      const isShortlisted = Number(applicant?.isShortlisted) === 1 ? 1 : 0;
+      const isUndicided = Number(applicant?.isUndicided) === 1 ? 1 : 0;
+      const isRejected = Number(applicant?.isRejected) === 1 ? 1 : 0;
+      const applicantStatuses = resolveApplicantStatuses(applicant);
+
+      const appliedAt = resolveApplicantDate(applicant, recordCreatedAt);
+
+      const isAssigned = approvedIds.has(infIdStr) ? 1 : 0;
+      const isContracted = contract ? 1 : 0;
+      const isAccepted = contract?.isAccepted === 1 ? 1 : 0;
+      const isContractRejected = contract?.isRejected === 1 ? 1 : 0;
+
+      const baseRow = {
         influencerId: infIdStr,
         name: inf.name || '',
         primaryPlatform,
+        platform: primaryPlatform,
         handle,
-        category: categoryName,
-        audienceSize,
-        createdAt: applicationCreatedAt,
 
-        isShortlisted: decision.isShortlisted,
-        isUndicided: decision.isUndicided,
-        isRejected: decision.isRejected,
+        // influencer table categories
+        category: categoryName,
+        categoryIds: influencerCategoryIds,
+
+        audienceSize,
+        engagementRate: engagementRateValue,
+        influencerTierResolved: resolveTierFromFollowers(audienceSize),
+
+        createdAt: appliedAt,
+        appliedAt,
+
+        // raw applicant flags
+        isShortlisted,
+        isUndicided,
+        isUndecided: isUndicided,
+        isRejected,
+
+        // applicant status fields from ApplyCampaign.applicants[]
+        statusBrand: applicantStatuses.statusBrand,
+        statusInfluencer: applicantStatuses.statusInfluencer,
+        brandStatus: applicantStatuses.statusBrand,
+        influencerStatus: applicantStatuses.statusInfluencer,
+
+        // lifecycle flags from contract
+        isInvited: lifecycle.isInvited,
+        isActive: lifecycle.isActive,
+        isCompleted: lifecycle.isCompleted,
+        lifecycleStatus: lifecycle.lifecycleStatus,
+
+        modashProfile: chosen,
+        modashProfiles: allProfiles,
 
         isAssigned,
         isContracted,
-        contractId: c?.contractId || null,
-        feeAmount: c?.feeAmount || 0,
+        contractId: contract?._id || null,
+        feeAmount: contract?.feeAmount || 0,
         isAccepted,
-        isContractRejected: isRejectedContract,
-        rejectedReason: isRejectedContract ? c?.rejectedReason || '' : ''
+        isContractRejected,
+        rejectedReason: isContractRejected ? contract?.rejectedReason || '' : ''
+      };
+
+      const finalStatus = getFinalStatus(baseRow);
+
+      return {
+        ...baseRow,
+        finalStatus,
+        status: finalStatus,
+        statusLabel:
+          finalStatus === 'undecided'
+            ? 'Undecided'
+            : finalStatus.charAt(0).toUpperCase() + finalStatus.slice(1)
       };
     });
 
-    let filtered = condensed;
+    const statusCounts = rows.reduce(
+      (acc, row) => {
+        acc.total += 1;
+        if (row.finalStatus === 'applied') acc.applied += 1;
+        if (row.finalStatus === 'active') acc.active += 1;
+        if (row.finalStatus === 'shortlisted') acc.shortlisted += 1;
+        if (row.finalStatus === 'undecided') acc.undecided += 1;
+        if (row.finalStatus === 'rejected') acc.rejected += 1;
+        if (row.finalStatus === 'invited') acc.invited += 1;
+        if (row.finalStatus === 'completed') acc.completed += 1;
+        return acc;
+      },
+      {
+        total: 0,
+        applied: 0,
+        active: 0,
+        shortlisted: 0,
+        undecided: 0,
+        rejected: 0,
+        invited: 0,
+        completed: 0
+      }
+    );
 
+    let filtered = rows;
+
+    // optional createdPage logic from your current code
     if (createdPage === true || createdPage === 'true') {
-      filtered = condensed.filter((row) => {
+      filtered = filtered.filter((row) => {
         const c = contractByInf.get(String(row.influencerId));
         if (!c) return true;
 
@@ -674,38 +1273,44 @@ exports.getListByCampaign = async (req, res) => {
       });
     }
 
-    const dir = sortOrder === 1 ? -1 : 1;
-
-    if (sortField) {
-
-      const allowed = new Set([
-        'name',
-        'primaryPlatform',
-        'category',
-        'audienceSize',
-        'handle',
-        'createdAt'
-      ]);
-
-      if (allowed.has(sortField)) {
-        filtered.sort((a, b) => {
-          const av = a[sortField];
-          const bv = b[sortField];
-
-          if (sortField === 'createdAt') {
-            const ta = av ? new Date(av).getTime() : 0;
-            const tb = bv ? new Date(bv).getTime() : 0;
-            return dir * (ta - tb);
-          }
-
-          if (typeof av === 'number' && typeof bv === 'number') {
-            return dir * (av - bv);
-          }
-
-          return dir * String(av ?? '').localeCompare(String(bv ?? ''));
-        });
-      }
+    // search on row data
+    if (search?.trim()) {
+      const q = normalizeText(search);
+      filtered = filtered.filter((row) => {
+        return (
+          normalizeText(row.name).includes(q) ||
+          normalizeText(row.handle).includes(q) ||
+          normalizeText(row.primaryPlatform).includes(q) ||
+          normalizeText(row.category).includes(q) ||
+          normalizeText(row.statusBrand).includes(q) ||
+          normalizeText(row.statusInfluencer).includes(q) ||
+          normalizeText(row.finalStatus).includes(q)
+        );
+      });
     }
+
+    // 1) tab/status filter
+    filtered = filtered.filter((row) => matchesInfluencerType(row, selectedStatus));
+
+    // 2) modash filters
+    filtered = filtered.filter((row) => {
+      if (!matchesEngagementRate(row.engagementRate, selectedEngagementRates)) return false;
+      if (!matchesTier(row.audienceSize, selectedTiers)) return false;
+      if (!matchesPlatform(row.primaryPlatform, selectedPlatforms)) return false;
+      return true;
+    });
+
+    // 3) categoryId filter from Influencer.categories[]
+    filtered = filtered.filter((row) =>
+      matchesCategoryIds(row.categoryIds, selectedCategoryIds)
+    );
+
+    // 4) date filter only from ApplyCampaign
+    filtered = filtered.filter((row) =>
+      matchesDateFilter(row.appliedAt, selectedDateFilter)
+    );
+
+    filtered = sortRows(filtered, sortBy, sortField, sortOrder);
 
     const pageNum = Math.max(1, parseInt(page, 10));
     const limNum = Math.max(1, parseInt(limit, 10));
@@ -722,9 +1327,21 @@ exports.getListByCampaign = async (req, res) => {
         limit: limNum,
         totalPages: Math.ceil(total / limNum)
       },
-      applicantCount: total,
+      applicantCount: statusCounts.total,
+      statusCounts,
+      appliedFilters: {
+        status: selectedStatus || null,
+        engagementRate: selectedEngagementRates,
+        influencerTier: selectedTiers,
+        platform: selectedPlatforms,
+        categoryIds: selectedCategoryIds,
+        date: selectedDateFilter || null,
+        sortBy: sortBy || null,
+        sortField: sortField || null,
+        sortOrder
+      },
       isContracted: isContractedCampaign,
-      contractId: null,
+      contractId: contracts[0]?._id || null,
       influencers: paged
     });
   } catch (err) {
@@ -732,7 +1349,6 @@ exports.getListByCampaign = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
-
 /**
  * POST /ApplyCampaigns/approve
  * Body: { campaignId, influencerId }

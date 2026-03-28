@@ -113,12 +113,24 @@ const ContentBrandSchema = new mongoose.Schema(
 const ContentInfluencerSchema = new mongoose.Schema(
   {
     legalName: { type: String, default: "" },
-    contactName: { type: String, default: "" },
-    postingHandleUrl: { type: String, default: "" },
-    contactEmail: { type: String, default: "" },
-    contactPhone: { type: String, default: "" },
-    whatsApp: { type: String, default: "" },
-    address: { type: String, default: "" },
+    email: { type: String, default: "" },
+    phone: { type: String, default: "" },
+
+    taxFormType: {
+      type: String,
+     
+      default: "",
+    },
+    taxId: { type: String, default: "" },
+
+    addressLine1: { type: String, default: "" },
+    addressLine2: { type: String, default: "" },
+    city: { type: String, default: "" },
+    state: { type: String, default: "" },
+    zipPostalCode: { type: String, default: "" },
+    country: { type: String, default: "" },
+
+    notes: { type: String, default: "" },
   },
   { _id: false }
 );
@@ -441,7 +453,11 @@ const ContractSchema = new mongoose.Schema(
     brandId: { type: String, index: true, required: true },
     influencerId: { type: String, index: true, required: true },
     campaignId: { type: String, index: true, required: true },
-
+    brandPoc: { type: String, default: "" },
+    brandPocDesignation: { type: String, default: "" },
+    isFinalUpdate: { type: Boolean, default: false }, 
+    signatureBrand: { type: String, default: "" },
+    signatureInfluencer: { type: String, default: "" },
     paymentType: {
       type: String,
       enum: Object.values(PAYMENT_TYPES),
