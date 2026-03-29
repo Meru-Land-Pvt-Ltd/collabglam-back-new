@@ -9,6 +9,9 @@ const {
   listInfluencerDeliverablesByCampaign,
   listInfluencerDeliverablesByCampaign2,
   getAllDeliverables,
+  getAllDeliverablesByBrandOrInfluencerPost,
+  getAllDeliverablesByMilestoneIdPost,
+  getDeliverableStatusByInfluencerIdPost
 } = require("../controllers/delieverableController");
 const { influencerAuth } = require("../auth/influencerAuth");
 const { brandAuth } = require("../auth/brandAuth");
@@ -30,5 +33,11 @@ router.get(
 );
 router.get("/influencer/campaign/:campaignId", listInfluencerDeliverablesByCampaign2);
 router.get("/getall", getAllDeliverables);
+router.post("/by-brand", getAllDeliverablesByBrandOrInfluencerPost);
+router.post("/by-milestone", getAllDeliverablesByMilestoneIdPost);
+router.post(
+  "/status/by-influencer",
+  getDeliverableStatusByInfluencerIdPost
+);
 
 module.exports = router;

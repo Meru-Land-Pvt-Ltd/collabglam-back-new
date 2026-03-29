@@ -35,5 +35,9 @@ router.get(
   "/accepted-admin-created-influencers",
   campaignInvitationController.getAcceptedAdminCreatedInfluencersByCampaignId
 );
+router.post(
+  "/get-invitation-status-by-campaign-id",
+  campaignInvitationController.getInvitationStatusByCampaignIdPost
+);
 
 module.exports = router;       

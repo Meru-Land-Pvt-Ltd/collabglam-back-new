@@ -761,3 +761,374 @@ exports.getAllDeliverables = async (req, res) => {
     });
   }
 };
+
+async function buildDeliverablesResponse(query, page = 1, limit = 20) {
+  const p = Math.max(1, parseInt(page, 10));
+  const l = Math.max(1, parseInt(limit, 10));
+
+  const [docs, total] = await Promise.all([
+    Delieverable.find(query)
+      .sort({ createdAt: -1 })
+      .skip((p - 1) * l)
+      .limit(l)
+      .lean(),
+    Delieverable.countDocuments(query),
+  ]);
+
+  const influencerIds = [
+    ...new Set(
+      docs
+        .map((d) => (d?.influencerId ? String(d.influencerId) : null))
+        .filter(Boolean)
+    ),
+  ];
+
+  const campaignIds = [
+    ...new Set(
+      docs
+        .map((d) => (d?.campaignId ? String(d.campaignId) : null))
+        .filter(Boolean)
+    ),
+  ];
+
+  const milestoneHistoryIds = [
+    ...new Set(
+      docs
+        .map((d) => (d?.milestoneHistoryId ? String(d.milestoneHistoryId) : null))
+        .filter(Boolean)
+    ),
+  ];
+
+  const [influencers, campaigns, rows] = await Promise.all([
+    influencerIds.length
+      ? Influencer.find({ _id: { $in: influencerIds.map(toObjectId) } })
+          .select("name email")
+          .lean()
+      : [],
+    campaignIds.length
+      ? Campaign.find({ _id: { $in: campaignIds.map(toObjectId) } })
+          .select("campaignTitle")
+          .lean()
+      : [],
+    milestoneHistoryIds.length
+      ? Milestone.aggregate([
+          { $unwind: "$milestoneHistory" },
+          {
+            $match: {
+              "milestoneHistory._id": {
+                $in: milestoneHistoryIds.map((id) => new mongoose.Types.ObjectId(id)),
+              },
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              milestoneHistoryId: "$milestoneHistory._id",
+              milestoneTitle: "$milestoneHistory.milestoneTitle",
+            },
+          },
+        ])
+      : [],
+  ]);
+
+  const infMap = new Map(influencers.map((i) => [String(i._id), i]));
+  const campMap = new Map(campaigns.map((c) => [String(c._id), c]));
+  const titleByHistoryId = new Map(
+    rows.map((r) => [String(r.milestoneHistoryId), r.milestoneTitle])
+  );
+
+  const data = docs.map((d) => {
+    const inf = infMap.get(String(d.influencerId));
+    const camp = campMap.get(String(d.campaignId));
+    const mhId = d?.milestoneHistoryId ? String(d.milestoneHistoryId) : "";
+
+    return {
+      ...normalizeDoc(d),
+      campaignName: camp?.campaignTitle || "",
+      milestoneTitle: titleByHistoryId.get(mhId) || "",
+      influencerName: inf?.name || "",
+      influencerEmail: inf?.email || "",
+      influencer: inf
+        ? {
+            _id: String(inf._id),
+            name: inf.name || "",
+            email: inf.email || "",
+          }
+        : null,
+    };
+  });
+
+  return {
+    page: p,
+    limit: l,
+    total,
+    count: data.length,
+    data,
+  };
+}
+
+exports.getAllDeliverablesByBrandOrInfluencerPost = async (req, res) => {
+  try {
+    const {
+      brandId,
+      influencerId,
+      status,
+      campaignId,
+      search,
+      page = 1,
+      limit = 20,
+    } = req.body;
+
+    if (!brandId && !influencerId) {
+      return res.status(400).json({
+        success: false,
+        message: "brandId or influencerId is required.",
+      });
+    }
+
+    if (brandId && !isValidObjectId(brandId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid brandId.",
+      });
+    }
+
+    if (influencerId && !isValidObjectId(influencerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid influencerId.",
+      });
+    }
+
+    if (campaignId && !isValidObjectId(campaignId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid campaignId.",
+      });
+    }
+
+    const query = {};
+
+    if (brandId) query.brandId = toObjectId(brandId);
+    if (influencerId) query.influencerId = toObjectId(influencerId);
+    if (status) query.status = String(status).trim();
+    if (campaignId) query.campaignId = toObjectId(campaignId);
+
+    const term = String(search || "").trim();
+
+    if (term) {
+      const rx = new RegExp(escapeRegex(term), "i");
+
+      const [matchedCampaigns, matchedMilestones] = await Promise.all([
+        Campaign.find({ campaignTitle: rx }).select("_id").lean(),
+        Milestone.aggregate([
+          { $unwind: "$milestoneHistory" },
+          { $match: { "milestoneHistory.milestoneTitle": rx } },
+          {
+            $project: {
+              _id: 0,
+              milestoneHistoryId: "$milestoneHistory._id",
+            },
+          },
+        ]),
+      ]);
+
+      const matchedCampaignIds = matchedCampaigns
+        .map((c) => c._id)
+        .filter(Boolean);
+
+      const matchedMilestoneHistoryIds = matchedMilestones
+        .map((m) => m.milestoneHistoryId)
+        .filter(Boolean);
+
+      const orList = [
+        { title: rx },
+        { description: rx },
+        { comments: rx },
+      ];
+
+      if (isValidObjectId(term)) {
+        orList.push({ _id: toObjectId(term) });
+      }
+
+      if (matchedCampaignIds.length) {
+        orList.push({ campaignId: { $in: matchedCampaignIds } });
+      }
+
+      if (matchedMilestoneHistoryIds.length) {
+        orList.push({ milestoneHistoryId: { $in: matchedMilestoneHistoryIds } });
+      }
+
+      query.$or = orList;
+    }
+
+    const result = await buildDeliverablesResponse(query, page, limit);
+
+    return res.status(200).json({
+      success: true,
+      message: "Deliverables fetched successfully.",
+      ...result,
+      filters: {
+        ...(brandId ? { brandId } : {}),
+        ...(influencerId ? { influencerId } : {}),
+        ...(campaignId ? { campaignId } : {}),
+        ...(status ? { status } : {}),
+        ...(term ? { search: term } : {}),
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch deliverables.",
+      error: err.message,
+    });
+  }
+};
+
+exports.getAllDeliverablesByMilestoneIdPost = async (req, res) => {
+  try {
+    const {
+      milestoneId,
+      status,
+      brandId,
+      influencerId,
+      campaignId,
+      page = 1,
+      limit = 20,
+    } = req.body;
+
+    if (!milestoneId || !isValidObjectId(milestoneId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid milestoneId is required.",
+      });
+    }
+
+    if (brandId && !isValidObjectId(brandId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid brandId.",
+      });
+    }
+
+    if (influencerId && !isValidObjectId(influencerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid influencerId.",
+      });
+    }
+
+    if (campaignId && !isValidObjectId(campaignId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid campaignId.",
+      });
+    }
+
+    const query = {
+      milestoneId: toObjectId(milestoneId),
+    };
+
+    if (status) query.status = String(status).trim();
+    if (brandId) query.brandId = toObjectId(brandId);
+    if (influencerId) query.influencerId = toObjectId(influencerId);
+    if (campaignId) query.campaignId = toObjectId(campaignId);
+
+    const result = await buildDeliverablesResponse(query, page, limit);
+
+    return res.status(200).json({
+      success: true,
+      message: "Deliverables fetched successfully by milestoneId.",
+      ...result,
+      filters: {
+        milestoneId,
+        ...(brandId ? { brandId } : {}),
+        ...(influencerId ? { influencerId } : {}),
+        ...(campaignId ? { campaignId } : {}),
+        ...(status ? { status } : {}),
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch deliverables by milestoneId.",
+      error: err.message,
+    });
+  }
+};
+
+exports.getDeliverableStatusByInfluencerIdPost = async (req, res) => {
+  try {
+    const {
+      influencerId,
+      campaignId,
+      page = 1,
+      limit = 20,
+    } = req.body;
+
+    if (!influencerId || !isValidObjectId(influencerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid influencerId is required.",
+      });
+    }
+
+    if (!campaignId || !isValidObjectId(campaignId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid campaignId is required.",
+      });
+    }
+
+    const query = {
+      influencerId: toObjectId(influencerId),
+      campaignId: toObjectId(campaignId),
+    };
+
+    const [result, statusCounts] = await Promise.all([
+      buildDeliverablesResponse(query, page, limit),
+      Delieverable.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: "$status",
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    const statusSummary = {
+      pending: 0,
+      submitted: 0,
+      approved: 0,
+      revision: 0,
+    };
+
+    statusCounts.forEach((item) => {
+      const key = String(item._id || "").trim().toLowerCase();
+      if (Object.prototype.hasOwnProperty.call(statusSummary, key)) {
+        statusSummary[key] = item.count;
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Deliverable status fetched successfully by influencerId and campaignId.",
+      influencerId,
+      campaignId,
+      statusSummary,
+      ...result,
+      filters: {
+        influencerId,
+        campaignId,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch deliverable status by influencerId and campaignId.",
+      error: err.message,
+    });
+  }
+};

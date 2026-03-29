@@ -1146,3 +1146,95 @@ exports.getAcceptedAdminCreatedInfluencersByCampaignId = async (req, res) => {
     });
   }
 };
+
+exports.getInvitationStatusByCampaignIdPost = async (req, res) => {
+  try {
+    const campaignId = String(req.body?.campaignId || "").trim();
+
+    if (!isObjectId(campaignId)) {
+      return res.status(400).json({
+        status: "error",
+        message: "Valid campaignId is required",
+      });
+    }
+
+    const filter = {
+      campaignId: new mongoose.Types.ObjectId(campaignId),
+    };
+
+    if (req.body?.brandId) {
+      const brandId = String(req.body.brandId).trim();
+
+      if (!isObjectId(brandId)) {
+        return res.status(400).json({
+          status: "error",
+          message: "Invalid brandId",
+        });
+      }
+
+      filter.brandId = new mongoose.Types.ObjectId(brandId);
+    }
+
+    const [campaign, invitations, statusCounts] = await Promise.all([
+      Campaign.findById(campaignId)
+        .select("_id campaignTitle status isActive brandId")
+        .lean(),
+
+      CampaignInvitation.find(filter)
+        .select("_id brandId influencerId campaignId platform handle status modashUserId createdAt updatedAt")
+        .sort({ createdAt: -1 })
+        .lean(),
+
+      CampaignInvitation.aggregate([
+        { $match: filter },
+        {
+          $group: {
+            _id: "$status",
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    if (!campaign) {
+      return res.status(404).json({
+        status: "error",
+        message: "Campaign not found",
+      });
+    }
+
+    const summary = {
+      sent: 0,
+      accepted: 0,
+      reject: 0,
+      failed: 0,
+    };
+
+    statusCounts.forEach((item) => {
+      const key = String(item._id || "").toLowerCase();
+      if (summary.hasOwnProperty(key)) {
+        summary[key] = item.count;
+      }
+    });
+
+    return res.json({
+      status: "success",
+      campaign: {
+        campaignId: String(campaign._id),
+        campaignTitle: campaign.campaignTitle || null,
+        campaignStatus: campaign.status || null,
+        campaignIsActive: campaign.isActive ?? null,
+        brandId: campaign.brandId ? String(campaign.brandId) : null,
+      },
+      totalInvitations: invitations.length,
+      statusSummary: summary,
+      invitations,
+    });
+  } catch (e) {
+    console.error("getInvitationStatusByCampaignIdPost error:", e);
+    return res.status(500).json({
+      status: "error",
+      message: "Internal server error",
+    });
+  }
+};
