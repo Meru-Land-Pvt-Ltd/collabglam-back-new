@@ -7,7 +7,7 @@ const ROLES = {
   BME: "bme",
 };
 
-const PROXY_EMAIL_DOMAIN = "reply.collabglam.cloud";
+const PROXY_EMAIL_DOMAIN = "team.collabglam.com";
 
 const AdminAccessSchema = new Schema(
   {

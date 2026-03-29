@@ -364,7 +364,7 @@ exports.inviteAdmin = async (req, res) => {
 
     await admin.save();
 
-    const adminAppUrl = process.env.ADMIN_APP_URL || "https://collabglam.cloud";
+    const adminAppUrl = process.env.ADMIN_APP_URL || "https://collabglam.com";
     const inviteLink = `${adminAppUrl}/admin/invite?token=${rawToken}`;
 
     const tpl = adminInviteEmailTemplate({
