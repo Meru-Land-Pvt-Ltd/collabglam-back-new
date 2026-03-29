@@ -67,6 +67,76 @@ function featureValueToLimit(value) {
   return 0;
 }
 
+function buildAdminDisplay(admin = {}) {
+  const name = String(admin?.name || "").trim();
+  const email = String(admin?.email || "").trim();
+  const adminRole = String(admin?.adminRole || "").trim();
+
+  return {
+    userId: admin?.userId ? String(admin.userId) : "",
+    name,
+    email,
+    adminRole,
+    label: name || email || "Admin",
+  };
+}
+
+async function enrichLiteCampaignCreatedBy(rows = []) {
+  const adminIds = [
+    ...new Set(
+      rows
+        .filter(
+          (row) =>
+            String(row?.createdBy?.role || "").toLowerCase() === "admin" &&
+            isObjectId(row?.createdBy?.userId)
+        )
+        .map((row) => String(row.createdBy.userId))
+    ),
+  ];
+
+  const adminDocs = adminIds.length
+    ? await ASSIGNEE_MODEL.find({ _id: { $in: adminIds.map(toObjectId) } })
+        .select("_id name email role")
+        .lean()
+    : [];
+
+  const adminMap = new Map(
+    adminDocs.map((admin) => [
+      String(admin._id),
+      {
+        userId: String(admin._id),
+        name: admin.name || "",
+        email: admin.email || "",
+        adminRole: admin.role || "",
+        label: admin.name || admin.email || "Admin",
+      },
+    ])
+  );
+
+  return rows.map((row) => {
+    const embeddedRole = String(row?.createdBy?.role || "").toLowerCase();
+
+    if (embeddedRole !== "admin") {
+      return {
+        ...row,
+        createdByAdmin: null,
+      };
+    }
+
+    const embedded = buildAdminDisplay(row.createdBy);
+
+    const resolved =
+      embedded.name || embedded.email
+        ? embedded
+        : adminMap.get(String(row.createdBy.userId)) || embedded;
+
+    return {
+      ...row,
+      createdByAdmin: resolved,
+    };
+  });
+}
+
 function buildSubscriptionFromPlan(plan, options = {}) {
   const now = new Date();
 
@@ -425,6 +495,8 @@ function toCampaignSummary(doc = {}) {
     isActive: Number(doc.isActive || 0),
     isDraft: Number(doc.isDraft || 0),
     campaignStatus: doc.campaignStatus || "",
+    byAi: Number(doc.byAi || 0),
+    createdByAdmin: doc.createdByAdmin || null,
   };
 }
 
@@ -1902,14 +1974,15 @@ exports.getAllCampaignsLite = async (req, res) => {
 
     const rows = await Campaign.find(filter)
       .select(
-        "_id brandId campaignsId campaignTitle productOrServiceName goal budget applicantCount isActive isDraft campaignStatus timeline.startDate timeline.endDate createdAt"
+        "_id brandId campaignsId campaignTitle productOrServiceName goal budget applicantCount isActive isDraft byAi createdBy campaignStatus timeline.startDate timeline.endDate createdAt"
       )
       .sort({ [field]: dir, createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit)
       .lean();
 
-    const campaigns = rows.map(toCampaignSummary);
+    const enrichedRows = await enrichLiteCampaignCreatedBy(rows);
+    const campaigns = enrichedRows.map(toCampaignSummary);
 
     return res.status(200).json({
       page,

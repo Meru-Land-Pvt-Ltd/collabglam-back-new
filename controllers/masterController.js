@@ -701,9 +701,6 @@ exports.fullyManagedBrandList = async (req, res) => {
         // change brandId to brand if your BrandAssigned schema uses another field name
         const assignedData = await BrandAssigned.findOne({ brandId: item._id }).lean();
 
-        let assignedRm = "";
-        let assignedBm = "";
-        let assignedIm = "";
         console.log("assignedData for brand", item._id, assignedData);
         if (assignedData) {
           const masterIds = [
@@ -721,24 +718,11 @@ exports.fullyManagedBrandList = async (req, res) => {
             masters.forEach((m) => {
               masterMap[String(m._id)] = m.name || "";
             });
-
-            assignedRm = assignedData.RHId
-              ? masterMap[String(assignedData.RHId)] || ""
-              : "";
-            assignedBm = assignedData.bdmId
-              ? masterMap[String(assignedData.bdmId)] || ""
-              : "";
-            assignedIm = assignedData.idmId
-              ? masterMap[String(assignedData.idmId)] || ""
-              : "";
           }
         }
 
         return {
           ...item,
-          assignedRm,
-          assignedBm,
-          assignedIm,
         };
       })
     );
@@ -1227,6 +1211,114 @@ exports.allocateBrand = async (req, res) => {
   }
 };
 
+async function enrichCampaignsWithAssignments(campaignDocs = []) {
+  if (!Array.isArray(campaignDocs) || !campaignDocs.length) return [];
+
+  const brandIds = [
+    ...new Set(
+      campaignDocs
+        .map((item) => String(item?.brandId || ""))
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    ),
+  ].map((id) => new mongoose.Types.ObjectId(id));
+
+  if (!brandIds.length) {
+    return campaignDocs.map((item) => ({
+      ...item,
+      assignedRh: "",
+      assignedBme: "",
+      assignedIme: "",
+      RHId: null,
+      bdmId: null,
+      idmId: null,
+      assignmentId: null,
+      assignmentStatus: null,
+    }));
+  }
+
+  const activeAssignments = await BrandAssigned.find({
+    brandId: { $in: brandIds },
+    status: "active",
+  })
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .lean();
+
+  const assignmentMap = new Map();
+  for (const assignment of activeAssignments) {
+    const key = String(assignment.brandId);
+    if (!assignmentMap.has(key)) assignmentMap.set(key, assignment);
+  }
+
+  const missingIds = brandIds.filter((id) => !assignmentMap.has(String(id)));
+  if (missingIds.length) {
+    const fallbackAssignments = await BrandAssigned.find({
+      brandId: { $in: missingIds },
+    })
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .lean();
+
+    for (const assignment of fallbackAssignments) {
+      const key = String(assignment.brandId);
+      if (!assignmentMap.has(key)) assignmentMap.set(key, assignment);
+    }
+  }
+
+  const assigneeIds = [
+    ...new Set(
+      [...assignmentMap.values()]
+        .flatMap((assignment) => [
+          assignment?.RHId,
+          assignment?.bdmId,
+          assignment?.idmId,
+        ])
+        .filter(Boolean)
+        .map((id) => String(id))
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    ),
+  ].map((id) => new mongoose.Types.ObjectId(id));
+
+  const assignees = assigneeIds.length
+    ? await AdminModel.find({ _id: { $in: assigneeIds } })
+        .select("_id name email role")
+        .lean()
+    : [];
+
+  const assigneeMap = new Map();
+  assignees.forEach((admin) => {
+    assigneeMap.set(
+      String(admin._id),
+      admin.name || admin.email || ""
+    );
+  });
+
+  return campaignDocs.map((campaign) => {
+    const assignment = assignmentMap.get(String(campaign.brandId));
+
+    const assignedRh = assignment?.RHId
+      ? assigneeMap.get(String(assignment.RHId)) || ""
+      : "";
+    const assignedBme = assignment?.bdmId
+      ? assigneeMap.get(String(assignment.bdmId)) || ""
+      : "";
+    const assignedIme = assignment?.idmId
+      ? assigneeMap.get(String(assignment.idmId)) || ""
+      : "";
+
+    return {
+      ...campaign,
+      assignedRh,
+      assignedBme,
+      assignedIme,
+
+      RHId: assignment?.RHId || null,
+      bdmId: assignment?.bdmId || null,
+      idmId: assignment?.idmId || null,
+      assignmentId: assignment?._id || null,
+      assignmentStatus: assignment?.status || null,
+    };
+  });
+}
+
 exports.listCampaignsForAdmin = async (req, res) => {
   try {
     const actor = req.admin;
@@ -1234,7 +1326,7 @@ exports.listCampaignsForAdmin = async (req, res) => {
     if (!actor?.adminId) {
       return res.status(401).json({
         success: false,
-        message: 'Unauthorized',
+        message: "Unauthorized",
       });
     }
 
@@ -1242,7 +1334,7 @@ exports.listCampaignsForAdmin = async (req, res) => {
 
     const filter = {
       ...visibilityFilter,
-      'createdBy.role': 'admin', // only brand-created campaigns
+      "createdBy.role": "admin",
       isActive: 1,
     };
 
@@ -1273,16 +1365,18 @@ exports.listCampaignsForAdmin = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
+    const enrichedCampaigns = await enrichCampaignsWithAssignments(campaigns);
+
     return res.status(200).json({
       success: true,
-      count: campaigns.length,
-      data: campaigns,
+      count: enrichedCampaigns.length,
+      data: enrichedCampaigns,
     });
   } catch (e) {
-    console.error('listCampaignsForAdmin error:', e);
+    console.error("listCampaignsForAdmin error:", e);
     return res.status(500).json({
       success: false,
-      message: e?.message || 'Internal error',
+      message: e?.message || "Internal error",
     });
   }
 };
