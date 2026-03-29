@@ -1248,6 +1248,126 @@ async function getBrandLiteById(req, res, next) {
   }
 }
 
+async function getBrandProfile(req, res, next) {
+  const requestId = req.requestId || "";
+
+  try {
+    const { brandId } = req.body || {};
+
+    if (!brandId) {
+      throw new ValidationError("brandId is required in request body.");
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(brandId)) {
+      throw new ValidationError("Invalid brandId.");
+    }
+
+    const brand = await BrandModel.findById(brandId).lean().exec();
+
+    if (!brand) {
+      throw new NotFoundError("Brand not found.");
+    }
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.OK,
+      {
+        message: "Brand profile fetched successfully",
+        brandId: String(brand._id),
+        ...brand,
+      },
+      requestId
+    );
+  } catch (err) {
+    return handleControllerError(next, err, "getBrandProfile");
+  }
+}
+
+
+async function updateBrandProfile(req, res, next) {
+  const requestId = req.requestId || "";
+
+  try {
+    const { brandId, brandName, companySize, brandType, platform, profilePic } = req.body || {};
+
+    if (!brandId) {
+      throw new ValidationError("brandId is required.");
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(brandId)) {
+      throw new ValidationError("Invalid brandId.");
+    }
+
+    const brand = await BrandModel.findById(brandId).lean().exec();
+    if (!brand) {
+      throw new NotFoundError("Brand not found.");
+    }
+
+    const update = {};
+
+    if (brandName !== undefined) {
+      update.brandName = safeTrim(brandName);
+      update.name = safeTrim(brandName);
+    }
+
+    if (companySize !== undefined) {
+      update.companySize = safeTrim(companySize);
+    }
+
+    if (profilePic !== undefined) {
+      update.profilePic = safeTrim(profilePic);
+      update.isProfilePicSkip = !safeTrim(profilePic);
+    }
+
+    if (brandType !== undefined) {
+      const page1 = Array.isArray(brand.page1) ? [...brand.page1] : [];
+      const idx = page1.findIndex((x) =>
+        String(x?.question || "").toLowerCase().includes("what type of brand")
+      );
+
+      const row = {
+        question: "What type of brand are you?",
+        answers: [safeTrim(brandType)],
+      };
+
+      if (idx >= 0) page1[idx] = row;
+      else page1.unshift(row);
+
+      update.page1 = page1;
+      update.ispage1Skip = false;
+    }
+
+    if (platform !== undefined) {
+      const page3 = [
+        {
+          question: "Preferred platforms",
+          answers: [safeTrim(platform)],
+        },
+      ];
+
+      update.page3 = page3;
+      update.ispage3Skip = false;
+    }
+
+    const updatedBrand = await BrandModel.findByIdAndUpdate(brandId, update, {
+      new: true,
+      runValidators: true,
+    }).exec();
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.OK,
+      {
+        message: "Brand profile updated successfully",
+        brandId: String(updatedBrand._id),
+      },
+      requestId
+    );
+  } catch (err) {
+    return handleControllerError(next, err, "updateBrandProfile");
+  }
+}
+
 module.exports = {
   sendSignupOtp,
   verifyOtpSignUp,
@@ -1258,4 +1378,7 @@ module.exports = {
   updatePasswordBrand,
   getBrandById,
   getBrandLiteById,
+  getBrandProfile,
+  updateBrandProfile,
 };
+

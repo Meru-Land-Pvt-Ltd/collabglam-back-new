@@ -1578,13 +1578,18 @@ exports.createCampaign = async (req, res) => {
   const requestId = getRequestId(req);
 
   try {
-    
     const geo = await detectGeoFromRequest(req);
     const campaignTz = getCampaignTimezone(req.body);
 
     const brandDoc = await findBrandDocByAnyId(req.body.brandId);
     if (!brandDoc) {
-      return fail(res, HttpStatus.NOT_FOUND, "NOT_FOUND", "Brand not found", requestId);
+      return fail(
+        res,
+        HttpStatus.NOT_FOUND,
+        "NOT_FOUND",
+        "Brand not found",
+        requestId
+      );
     }
 
     const actor = await resolveActorFromPayload(
@@ -1593,11 +1598,16 @@ exports.createCampaign = async (req, res) => {
     );
 
     const mode = inferMode(req.body.status, req.body.scheduledAt);
+
     const v = await validateForMode(res, requestId, mode, req.body);
     if (!v.ok) return v.resp;
 
     const status =
-      mode === "draft" ? "draft" : mode === "schedule" ? "scheduled" : "active";
+      mode === "draft"
+        ? "draft"
+        : mode === "schedule"
+          ? "scheduled"
+          : "active";
 
     let timing = {};
 
@@ -1614,13 +1624,6 @@ exports.createCampaign = async (req, res) => {
     }
 
     req.body.campaignTimezone = campaignTz;
-
-    // upload base64 product images to s3 and replace request body value
-    const uploadedProductImages = await normalizeAndUploadProductImages(
-      req.body.productImages
-    );
-
-    req.body.productImages = uploadedProductImages;
 
     const docToCreate = buildCampaignDoc(req.body, geo, status, 0, timing, {
       brandName: String(brandDoc.name || brandDoc.brandName || ""),
@@ -1640,13 +1643,22 @@ exports.createCampaign = async (req, res) => {
 
     if (status === "active") {
       await notifyMatchingInfluencersForNewCampaign(
-        { ...created.toObject(), brandName: String(brandDoc.name || brandDoc.brandName || "") },
+        {
+          ...created.toObject(),
+          brandName: String(brandDoc.name || brandDoc.brandName || ""),
+        },
         normalizeObjectIdArray(req.body.subcategoryIds)
       );
     }
 
     const enriched = (await enrichCampaigns([created]))[0];
-    return ApiResponse.sendOk(res, HttpStatus.CREATED, { doc: enriched }, requestId);
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.CREATED,
+      { doc: enriched },
+      requestId
+    );
   } catch (err) {
     return sendControllerError(res, requestId, err);
   }
@@ -3800,43 +3812,86 @@ exports.getSubcategories = async (req, res) => {
 };
 
 
-
 exports.viewCampaignByIdForBrand = async (req, res) => {
-  try {
-    const { brandId, campaignId } = req.body;
+  const requestId = getRequestId(req);
 
-    if (!brandId || !campaignId) {
-      return res.status(400).json({
-        success: false,
-        message: "brandId and campaignId are required",
-      });
+  try {
+    const user = req.user || {};
+
+    const tokenBrandRaw = String(
+      user.brandId || user.id || user._id || user.userId || ""
+    ).trim();
+
+    if (!tokenBrandRaw) {
+      return fail(
+        res,
+        HttpStatus.UNAUTHORIZED,
+        "UNAUTHORIZED",
+        "Invalid brand token",
+        requestId
+      );
     }
 
-    const campaign = await Campaign.findOne({
-      _id: campaignId,
-      brandId: brandId,
-    }).lean();
+    const tokenBrandDoc = await findBrandDocByAnyId(tokenBrandRaw);
+
+    if (!tokenBrandDoc) {
+      return fail(
+        res,
+        HttpStatus.UNAUTHORIZED,
+        "UNAUTHORIZED",
+        "Brand not found from token",
+        requestId
+      );
+    }
+
+    const campaignId = clean(req.body.campaignId);
+
+    if (!campaignId || !isOid(campaignId)) {
+      return fail(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "Valid campaignId is required",
+        requestId
+      );
+    }
+
+    const filter = buildCampaignLookupFilter(campaignId, tokenBrandDoc._id);
+
+    if (!filter) {
+      return fail(
+        res,
+        HttpStatus.BAD_REQUEST,
+        "VALIDATION_ERROR",
+        "Valid campaignId is required",
+        requestId
+      );
+    }
+
+    const campaign = await Campaign.findOne(filter).lean();
 
     if (!campaign) {
-      return res.status(404).json({
-        success: false,
-        message: "Campaign not found",
-      });
+      return fail(
+        res,
+        HttpStatus.NOT_FOUND,
+        "NOT_FOUND",
+        "Campaign not found",
+        requestId
+      );
     }
 
-    return res.status(200).json({
-      success: true,
-      doc: campaign,
-    });
+    const enriched = (await enrichCampaigns([campaign]))[0];
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.OK,
+      { doc: enriched },
+      requestId
+    );
   } catch (err) {
-    console.error("viewCampaignByIdForBrand error:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+    return sendControllerError(res, requestId, err);
   }
 };
-
 
 exports.getRecommendedInfluencersByCampaignId = async (req, res) => {
   const requestId = getRequestId(req);
@@ -3997,6 +4052,7 @@ exports.updateStatus = async (req, res) => {
     if (currentStatus === "archived") {
       return fail(res, 400, "VALIDATION_ERROR", "Archived campaign status cannot be changed", requestId);
     }
+
 
     if (newStatus === "scheduled" && currentStatus !== "draft") {
       return fail(res, 400, "VALIDATION_ERROR", "Only draft campaigns can be moved to scheduled", requestId);
