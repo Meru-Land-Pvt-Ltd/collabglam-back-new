@@ -273,7 +273,13 @@ async function bootstrap() {
   try {
     startReminderCron();
 
-    await mongoose.connect(process.env.MONGODB_URI);
+    await mongoose.connect(process.env.MONGODB_URI, {
+      autoIndex: false,
+      maxPoolSize: 20,
+      minPoolSize: 5,
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+    });
     console.log("✅ Connected to MongoDB");
 
     const bucket = getGridFsBucket();
