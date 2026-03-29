@@ -60,7 +60,7 @@ const server = http.createServer(app);
 const GridFSBucket = mongoose.mongo.GridFSBucket;
 const { Types } = mongoose;
 
-const PORT = process.env.PORT || 8000;
+const PORT = process.env.PORT || 5000;
 const JSON_LIMIT = process.env.JSON_LIMIT || "30mb";
 const GRIDFS_BUCKET_NAME = process.env.GRIDFS_BUCKET || "uploads";
 
