@@ -418,7 +418,7 @@ exports.createMilestone = async (req, res) => {
 
     return res.status(201).json(responsePayload);
   } catch (err) {
-    await session.abortTransaction().catch(() => {});
+    await session.abortTransaction().catch(() => { });
     session.endSession();
 
     console.error("Error in createMilestone:", err);
@@ -524,6 +524,7 @@ exports.getMilestonesByCampaign = async (req, res) => {
 // POST /milestone/listByInfluencerAndCampaign
 // body: { influencerId, campaignId, brandId? }
 // ======================================================================
+
 exports.getMilestonesByInfluencerAndCampaign = async (req, res) => {
   const { influencerId, campaignId, brandId } = req.body;
 
@@ -543,9 +544,34 @@ exports.getMilestonesByInfluencerAndCampaign = async (req, res) => {
       },
     };
 
-    if (brandId) filter.brandId = String(brandId);
+    if (brandId) {
+      filter.brandId = String(brandId);
+    }
 
-    const docs = await Milestone.find(filter).lean();
+    const [docs, campaignDoc, influencerDoc] = await Promise.all([
+      Milestone.find(filter).lean(),
+
+      Campaign.findOne({
+        $or: [{ _id: campaignId }, { campaignId: String(campaignId) }],
+      })
+        .select("campaignTitle title")
+        .lean(),
+
+      Influencer.findOne({
+        $or: [{ _id: influencerId }, { influencerId: String(influencerId) }],
+      })
+        .select("name fullName influencerName")
+        .lean(),
+    ]);
+
+    const campaignTitle =
+      campaignDoc?.campaignTitle || campaignDoc?.title || "";
+
+    const influencerName =
+      influencerDoc?.name ||
+      influencerDoc?.fullName ||
+      influencerDoc?.influencerName ||
+      "";
 
     const entries = docs.flatMap((doc) =>
       (doc.milestoneHistory || [])
@@ -556,7 +582,9 @@ exports.getMilestonesByInfluencerAndCampaign = async (req, res) => {
         )
         .map((e) => {
           let payoutStatus = e.payoutStatus;
-          if (!payoutStatus) payoutStatus = e.released ? "initiated" : "pending";
+          if (!payoutStatus) {
+            payoutStatus = e.released ? "initiated" : "pending";
+          }
 
           return {
             ...e,
@@ -564,6 +592,8 @@ exports.getMilestonesByInfluencerAndCampaign = async (req, res) => {
             payoutStatus,
             brandId: doc.brandId,
             milestoneId: String(doc._id),
+            campaignTitle,
+            influencerName,
           };
         })
     );
@@ -572,6 +602,8 @@ exports.getMilestonesByInfluencerAndCampaign = async (req, res) => {
 
     return res.status(200).json({
       message: "Milestones fetched by influencer and campaign",
+      campaignTitle,
+      influencerName,
       milestones: entries,
     });
   } catch (err) {
