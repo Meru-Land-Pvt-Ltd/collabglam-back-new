@@ -1578,7 +1578,7 @@ exports.createCampaign = async (req, res) => {
   const requestId = getRequestId(req);
 
   try {
-    
+
     const geo = await detectGeoFromRequest(req);
     const campaignTz = getCampaignTimezone(req.body);
 
@@ -1625,6 +1625,12 @@ exports.createCampaign = async (req, res) => {
     }
 
     req.body.campaignTimezone = campaignTz;
+
+    const uploadedProductImages = await normalizeAndUploadProductImages(
+      req.body.productImages
+    );
+
+    req.body.productImages = uploadedProductImages;
 
     const docToCreate = buildCampaignDoc(req.body, geo, status, 0, timing, {
       brandName: String(brandDoc.name || brandDoc.brandName || ""),
@@ -4618,7 +4624,11 @@ exports.getCampaignsByBrandId = async (req, res) => {
         const year = q === 1 ? nowLocal.year - 1 : nowLocal.year;
         const startMonth = (prevQ - 1) * 3 + 1;
 
-        const start = DateTime.fromObject({ year, month: startMonth, day: 1 }, { zone: timezone }).startOf("day");
+        const start = DateTime.fromObject(
+          { year, month: startMonth, day: 1 },
+          { zone: timezone }
+        ).startOf("day");
+
         const end = start.plus({ months: 3 }).minus({ days: 1 }).endOf("day");
 
         return { from: start.toUTC().toJSDate(), to: end.toUTC().toJSDate() };
@@ -4825,6 +4835,7 @@ exports.getCampaignsByBrandId = async (req, res) => {
             "byAi",
             "isActive",
             "isDraft",
+            "createdBy",
           ].join(" ")
         )
         .lean(),
@@ -4842,10 +4853,10 @@ exports.getCampaignsByBrandId = async (req, res) => {
 
     const cats = categoryIds.length
       ? await Category.find({
-        _id: { $in: categoryIds.map((id) => toObjectId(id)) },
-      })
-        .select("_id name")
-        .lean()
+          _id: { $in: categoryIds.map((id) => toObjectId(id)) },
+        })
+          .select("_id name")
+          .lean()
       : [];
 
     const catMap = new Map(cats.map((c) => [String(c._id), c]));
@@ -4855,30 +4866,30 @@ exports.getCampaignsByBrandId = async (req, res) => {
 
     const contractStatsRaw = campaignIds.length
       ? await Contract.aggregate([
-        {
-          $match: {
-            brandId: { $in: [toObjectId(brandId), brandId] },
-            campaignId: { $in: campaignIds },
-          },
-        },
-        {
-          $group: {
-            _id: "$campaignId",
-            contractsCount: { $sum: 1 },
-            applicantCount: { $sum: 1 },
-            acceptedCount: {
-              $sum: {
-                $cond: [{ $eq: ["$isAccepted", 1] }, 1, 0],
-              },
-            },
-            assignedCount: {
-              $sum: {
-                $cond: [{ $eq: ["$isAssigned", 1] }, 1, 0],
-              },
+          {
+            $match: {
+              brandId: { $in: [toObjectId(brandId), brandId] },
+              campaignId: { $in: campaignIds },
             },
           },
-        },
-      ])
+          {
+            $group: {
+              _id: "$campaignId",
+              contractsCount: { $sum: 1 },
+              applicantCount: { $sum: 1 },
+              acceptedCount: {
+                $sum: {
+                  $cond: [{ $eq: ["$isAccepted", 1] }, 1, 0],
+                },
+              },
+              assignedCount: {
+                $sum: {
+                  $cond: [{ $eq: ["$isAssigned", 1] }, 1, 0],
+                },
+              },
+            },
+          },
+        ])
       : [];
 
     const contractMap = new Map(
@@ -4934,10 +4945,13 @@ exports.getCampaignsByBrandId = async (req, res) => {
 
           createdAt: c.createdAt ?? null,
           updatedAt: c.updatedAt ?? null,
-          publishedAt: scheduledJustExpired ? (c.scheduledAt ?? c.publishedAt ?? null) : (c.publishedAt ?? null),
+          publishedAt: scheduledJustExpired
+            ? (c.scheduledAt ?? c.publishedAt ?? null)
+            : (c.publishedAt ?? null),
           scheduledAt: c.scheduledAt ?? null,
           startAt: c.startAt ?? null,
           endAt: c.endAt ?? null,
+          createdBy: c.createdBy ?? null,
 
           category: cat
             ? { id: String(cat._id), name: String(cat.name || "") }
@@ -4948,7 +4962,6 @@ exports.getCampaignsByBrandId = async (req, res) => {
 
           campaignBudget:
             typeof c.campaignBudget === "number" ? c.campaignBudget : 0,
-
 
           applicantCount: contractStats.applicantCount,
           acceptedContracts: contractStats.acceptedCount,
