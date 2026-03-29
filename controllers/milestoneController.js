@@ -141,37 +141,43 @@ exports.createMilestone = async (req, res) => {
         abort(404, "Campaign not found");
       }
 
+      // NEW: if campaign created by admin, skip contract validation
+      const isAdminCreatedCampaign =
+        String(camp?.createdBy?.role ?? "").trim().toLowerCase() === "admin";
+
       // 2) Contract check before any mutation
       let contractDoc = null;
 
-      if (camp.contractId) {
-        try {
-          contractDoc = await Contract.findById(camp.contractId).session(session);
-        } catch {
-          contractDoc = null;
+      if (!isAdminCreatedCampaign) {
+        if (camp.contractId) {
+          try {
+            contractDoc = await Contract.findById(camp.contractId).session(session);
+          } catch {
+            contractDoc = null;
+          }
         }
-      }
 
-      if (!contractDoc) {
-        contractDoc = await Contract.findOne({
-          brandId,
-          influencerId,
-          campaignId,
-        })
-          .sort({ createdAt: -1 })
-          .session(session);
-      }
+        if (!contractDoc) {
+          contractDoc = await Contract.findOne({
+            brandId,
+            influencerId,
+            campaignId,
+          })
+            .sort({ createdAt: -1 })
+            .session(session);
+        }
 
-      if (!contractDoc) {
-        abort(400, "Contract not found. Please create and sign the contract first.");
-      }
+        if (!contractDoc) {
+          abort(400, "Contract not found. Please create and sign the contract first.");
+        }
 
-      const canCreateMilestone =
-        isSigned(contractDoc.signatureBrand) &&
-        isSigned(contractDoc.signatureInfluencer);
+        const canCreateMilestone =
+          isSigned(contractDoc.signatureBrand) &&
+          isSigned(contractDoc.signatureInfluencer);
 
-      if (!canCreateMilestone) {
-        abort(400, "Contract must be fully signed before creating milestones.");
+        if (!canCreateMilestone) {
+          abort(400, "Contract must be fully signed before creating milestones.");
+        }
       }
 
       // 3) milestone doc
@@ -286,7 +292,7 @@ exports.createMilestone = async (req, res) => {
       const walletSnapAfter = syncUsableBalance(wallet);
       await wallet.save({ session });
 
-      // 9) Update contract status
+      // 9) Update contract status only if contract exists
       let updatedContract = null;
 
       if (contractDoc) {
@@ -328,14 +334,6 @@ exports.createMilestone = async (req, res) => {
           },
           { session }
         );
-
-        responsePayload = {
-          contractStatus: updatedContract?.status || contractDoc?.status || null,
-          milestonesCreatedAt:
-            updatedContract?.milestonesCreatedAt ||
-            contractDoc?.milestonesCreatedAt ||
-            null,
-        };
       }
 
       responsePayload = {
@@ -359,12 +357,15 @@ exports.createMilestone = async (req, res) => {
           frozenBalance: walletSnapAfter.frozenBalance,
           usableBalance: walletSnapAfter.usableBalance,
         },
+        contractStatus: updatedContract?.status || null,
+        milestonesCreatedAt: updatedContract?.milestonesCreatedAt || null,
+        isAdminCreatedCampaign,
       };
 
       emailData = {
         brandId,
         influencerId,
-        campaignName: camp.productOrServiceName || "",
+        campaignName: camp.productOrServiceName || camp.campaignTitle || "",
         milestoneTitle,
         amount: amountNum,
         milestoneDescription,
@@ -373,7 +374,6 @@ exports.createMilestone = async (req, res) => {
 
     session.endSession();
 
-    // Notifications after transaction success
     createAndEmit({
       influencerId: req.body.influencerId,
       type: "milestone.created",
@@ -394,7 +394,6 @@ exports.createMilestone = async (req, res) => {
       actionPath: `/brand/active-campaign`,
     }).catch((e) => console.error("notify brand (created) failed:", e));
 
-    // Email after transaction success
     try {
       const [infDoc, brandDoc] = await Promise.all([
         Influencer.findById(emailData.influencerId, "name email").lean(),

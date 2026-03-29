@@ -1,3 +1,4 @@
+const Stripe = require("stripe");
 const { ApiResponse } = require("../core/http/ApiResponse");
 const { HttpStatus } = require("../core/http/HttpStatus");
 const { BrandWalletModel } = require("../models/brandWallet");
@@ -47,6 +48,20 @@ const getOrCreateWallet = async (brandId) => {
   syncUsableBalance(wallet);
   await wallet.save();
   return wallet;
+};
+
+let stripeClient = null;
+
+const getStripeClient = () => {
+  if (!process.env.STRIPE_SECRET_KEY) {
+    throw new Error("STRIPE_SECRET_KEY is not configured");
+  }
+
+  if (!stripeClient) {
+    stripeClient = new Stripe(process.env.STRIPE_SECRET_KEY);
+  }
+
+  return stripeClient;
 };
 
 // ======================================================================
@@ -124,15 +139,19 @@ const getBrandWallet = async (req, res) => {
 
 // ======================================================================
 // POST /brand-wallet/topup
-// body: { brandId, amount }
-// Directly adds amount to wallet
+// body: { brandId, campaignId, amount, currency, successUrl, cancelUrl }
+// Creates Stripe Checkout Session
 // ======================================================================
 const topupBrandWallet = async (req, res) => {
   const requestId = getRequestId(req);
 
   try {
     const brandId = clean(req.body.brandId);
+    const campaignId = clean(req.body.campaignId);
     const amount = Math.max(0, toNumber(req.body.amount, 0));
+    const currency = clean(req.body.currency || "inr").toLowerCase();
+    const successUrl = clean(req.body.successUrl);
+    const cancelUrl = clean(req.body.cancelUrl);
 
     if (!brandId) {
       return ApiResponse.sendFail(
@@ -154,34 +173,203 @@ const topupBrandWallet = async (req, res) => {
       );
     }
 
-    const wallet = await getOrCreateWallet(brandId);
+    if (!successUrl || !cancelUrl) {
+      return ApiResponse.sendFail(
+        res,
+        HttpStatus.BAD_REQUEST,
+        EC("VALIDATION_ERROR"),
+        "successUrl and cancelUrl are required",
+        requestId
+      );
+    }
 
-    wallet.walletBalance = Math.max(
-      0,
-      (Number(wallet.walletBalance) || 0) + amount
-    );
+    const stripe = getStripeClient();
 
-    wallet.topups = wallet.topups || [];
-    wallet.topups.push({
-      amount,
-      currency: "inr",
-      status: "success",
-      createdAt: new Date(),
+    await getOrCreateWallet(brandId);
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types: ["card"],
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      line_items: [
+        {
+          quantity: 1,
+          price_data: {
+            currency,
+            unit_amount: Math.round(amount * 100),
+            product_data: {
+              name: "Brand wallet topup",
+              description: campaignId
+                ? `Wallet topup for campaign ${campaignId}`
+                : "Wallet topup",
+            },
+          },
+        },
+      ],
+      metadata: {
+        brandId,
+        campaignId,
+        amount: String(amount),
+        currency,
+      },
     });
-
-    const { frozenAll, usableBalance } = syncUsableBalance(wallet);
-    await wallet.save();
 
     return ApiResponse.sendOk(
       res,
       HttpStatus.OK,
       {
-        message: "Wallet topped up successfully",
+        message: "Stripe checkout session created",
+        brandId,
+        amount,
+        currency,
+        sessionId: session.id,
+        checkoutUrl: session.url,
+      },
+      requestId
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Internal error";
+    return ApiResponse.sendFail(
+      res,
+      HttpStatus.INTERNAL_SERVER_ERROR,
+      EC("INTERNAL_ERROR"),
+      message,
+      requestId
+    );
+  }
+};
+
+// ======================================================================
+// POST /brand-wallet/topup/confirm
+// body: { brandId, sessionId }
+// Verifies Stripe payment and credits wallet
+// ======================================================================
+const confirmBrandWalletTopup = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const brandId = clean(req.body.brandId);
+    const sessionId = clean(req.body.sessionId);
+
+    if (!brandId) {
+      return ApiResponse.sendFail(
+        res,
+        HttpStatus.BAD_REQUEST,
+        EC("VALIDATION_ERROR"),
+        "Valid brandId is required",
+        requestId
+      );
+    }
+
+    if (!sessionId) {
+      return ApiResponse.sendFail(
+        res,
+        HttpStatus.BAD_REQUEST,
+        EC("VALIDATION_ERROR"),
+        "sessionId is required",
+        requestId
+      );
+    }
+
+    const stripe = getStripeClient();
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId, {
+      expand: ["payment_intent"],
+    });
+
+    if (!session) {
+      return ApiResponse.sendFail(
+        res,
+        HttpStatus.NOT_FOUND,
+        EC("NOT_FOUND"),
+        "Stripe session not found",
+        requestId
+      );
+    }
+
+    if (clean(session.metadata?.brandId) !== brandId) {
+      return ApiResponse.sendFail(
+        res,
+        HttpStatus.BAD_REQUEST,
+        EC("VALIDATION_ERROR"),
+        "brandId does not match Stripe session",
+        requestId
+      );
+    }
+
+    if (session.payment_status !== "paid") {
+      return ApiResponse.sendFail(
+        res,
+        HttpStatus.BAD_REQUEST,
+        EC("PAYMENT_NOT_COMPLETED"),
+        "Stripe payment is not completed",
+        requestId
+      );
+    }
+
+    const amount = toNumber(session.amount_total, 0) / 100;
+    const currency = clean(session.currency || "inr").toLowerCase();
+
+    if (!amount || amount <= 0) {
+      return ApiResponse.sendFail(
+        res,
+        HttpStatus.BAD_REQUEST,
+        EC("VALIDATION_ERROR"),
+        "Invalid paid amount received from Stripe",
+        requestId
+      );
+    }
+
+    const wallet = await getOrCreateWallet(brandId);
+
+    wallet.topups = wallet.topups || [];
+
+    const alreadyCredited = wallet.topups.some(
+      (t) =>
+        clean(t?.stripeSessionId) === session.id &&
+        clean(t?.status).toLowerCase() === "success"
+    );
+
+    if (!alreadyCredited) {
+      wallet.walletBalance = Math.max(
+        0,
+        (Number(wallet.walletBalance) || 0) + amount
+      );
+
+      wallet.topups.push({
+        amount,
+        currency,
+        status: "success",
+        stripeSessionId: session.id,
+        stripePaymentIntentId:
+          typeof session.payment_intent === "string"
+            ? session.payment_intent
+            : session.payment_intent?.id || "",
+        createdAt: new Date(),
+      });
+
+      syncUsableBalance(wallet);
+      await wallet.save();
+    } else {
+      syncUsableBalance(wallet);
+      await wallet.save();
+    }
+
+    const frozenBalance = calcFrozenAll(wallet.freezes || []);
+
+    return ApiResponse.sendOk(
+      res,
+      HttpStatus.OK,
+      {
+        message: alreadyCredited
+          ? "Wallet topup already confirmed"
+          : "Wallet topped up successfully",
         brandId,
         addedAmount: amount,
         walletBalance: wallet.walletBalance,
-        frozenBalance: frozenAll,
-        usableBalance,
+        frozenBalance,
+        usableBalance: wallet.usableBalance,
       },
       requestId
     );
@@ -279,6 +467,7 @@ const getFrozenAmountForCampaign = async (req, res) => {
 module.exports = {
   getBrandWallet,
   topupBrandWallet,
+  confirmBrandWalletTopup,
   getFrozenAmountForCampaign,
   calcFrozenAll,
   syncUsableBalance,
