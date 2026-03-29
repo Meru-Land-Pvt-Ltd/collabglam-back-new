@@ -96,8 +96,8 @@ async function enrichLiteCampaignCreatedBy(rows = []) {
 
   const adminDocs = adminIds.length
     ? await ASSIGNEE_MODEL.find({ _id: { $in: adminIds.map(toObjectId) } })
-        .select("_id name email role")
-        .lean()
+      .select("_id name email role")
+      .lean()
     : [];
 
   const adminMap = new Map(
@@ -305,6 +305,47 @@ function extractHandleFromModash(modashDoc) {
   return normalizeHandle(candidates[0]);
 }
 
+async function enrichLiteCampaignBrandMeta(rows = []) {
+  const brandIds = [
+    ...new Set(
+      rows
+        .map((row) => String(row?.brandId || ""))
+        .filter((id) => isObjectId(id))
+    ),
+  ].map((id) => toObjectId(id));
+
+  if (!brandIds.length) {
+    return rows.map((row) => ({
+      ...row,
+      brandPlanName: "free",
+    }));
+  }
+
+  const brands = await Brand.find({ _id: { $in: brandIds } })
+    .select("_id name brandName subscription.planName")
+    .lean();
+
+  const brandMap = new Map(
+    brands.map((brand) => [
+      String(brand._id),
+      {
+        brandName: brand.brandName || brand.name || "—",
+        brandPlanName: brand?.subscription?.planName || "free",
+      },
+    ])
+  );
+
+  return rows.map((row) => {
+    const meta = brandMap.get(String(row.brandId));
+
+    return {
+      ...row,
+      brandName: row.brandName || meta?.brandName || "—",
+      brandPlanName: meta?.brandPlanName || "free",
+    };
+  });
+}
+
 async function enrichBrandsWithAssignments(brandDocs = []) {
   if (!Array.isArray(brandDocs) || brandDocs.length === 0) return [];
 
@@ -485,6 +526,8 @@ function toCampaignSummary(doc = {}) {
   return {
     _id: doc._id,
     brandId: doc.brandId || "",
+    brandName: doc.brandName || "—",
+    brandPlanName: doc.brandPlanName || "free",
     campaignId: doc.campaignsId || String(doc._id || ""),
     name: doc.campaignTitle || doc.productOrServiceName || "—",
     startDate: doc.timeline?.startDate || null,
@@ -502,7 +545,7 @@ function toCampaignSummary(doc = {}) {
 
 exports.adminAssignBrandPlan = async (req, res) => {
   try {
-    const brandId = String(req.body?.brandId || "").trim();
+    const brandId = String(req.body?.brandId || req.body?._id || "").trim();
     const planId = String(req.body?.planId || "").trim();
     const billingCycle = String(req.body?.billingCycle || "monthly").trim();
 
@@ -512,7 +555,15 @@ exports.adminAssignBrandPlan = async (req, res) => {
     const expiresAt = req.body?.expiresAt;
 
     if (!brandId || !planId) {
-      return res.status(400).json({ message: "brandId and planId required" });
+      return res.status(400).json({
+        message: "brandId and planId required",
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(brandId)) {
+      return res.status(400).json({
+        message: "Valid brand _id required",
+      });
     }
 
     const plan = await SubscriptionPlan.findOne({
@@ -522,7 +573,9 @@ exports.adminAssignBrandPlan = async (req, res) => {
     }).lean();
 
     if (!plan) {
-      return res.status(404).json({ message: "Brand plan not found/archived" });
+      return res.status(404).json({
+        message: "Brand plan not found/archived",
+      });
     }
 
     const subscription = buildSubscriptionFromPlan(plan, {
@@ -533,22 +586,40 @@ exports.adminAssignBrandPlan = async (req, res) => {
       expiresAt,
     });
 
-    const updated = await Brand.findOneAndUpdate(
-      { brandId },
-      { $set: { subscription, subscriptionExpired: false } },
-      { new: true }
+    const updated = await Brand.findByIdAndUpdate(
+      brandId,
+      {
+        $set: {
+          subscription,
+          subscriptionExpired: false,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
     )
-      .select("brandId name email subscription subscriptionExpired")
+      .select("_id brandName name email subscription subscriptionExpired")
       .lean();
 
     if (!updated) {
-      return res.status(404).json({ message: "Brand not found" });
+      return res.status(404).json({
+        message: "Brand not found",
+      });
     }
 
-    return res.json({ status: "success", brand: updated });
+    return res.json({
+      status: "success",
+      brand: {
+        ...updated,
+        brandId: String(updated._id),
+      },
+    });
   } catch (error) {
     console.error("adminAssignBrandPlan error:", error);
-    return res.status(500).json({ message: "Internal server error" });
+    return res.status(500).json({
+      message: "Internal server error",
+    });
   }
 };
 
@@ -1972,17 +2043,18 @@ exports.getAllCampaignsLite = async (req, res) => {
 
     const total = await Campaign.countDocuments(filter);
 
-    const rows = await Campaign.find(filter)
-      .select(
-        "_id brandId campaignsId campaignTitle productOrServiceName goal budget applicantCount isActive isDraft byAi createdBy campaignStatus timeline.startDate timeline.endDate createdAt"
-      )
-      .sort({ [field]: dir, createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
+const rows = await Campaign.find(filter)
+  .select(
+    "_id brandId brandName campaignsId campaignTitle productOrServiceName goal budget applicantCount isActive isDraft byAi createdBy campaignStatus timeline.startDate timeline.endDate createdAt"
+  )
+  .sort({ [field]: dir, createdAt: -1 })
+  .skip((page - 1) * limit)
+  .limit(limit)
+  .lean();
 
-    const enrichedRows = await enrichLiteCampaignCreatedBy(rows);
-    const campaigns = enrichedRows.map(toCampaignSummary);
+const rowsWithCreators = await enrichLiteCampaignCreatedBy(rows);
+const enrichedRows = await enrichLiteCampaignBrandMeta(rowsWithCreators);
+const campaigns = enrichedRows.map(toCampaignSummary);
 
     return res.status(200).json({
       page,
