@@ -1578,7 +1578,7 @@ exports.createCampaign = async (req, res) => {
   const requestId = getRequestId(req);
 
   try {
-    
+
     const geo = await detectGeoFromRequest(req);
     const campaignTz = getCampaignTimezone(req.body);
 
@@ -5435,7 +5435,7 @@ exports.editDraftCampaign = async (req, res) => {
 
     if (Object.keys(update.$set).length === 0) delete update.$set;
     if (Object.keys(update.$unset).length === 0) delete update.$unset;
-
+ 
     const updated = await Campaign.findOneAndUpdate(
       {
         _id: toObjectId(campaignId),
