@@ -1763,6 +1763,7 @@ exports.prefillCampaignWithAI = async (req, res) => {
     if (!ageR.ok) return ageR.resp;
 
     const imgs = toUnknownArray(req.body.productImages);
+    const uploadedProductImages = await normalizeAndUploadProductImages(imgs);
     if (!imgs.length) {
       return failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "productImages", requestId);
     }
@@ -1981,7 +1982,7 @@ exports.prefillCampaignWithAI = async (req, res) => {
       campaignTitle: enhancedTitle,
       description: enhancedDescription,
       campaignType: clean(req.body.campaignType) || "",
-      productImages: imgs,
+      productImages: uploadedProductImages,
       productLink: productLink || undefined,
       videoLink: videoLink || undefined,
       campaignGoals: goalsPick,
@@ -4175,11 +4176,17 @@ exports.updateManualCampaign = async (req, res) => {
       return failField(res, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "subcategoryIds", requestId, rel.error);
     }
 
+    let normalizedProductImages = existingCampaign.productImages || [];
+
+    if (req.body.productImages !== undefined) {
+      normalizedProductImages = await normalizeAndUploadProductImages(
+        req.body.productImages
+      );
+    }
+
     const mergedBody = {
       ...req.body,
-      productImages: toUnknownArray(req.body.productImages).length
-        ? req.body.productImages
-        : existingCampaign.productImages || [],
+      productImages: normalizedProductImages,
     };
 
     const patch = buildCampaignUpdatePatch(mergedBody, existingCampaign, status, timing, {
@@ -5087,7 +5094,8 @@ exports.editDraftCampaign = async (req, res) => {
 
     // product images
     if (req.body.productImages !== undefined) {
-      const imgs = toUnknownArray(req.body.productImages);
+      const imgs = await normalizeAndUploadProductImages(req.body.productImages);
+
       if (!imgs.length) {
         update.$unset.productImages = 1;
         validateView.productImages = [];
