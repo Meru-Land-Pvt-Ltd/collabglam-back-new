@@ -65,7 +65,7 @@ const JSON_LIMIT = process.env.JSON_LIMIT || "30mb";
 const GRIDFS_BUCKET_NAME = process.env.GRIDFS_BUCKET || "uploads";
 
 const corsOrigins = process.env.FRONTEND_ORIGIN || [
-  "https://collabglam.cloud",
+  "https://collabglam.com",
   "http://localhost:3000",
   "http://localhost:3001",
   "http://192.168.1.17:3000",
