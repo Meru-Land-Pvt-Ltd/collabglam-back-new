@@ -2043,18 +2043,18 @@ exports.getAllCampaignsLite = async (req, res) => {
 
     const total = await Campaign.countDocuments(filter);
 
-const rows = await Campaign.find(filter)
-  .select(
-    "_id brandId brandName campaignsId campaignTitle productOrServiceName goal budget applicantCount isActive isDraft byAi createdBy campaignStatus timeline.startDate timeline.endDate createdAt"
-  )
-  .sort({ [field]: dir, createdAt: -1 })
-  .skip((page - 1) * limit)
-  .limit(limit)
-  .lean();
+    const rows = await Campaign.find(filter)
+      .select(
+        "_id brandId brandName campaignsId campaignTitle productOrServiceName goal budget applicantCount isActive isDraft byAi createdBy campaignStatus timeline.startDate timeline.endDate createdAt"
+      )
+      .sort({ [field]: dir, createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
 
-const rowsWithCreators = await enrichLiteCampaignCreatedBy(rows);
-const enrichedRows = await enrichLiteCampaignBrandMeta(rowsWithCreators);
-const campaigns = enrichedRows.map(toCampaignSummary);
+    const rowsWithCreators = await enrichLiteCampaignCreatedBy(rows);
+    const enrichedRows = await enrichLiteCampaignBrandMeta(rowsWithCreators);
+    const campaigns = enrichedRows.map(toCampaignSummary);
 
     return res.status(200).json({
       page,
