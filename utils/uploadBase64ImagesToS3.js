@@ -49,30 +49,43 @@ async function uploadSingleBase64Image(dataUrl, prefix = "campaign-images") {
   const { contentType, base64Data, extension } = extractBase64Parts(dataUrl);
   const buffer = Buffer.from(base64Data, "base64");
 
-  if (!buffer || !buffer.length) {
+  if (!buffer?.length) {
     throw new Error("Empty image buffer");
   }
 
   const fileName = `${Date.now()}-${crypto.randomUUID()}.${extension}`;
   const key = `${prefix}/${fileName}`;
 
-  const command = new PutObjectCommand({
-    Bucket: process.env.AWS_S3_BUCKET_NAME,
-    Key: key,
-    Body: buffer,
-    ContentType: contentType,
-  });
+  try {
+    const command = new PutObjectCommand({
+      Bucket: process.env.AWS_S3_BUCKET_NAME,
+      Key: key,
+      Body: buffer,
+      ContentType: contentType,
+    });
 
-  await s3.send(command);
+    const result = await s3.send(command);
+    console.log("S3 upload success:", result);
 
-  const fileUrl = `https://${process.env.AWS_S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+    const fileUrl = `https://${process.env.AWS_S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
 
-  return {
-    dataUrl: fileUrl,
-    key,
-    contentType,
-    size: buffer.length,
-  };
+    return {
+      dataUrl: fileUrl,
+      key,
+      contentType,
+      size: buffer.length,
+    };
+  } catch (err) {
+    console.error("S3 upload failed:", {
+      name: err.name,
+      message: err.message,
+      code: err.Code || err.code,
+      httpStatusCode: err.$metadata?.httpStatusCode,
+      requestId: err.$metadata?.requestId,
+      extendedRequestId: err.$metadata?.extendedRequestId,
+    });
+    throw err;
+  }
 }
 
 async function normalizeAndUploadProductImages(productImages) {

@@ -118,7 +118,7 @@ async function uploadEmailRecordToS3(record) {
 
   const date = new Date().toISOString().slice(0, 10);
 
-  const Key = `outbound/marketing/${date}/${id}.json`;
+  const Key = `collabglam-email-archive/outbound/marketing/${date}/${id}.json`;
 
   console.log("Uploading S3:", { Bucket, Key });
 
