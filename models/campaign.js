@@ -120,7 +120,7 @@ const CampaignSchema = new Schema(
     videoLink: { type: String, trim: true, default: "" },
     productServiceInfo: { type: [Schema.Types.Mixed], default: [] },
 
-    campaignGoals: [{ type: Schema.Types.ObjectId, ref: "CampaignGoal" }],
+    campaignGoals: [{ type: Schema.Types.ObjectId, ref: "ProductServiceGoal" }],
     influencerTierIds: [{ type: Schema.Types.ObjectId, ref: "InfluencerTier" }],
     contentFormats: [{ type: Schema.Types.ObjectId, ref: "ContentFormat" }],
     contentLanguageIds: [{ type: Schema.Types.ObjectId, ref: "ContentLanguage" }],
