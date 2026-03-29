@@ -25,7 +25,7 @@ const { uploadToGridFS } = require("../utils/gridfs");
 // ===============================
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 20MB
 const BRAND_COOLDOWN_MS = 48 * 60 * 60 * 1000; // 2 days
-const DEFAULT_RELAY_DOMAIN = "mail.collabglam.cloud";
+const DEFAULT_RELAY_DOMAIN = "mail.collabglam.com";
 const HANDLE_RX = /^@[A-Za-z0-9._\-]+$/;
 
 const PLATFORM_MAP = new Map([
