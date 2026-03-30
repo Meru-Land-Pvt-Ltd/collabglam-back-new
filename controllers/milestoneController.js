@@ -870,29 +870,77 @@ exports.releaseMilestone = async (req, res) => {
 // ======================================================================
 exports.getInfluencerPaidTotal = async (req, res) => {
   const { influencerId } = req.body;
+
   if (!influencerId) {
     return res.status(400).json({ message: "influencerId is required." });
   }
 
+  if (!mongoose.Types.ObjectId.isValid(influencerId)) {
+    return res.status(400).json({ message: "Invalid influencerId." });
+  }
+
   try {
-    const docs = await Milestone.find({
-      "milestoneHistory.influencerId": influencerId,
-    });
+    const result = await Milestone.aggregate([
+      { $unwind: "$milestoneHistory" },
+      {
+        $match: {
+          "milestoneHistory.influencerId": new mongoose.Types.ObjectId(influencerId),
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalPaid: {
+            $sum: {
+              $cond: [
+                { $eq: ["$milestoneHistory.payoutStatus", "paid"] },
+                "$milestoneHistory.amount",
+                0,
+              ],
+            },
+          },
+          totalUpcoming: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ["$milestoneHistory.payoutStatus", "pending"] },
+                    { $eq: ["$milestoneHistory.released", false] },
+                  ],
+                },
+                "$milestoneHistory.amount",
+                0,
+              ],
+            },
+          },
+          totalInitiated: {
+            $sum: {
+              $cond: [
+                { $eq: ["$milestoneHistory.payoutStatus", "initiated"] },
+                "$milestoneHistory.amount",
+                0,
+              ],
+            },
+          },
+        },
+      },
+    ]);
 
-    let totalPaid = 0;
-    docs.forEach((d) => {
-      (d.milestoneHistory || [])
-        .filter(
-          (e) => e.influencerId === influencerId && e.payoutStatus === "paid"
-        )
-        .forEach((e) => {
-          totalPaid += Number(e.amount) || 0;
-        });
-    });
+    const summary = result[0] || {
+      totalPaid: 0,
+      totalUpcoming: 0,
+      totalInitiated: 0,
+    };
 
-    return res.json({ influencerId, totalPaid });
+    return res.status(200).json({
+      influencerId,
+      totalPaid: summary.totalPaid,
+      totalPending: summary.totalPending,
+      totalUpcoming: summary.totalUpcoming,
+      totalInitiated: summary.totalInitiated,
+    });
   } catch (err) {
-    console.error(err);
+    console.error("Error getting influencer payout totals:", err);
     return res.status(500).json({ message: "Internal server error." });
   }
 };
@@ -1171,5 +1219,79 @@ exports.adminMarkMilestonePaid = async (req, res) => {
   } catch (err) {
     console.error("Error in adminMarkMilestonePaid:", err);
     return res.status(500).json({ message: "Internal server error." });
+  }
+};
+
+exports.getPayoutDetailsByInfluencer = async (req, res) => {
+  const { influencerId } = req.body;
+
+  if (!influencerId) {
+    return res.status(400).json({ message: "influencerId is required" });
+  }
+
+  try {
+    const docs = await Milestone.find({
+      "milestoneHistory.influencerId": String(influencerId),
+    }).lean();
+
+    const entries = docs.flatMap((doc) =>
+      (doc.milestoneHistory || [])
+        .filter((e) => String(e.influencerId) === String(influencerId))
+        .map((e) => ({
+          campaignId: String(e.campaignId),
+          amount: Number(e.amount || 0),
+          payoutStatus: e.payoutStatus || (e.released ? "initiated" : "pending"),
+          createdAt: e.createdAt,
+        }))
+    );
+
+    const campaignIds = [
+      ...new Set(entries.map((e) => e.campaignId).filter(Boolean)),
+    ];
+
+    let campaigns = [];
+    if (campaignIds.length) {
+      campaigns = await Campaign.find(
+        {
+          $or: [
+            { _id: { $in: campaignIds } },
+            { campaignsId: { $in: campaignIds } },
+          ],
+        },
+        "_id campaignsId campaignTitle title productOrServiceName"
+      ).lean();
+    }
+
+    const campaignMap = new Map();
+    campaigns.forEach((camp) => {
+      const title =
+        camp.campaignTitle || camp.title || camp.productOrServiceName || "";
+
+      if (camp._id) {
+        campaignMap.set(String(camp._id), title);
+      }
+      if (camp.campaignsId) {
+        campaignMap.set(String(camp.campaignsId), title);
+      }
+    });
+
+    const payoutList = entries
+      .map((e) => ({
+        campaignId: e.campaignId,
+        campaignTitle: campaignMap.get(String(e.campaignId)) || "",
+        amount: e.amount,
+        payoutStatus: e.payoutStatus,
+        createdAt: e.createdAt,
+      }))
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    return res.status(200).json({
+      message: "Payout details fetched successfully",
+      influencerId,
+      payouts: payoutList,
+    });
+  } catch (err) {
+    console.error("Error in getPayoutDetailsByInfluencer:", err);
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
