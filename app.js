@@ -151,7 +151,7 @@ app.use("/group-chat", groupChatRoutes);
 app.use("/pipeline", pipelineRoutes);
 app.use("/brand-network", brandNetworkRoutes);
 app.use("/brand-outreach", brandOuteachRoutes)
-
+app.use('/pitch-folders', require('./routes/pitchFolderRoutes'));
 /* =========================================================
    ERROR HANDLER
 ========================================================= */
