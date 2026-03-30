@@ -29,6 +29,7 @@ const {
   getInfluencerOnboarding,
   markInfluencerTourSeen,
   getBulkByIds,
+  getLiteInfluencerByIdPost,
 } = require('../controllers/influencerController');
 const { influencerAuth } = require("../auth/influencerAuth");
 // Public endpoints:
@@ -75,6 +76,8 @@ router.post(
 
 router.get('/onboarding', influencerAuth, getInfluencerOnboarding);
 router.post('/onboarding/influencer-tour/seen', influencerAuth, markInfluencerTourSeen);
+
+router.post("/lite", getLiteInfluencerByIdPost);
 
 
 module.exports = router;

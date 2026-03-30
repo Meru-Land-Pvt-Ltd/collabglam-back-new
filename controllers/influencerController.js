@@ -2889,3 +2889,30 @@ exports.markInfluencerTourSeen = async (req, res) => {
     return res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+exports.getLiteInfluencerByIdPost = async (req, res) => {
+  try {
+    const { influencerId } = req.body || {};
+
+    if (!influencerId) {
+      return res.status(400).json({ message: "influencerId is required" });
+    }
+
+    const influencer = await InfluencerModel.findOne({ influencerId })
+      .select("influencerId name email")
+      .lean();
+
+    if (!influencer) {
+      return res.status(404).json({ message: "Influencer not found" });
+    }
+
+    return res.status(200).json({
+      influencerId: influencer.influencerId,
+      name: influencer.name || "",
+      email: influencer.email || "",
+    });
+  } catch (err) {
+    console.error("Error in getLiteInfluencerByIdPost:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
