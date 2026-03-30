@@ -185,6 +185,7 @@ const CommercialMilestoneSchema = new mongoose.Schema(
 const CommercialSchema = new mongoose.Schema(
   {
     totalCampaignFee: { type: Number, default: 0 },
+    influencerBudget:{type:Number},
     currency: { type: String, default: "USD" },
     platformMilestonePaymentStructure: { type: String, default: "" },
     customSplit: { type: String, default: "" },

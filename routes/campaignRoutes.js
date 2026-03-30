@@ -39,6 +39,7 @@ router.post("/accepted", campaignController.getAcceptedCampaigns);
 router.post("/accepted-inf", brandAuth, campaignController.getAcceptedInfluencers);
 
 router.post("/contracted", influencerAuth, campaignController.getContractedCampaignsByInfluencer);
+router.get("/rejected/:influencerId",  campaignController.rejectedCampaign);
 router.post("/filter", brandAuth, campaignController.getCampaignsByFilter);
 router.post("/rejectedbyinf", brandAuth, campaignController.getRejectedCampaignsByInfluencer);
 

@@ -3819,6 +3819,14 @@ exports.viewCampaignByIdForBrand = async (req, res) => {
       });
     }
 
+    const applyCampaign = await ApplyCampaign.findOne({
+      campaignId: campaignId,
+    }).lean();
+
+    const count = applyCampaign?.applicants?.length || 0;
+
+    campaign.count = count;
+
     return res.status(200).json({
       success: true,
       doc: campaign,
@@ -5660,5 +5668,72 @@ exports.getDraftCampaigns = async (req, res) => {
     );
   } catch (err) {
     return sendControllerError(res, requestId, err);
+  }
+};
+
+exports.rejectedCampaign = async (req, res) => {
+  try {
+    const { influencerId } = req.params;
+
+    if (!influencerId) {
+      return res.status(400).json({
+        success: false,
+        message: "influencerId is required",
+      });
+    }
+
+    const rejectedCampaigns = await Contract.aggregate([
+      {
+        $match: {
+          influencerId: influencerId,
+          status: "REJECTED",
+        },
+      },
+      {
+        $project: {
+          _id: 1,
+          campaignId: 1,
+          status: 1,
+        },
+      },
+      {
+        $addFields: {
+          campaignObjectId: { $toObjectId: "$campaignId" },
+        },
+      },
+      {
+        $lookup: {
+          from: "campaigns",
+          localField: "campaignObjectId",
+          foreignField: "_id",
+          as: "campaignData",
+        },
+      },
+      {
+        $unwind: {
+          path: "$campaignData",
+          preserveNullAndEmptyArrays: true,
+        },
+      },
+      {
+        $project: {
+          _id: 1,
+          campaignId: 1,
+          status: 1,
+          campaignData: 1,
+        },
+      },
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      count: rejectedCampaigns.length,
+      data: rejectedCampaigns,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 };
