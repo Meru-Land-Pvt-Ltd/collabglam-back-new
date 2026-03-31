@@ -51,7 +51,7 @@ router.post("/update-pending", campaignController.approveCampaignPendingUpdate);
 router.post("/reject-pending", campaignController.rejectCampaignPendingUpdate);
 
 router.get("/created-by-admin/:brandId", campaignController.getAdminCampaigns);
-
+//
 router.get("/category",campaignController.getCategories);
 router.get("/subcategory", campaignController.getSubcategories);
 
