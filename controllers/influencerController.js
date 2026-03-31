@@ -21,8 +21,6 @@ const InfluencerModel =
 
 const CategoryModule = require("../models/categories");
 const Category = CategoryModule.Category || CategoryModule.default || CategoryModule;
-
-const Country = require("../models/country");
 const Language = require("../models/language");
 
 const VerifyEmailModule = require("../models/verifyEmail");
@@ -36,8 +34,9 @@ const VerifyOtpModel = VerifyEmail;
 
 const ApplyCampaign = require("../models/applyCampaign");
 const Campaign = require("../models/campaign");
-const Audience = require("../models/audience");
-const AudienceRange = require("../models/ageRange");
+const { AgeRangeModel: AgeRange } = require("../models/ageRange");
+const Country = require("../models/country");
+const { ProductServiceGoalModel } = require("../models/productServiceGoal");
 const Modash = require("../models/modash");
 
 const { linkConversationsForInfluencer } = require("../services/emailLinking");
@@ -1737,14 +1736,13 @@ exports.getCampaignsByInfluencer = async (req, res) => {
 
     const finalSortBy = safeSortFields.includes(sortBy) ? sortBy : "createdAt";
 
-    // support both Mongo _id and public influencerId
     const influencerLookup = mongoose.Types.ObjectId.isValid(String(influencerId))
       ? {
-        $or: [
-          { _id: new mongoose.Types.ObjectId(String(influencerId)) },
-          { influencerId: String(influencerId) },
-        ],
-      }
+          $or: [
+            { _id: new mongoose.Types.ObjectId(String(influencerId)) },
+            { influencerId: String(influencerId) },
+          ],
+        }
       : { influencerId: String(influencerId) };
 
     const influencer = await InfluencerModel.findOne(
@@ -1760,7 +1758,6 @@ exports.getCampaignsByInfluencer = async (req, res) => {
     const publicInfluencerId = String(influencer.influencerId || influencer._id);
     const influencerName = influencer.name || "";
 
-    // match influencer in applicants / approved
     const applyDocs = await ApplyCampaign.find({
       $or: [
         { "applicants.influencerId": internalInfluencerId },
@@ -1840,10 +1837,80 @@ exports.getCampaignsByInfluencer = async (req, res) => {
       .limit(limitNum)
       .lean();
 
+    // collect all unique ids
+    const allCountryIds = [
+      ...new Set(
+        campaigns.flatMap((c) =>
+          Array.isArray(c.targetCountryIds)
+            ? c.targetCountryIds.map((id) => String(id))
+            : []
+        )
+      ),
+    ].filter((id) => mongoose.Types.ObjectId.isValid(id));
+
+    const allAgeRangeIds = [
+      ...new Set(
+        campaigns.flatMap((c) =>
+          Array.isArray(c.targetAgeRanges)
+            ? c.targetAgeRanges.map((id) => String(id))
+            : []
+        )
+      ),
+    ].filter((id) => mongoose.Types.ObjectId.isValid(id));
+
+    const allCampaignGoalIds = [
+      ...new Set(
+        campaigns.flatMap((c) =>
+          Array.isArray(c.campaignGoals)
+            ? c.campaignGoals.map((id) => String(id))
+            : []
+        )
+      ),
+    ].filter((id) => mongoose.Types.ObjectId.isValid(id));
+
+    // fetch value docs
+    const [countries, ageRanges, campaignGoals] = await Promise.all([
+      allCountryIds.length
+        ? Country.find(
+            { _id: { $in: allCountryIds } },
+            "_id countryName"
+          ).lean()
+        : Promise.resolve([]),
+
+      allAgeRangeIds.length
+        ? AgeRange.find(
+            { _id: { $in: allAgeRangeIds } },
+            "_id range"
+          ).lean()
+        : Promise.resolve([]),
+
+      allCampaignGoalIds.length
+        ? ProductServiceGoalModel.find(
+            { _id: { $in: allCampaignGoalIds } },
+            "_id goal"
+          ).lean()
+        : Promise.resolve([]),
+    ]);
+
+    // build maps
+    const countryMap = new Map(
+      countries.map((item) => [String(item._id), item.countryName || ""])
+    );
+
+    const ageRangeMap = new Map(
+      ageRanges.map((item) => [String(item._id), item.range || ""])
+    );
+
+    const campaignGoalMap = new Map(
+      campaignGoals.map((item) => [String(item._id), item.goal || ""])
+    );
+
     const result = campaigns.map((campaign) => {
       const campaignId = String(campaign._id);
 
-      const related = applyDocs.find((doc) => String(doc.campaignId || "") === campaignId);
+      const related = applyDocs.find(
+        (doc) => String(doc.campaignId || "") === campaignId
+      );
 
       let applicationStatus = "pending";
 
@@ -1862,6 +1929,30 @@ exports.getCampaignsByInfluencer = async (req, res) => {
       ) {
         applicationStatus = "applied";
       }
+
+      const targetCountryIds = Array.isArray(campaign.targetCountryIds)
+        ? campaign.targetCountryIds.map((id) => String(id))
+        : [];
+
+      const targetAgeRanges = Array.isArray(campaign.targetAgeRanges)
+        ? campaign.targetAgeRanges.map((id) => String(id))
+        : [];
+
+      const campaignGoalsIds = Array.isArray(campaign.campaignGoals)
+        ? campaign.campaignGoals.map((id) => String(id))
+        : [];
+
+      const targetCountryValues = targetCountryIds.map(
+        (id) => countryMap.get(id) || id
+      );
+
+      const targetAgeGroupValues = targetAgeRanges.map(
+        (id) => ageRangeMap.get(id) || id
+      );
+
+      const campaignGoalValues = campaignGoalsIds.map(
+        (id) => campaignGoalMap.get(id) || id
+      );
 
       return {
         id: campaignId,
@@ -1885,18 +1976,24 @@ exports.getCampaignsByInfluencer = async (req, res) => {
         categories: campaign.categories || [],
 
         productImages: campaign.productImages || [],
-        images: campaign.productImages || [], // backward-compatible alias
+        images: campaign.productImages || [],
         productLink: campaign.productLink || "",
         videoLink: campaign.videoLink || "",
         productServiceInfo: campaign.productServiceInfo || [],
 
         campaignGoals: campaign.campaignGoals || [],
+        campaignGoalValues,
+
         influencerTierIds: campaign.influencerTierIds || [],
         contentFormats: campaign.contentFormats || [],
         contentLanguageIds: campaign.contentLanguageIds || [],
         preferredHashtags: campaign.preferredHashtags || [],
+
         targetCountryIds: campaign.targetCountryIds || [],
+        targetCountryValues,
+
         targetAgeRanges: campaign.targetAgeRanges || [],
+        targetAgeGroupValues,
 
         numberOfInfluencers: campaign.numberOfInfluencers || 0,
         influencerTier: campaign.influencerTier || "",
