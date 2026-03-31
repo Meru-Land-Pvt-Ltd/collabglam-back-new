@@ -6,7 +6,12 @@ const { STSClient, GetCallerIdentityCommand } = require("@aws-sdk/client-sts");
 const AdminEmailThreadModel = require("../models/adminEmailThread");
 const AdminEmailMessageModel = require("../models/adminEmailMessage");
 const { AdminModel, ROLES } = require("../models/master");
-const { sendEmail, uploadEmailRecordToS3 } = require("./emailService");
+const {
+  sendEmail,
+  uploadEmailRecordToS3,
+  getAttachmentBuffersFromS3,
+  uploadOutboundAttachmentsToS3,
+} = require("./emailService");
 const { collabOpportunityBulkTemplate } = require("../template/collabOpportunityBulk");
 const {
   cleanStr,
@@ -45,7 +50,9 @@ function parseRecipientsFromCsv(csvBuffer) {
 
   const pick = (row, keys) => {
     for (const key of keys) {
-      if (row?.[key] != null && String(row[key]).trim()) return String(row[key]).trim();
+      if (row?.[key] != null && String(row[key]).trim()) {
+        return String(row[key]).trim();
+      }
     }
     return "";
   };
@@ -132,8 +139,28 @@ Reply here: ${replyToEmail}
   };
 }
 
+function normalizeAttachmentInput(items = []) {
+  if (!Array.isArray(items)) return [];
+
+  return items
+    .filter((item) => item && item.filename)
+    .map((item) => ({
+      filename: cleanStr(item.filename),
+      contentType: cleanStr(item.contentType) || "application/octet-stream",
+      size: Number(item.size || 0),
+      contentBase64: item.contentBase64 ? String(item.contentBase64) : null,
+      s3Bucket: item.s3Bucket ? String(item.s3Bucket) : null,
+      s3Key: item.s3Key ? String(item.s3Key) : null,
+    }));
+}
+
 function mapAdminRoleToThreadRole(role) {
-  const allowedRoles = [ROLES.SUPER_ADMIN, ROLES.REVENUE_HEAD, ROLES.IME, ROLES.BME];
+  const allowedRoles = [
+    ROLES.SUPER_ADMIN,
+    ROLES.REVENUE_HEAD,
+    ROLES.IME,
+    ROLES.BME,
+  ];
   if (!allowedRoles.includes(role)) throw new Error("Unsupported admin role");
   return role;
 }
@@ -162,7 +189,12 @@ async function getAdminSender(adminId) {
 
   if (!admin) throw new Error("Admin not found");
 
-  const allowedRoles = [ROLES.SUPER_ADMIN, ROLES.REVENUE_HEAD, ROLES.IME, ROLES.BME];
+  const allowedRoles = [
+    ROLES.SUPER_ADMIN,
+    ROLES.REVENUE_HEAD,
+    ROLES.IME,
+    ROLES.BME,
+  ];
   if (!allowedRoles.includes(admin.role)) {
     throw new Error("Only super_admin, revenue_head, ime, or bme can send emails");
   }
@@ -263,12 +295,23 @@ async function saveOutboundAndSend({
   executiveId,
   actorAdminId,
   meta = {},
+  attachments = [],
 }) {
   const lastMessage = await AdminEmailMessageModel.findOne({ threadId: thread._id })
     .sort({ createdAt: -1 })
     .lean();
 
   const references = lastMessage ? buildReferences(lastMessage) : [];
+  const inReplyTo = lastMessage?.messageId || null;
+
+  const normalizedAttachments = normalizeAttachmentInput(attachments);
+
+  const s3Attachments = normalizedAttachments.some((a) => a.contentBase64)
+    ? await uploadOutboundAttachmentsToS3({
+      attachments: normalizedAttachments,
+      threadId: String(thread._id),
+    })
+    : normalizedAttachments.filter((a) => a.s3Bucket && a.s3Key);
 
   const emailMessage = await AdminEmailMessageModel.create({
     threadId: thread._id,
@@ -284,12 +327,24 @@ async function saveOutboundAndSend({
     cc,
     bcc,
     replyTo: [thread.replyToEmail],
-    inReplyTo: lastMessage?.messageId || null,
+    inReplyTo,
     references,
     provider: "SES",
     providerStatus: "QUEUED",
     textPreview: text ? text.slice(0, 1000) : null,
     htmlPreview: html ? String(html).slice(0, 2000) : null,
+    attachments: s3Attachments.map((a) => ({
+      filename: a.filename || null,
+      contentType: a.contentType || null,
+      contentDisposition: "attachment",
+      contentId: null,
+      transferEncoding: "base64",
+      size: a.size || 0,
+      checksum: null,
+      related: false,
+      s3Bucket: a.s3Bucket || null,
+      s3Key: a.s3Key || null,
+    })),
     meta,
   });
 
@@ -305,12 +360,19 @@ async function saveOutboundAndSend({
   }
 
   if (thread.brandOutreachId) {
-    emailTags.push({ Name: "brandOutreachId", Value: String(thread.brandOutreachId) });
+    emailTags.push({
+      Name: "brandOutreachId",
+      Value: String(thread.brandOutreachId),
+    });
   }
 
   if (thread.campaignId) {
     emailTags.push({ Name: "campaignId", Value: String(thread.campaignId) });
   }
+
+  const sendableAttachments = s3Attachments.length
+    ? await getAttachmentBuffersFromS3(s3Attachments)
+    : [];
 
   const { messageId } = await sendEmail({
     to,
@@ -321,6 +383,9 @@ async function saveOutboundAndSend({
     html,
     from,
     replyTo: [thread.replyToEmail],
+    attachments: sendableAttachments,
+    inReplyTo,
+    references,
     configurationSetName: process.env.SES_CONFIGURATION_SET,
     emailTags,
   });
@@ -335,7 +400,9 @@ async function saveOutboundAndSend({
       executiveId: String(executiveId),
       actorAdminId: String(actorAdminId || executiveId),
       pipelineId: thread.pipelineId ? String(thread.pipelineId) : null,
-      brandOutreachId: thread.brandOutreachId ? String(thread.brandOutreachId) : null,
+      brandOutreachId: thread.brandOutreachId
+        ? String(thread.brandOutreachId)
+        : null,
       campaignId: thread.campaignId ? String(thread.campaignId) : null,
       to,
       cc,
@@ -345,6 +412,12 @@ async function saveOutboundAndSend({
       subject,
       text,
       html,
+      attachments: s3Attachments.map((a) => ({
+        filename: a.filename || null,
+        contentType: a.contentType || null,
+        s3Bucket: a.s3Bucket || null,
+        s3Key: a.s3Key || null,
+      })),
       sesMessageId: messageId || null,
       createdAt: new Date().toISOString(),
       meta,
@@ -451,7 +524,7 @@ async function saveOutboundAndSend({
       console.error("Brand outreach update after email send failed:", error?.message || error);
     }
   }
-
+  
   return {
     threadId: String(thread._id),
     emailMessageId: String(emailMessage._id),
@@ -468,6 +541,7 @@ async function sendSelectedBrandOutreachEmailsService({
   text,
   html,
   ownerAdminId = null,
+  attachments = [],
 }) {
   await getActorAdmin(actorAdminId);
 
@@ -475,10 +549,13 @@ async function sendSelectedBrandOutreachEmailsService({
     ? await assertOwnerAssignable(actorAdminId, ownerAdminId)
     : toObjectIdStrict(actorAdminId, "actorAdminId");
 
-  const { adminId: execObj, admin, from, executiveName } = await getAdminSender(targetOwnerId);
+  const { adminId: execObj, admin, from, executiveName } =
+    await getAdminSender(targetOwnerId);
 
   const validIds = Array.isArray(brandOutreachIds)
-    ? brandOutreachIds.map((id) => cleanStr(id)).filter((id) => mongoose.Types.ObjectId.isValid(id))
+    ? brandOutreachIds
+      .map((id) => cleanStr(id))
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
     : [];
 
   if (!validIds.length) throw new Error("brandOutreachIds are required");
@@ -543,6 +620,7 @@ async function sendSelectedBrandOutreachEmailsService({
         html: finalHtml,
         executiveId: execObj,
         actorAdminId,
+        attachments,
         meta: {
           source: "BRAND_OUTREACH_SELECTION",
           recipientName,
@@ -654,7 +732,9 @@ async function getBrandOutreachRecipientsForComposeService({
   await getActorAdmin(actorAdminId);
 
   const validIds = Array.isArray(brandOutreachIds)
-    ? brandOutreachIds.map((id) => cleanStr(id)).filter((id) => mongoose.Types.ObjectId.isValid(id))
+    ? brandOutreachIds
+      .map((id) => cleanStr(id))
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
     : [];
 
   if (!validIds.length) throw new Error("brandOutreachIds are required");
@@ -720,7 +800,11 @@ async function getMailboxScopeService({ actorAdminId }) {
   };
 }
 
-async function resolveScopedExecutiveIds({ scope, teamRole = "ALL", revenueHeadId = "" }) {
+async function resolveScopedExecutiveIds({
+  scope,
+  teamRole = "ALL",
+  revenueHeadId = "",
+}) {
   const actorRole = scope?.actor?.role;
   const normalizedTeamRole = String(teamRole || "ALL").toLowerCase();
 
@@ -748,11 +832,7 @@ async function resolveScopedExecutiveIds({ scope, teamRole = "ALL", revenueHeadI
 
     const rhObj = toObjectIdStrict(revenueHeadId, "revenueHeadId");
 
-    adminFilter.$or = [
-      { _id: rhObj },
-      { parentAdmin: rhObj },
-      { rootAdmin: rhObj },
-    ];
+    adminFilter.$or = [{ _id: rhObj }, { parentAdmin: rhObj }, { rootAdmin: rhObj }];
   }
 
   const admins = await AdminModel.find(adminFilter).select("_id").lean();
@@ -953,9 +1033,7 @@ async function listThreads({
     };
   }
 
-  const stateById = new Map(
-    stateItems.map((item) => [String(item._id), item])
-  );
+  const stateById = new Map(stateItems.map((item) => [String(item._id), item]));
 
   const rawThreads = await AdminEmailThreadModel.find({
     _id: { $in: idsInOrder },
@@ -996,13 +1074,11 @@ async function listThreads({
 async function getThreadMessages({ threadId, actorAdminId }) {
   const tid = toObjectIdStrict(threadId, "threadId");
 
-  // first fetch raw thread for permission check
   const rawThread = await AdminEmailThreadModel.findById(tid).lean();
   if (!rawThread) throw new Error("Thread not found");
 
   await assertThreadScope(rawThread, actorAdminId);
 
-  // then fetch populated thread for response
   const thread = await AdminEmailThreadModel.findById(tid)
     .populate("executiveId", "name email proxyEmail role parentAdmin rootAdmin")
     .populate("lastActorAdminId", "name email role")
@@ -1014,10 +1090,20 @@ async function getThreadMessages({ threadId, actorAdminId }) {
     .populate("ownerAdminId", "name email proxyEmail role")
     .lean();
 
-  return { thread, messages };
+const messagesWithUrls = await addSignedUrlsToMessages(messages);
+return { thread, messages: messagesWithUrls };
 }
 
-async function replyToThread({ threadId, actorAdminId, subject, text, html, cc = [], bcc = [] }) {
+async function replyToThread({
+  threadId,
+  actorAdminId,
+  subject,
+  text,
+  html,
+  cc = [],
+  bcc = [],
+  attachments = [],
+}) {
   const tid = toObjectIdStrict(threadId, "threadId");
 
   const thread = await AdminEmailThreadModel.findById(tid).lean();
@@ -1039,6 +1125,7 @@ async function replyToThread({ threadId, actorAdminId, subject, text, html, cc =
     html,
     executiveId: thread.executiveId,
     actorAdminId,
+    attachments,
     meta: {
       source: "THREAD_REPLY",
       repliedByAdminId: String(actorAdminId),
@@ -1046,7 +1133,13 @@ async function replyToThread({ threadId, actorAdminId, subject, text, html, cc =
   });
 }
 
-async function updateThreadService({ threadId, actorAdminId, subject, status, ownerAdminId }) {
+async function updateThreadService({
+  threadId,
+  actorAdminId,
+  subject,
+  status,
+  ownerAdminId,
+}) {
   const tid = toObjectIdStrict(threadId, "threadId");
   const thread = await AdminEmailThreadModel.findById(tid);
   if (!thread) throw new Error("Thread not found");
@@ -1054,6 +1147,7 @@ async function updateThreadService({ threadId, actorAdminId, subject, status, ow
   await assertThreadScope(thread, actorAdminId);
 
   if (subject != null) thread.subject = cleanStr(subject) || thread.subject;
+
   if (status != null) {
     const normalizedStatus = String(status).toUpperCase();
     if (!["ACTIVE", "ARCHIVED", "CLOSED"].includes(normalizedStatus)) {
@@ -1089,12 +1183,15 @@ async function composeManualEmailService({
   subject,
   text,
   html,
+  attachments = [],
 }) {
   const targetOwnerId = ownerAdminId
     ? await assertOwnerAssignable(actorAdminId, ownerAdminId)
     : toObjectIdStrict(actorAdminId, "actorAdminId");
 
-  const { adminId: execObj, admin, from, executiveName } = await getAdminSender(targetOwnerId);
+  const { adminId: execObj, admin, from, executiveName } =
+    await getAdminSender(targetOwnerId);
+
   const recipients = normalizeEmails(to);
   const ccList = normalizeEmails(cc);
   const bccList = normalizeEmails(bcc);
@@ -1142,6 +1239,7 @@ async function composeManualEmailService({
       html: finalHtml,
       executiveId: execObj,
       actorAdminId,
+      attachments,
       meta: {
         source: "MANUAL_COMPOSE",
         role: admin.role,
@@ -1172,6 +1270,7 @@ async function sendBulkEmailToCsv({
   campaignId = null,
   pipelineIdByEmail = {},
   ownerAdminId = null,
+  attachments = [],
 }) {
   if (!csvBuffer?.length) throw new Error("CSV file is required");
 
@@ -1183,7 +1282,9 @@ async function sendBulkEmailToCsv({
   const whoAmI = await sts.send(new GetCallerIdentityCommand({}));
   console.log("AWS CALLER:", whoAmI);
 
-  const { adminId: execObj, admin, from, executiveName } = await getAdminSender(targetOwnerId);
+  const { adminId: execObj, admin, from, executiveName } =
+    await getAdminSender(targetOwnerId);
+
   const recipients = parseRecipientsFromCsv(csvBuffer);
   if (!recipients.length) throw new Error("No valid recipients found in CSV");
 
@@ -1233,6 +1334,7 @@ async function sendBulkEmailToCsv({
         html: finalHtml,
         executiveId: execObj,
         actorAdminId: adminId,
+        attachments,
         meta: {
           source: "CSV",
           recipientName,
@@ -1240,7 +1342,12 @@ async function sendBulkEmailToCsv({
         },
       });
 
-      results.push({ email: to, name: recipientName, success: true, ...sent });
+      results.push({
+        email: to,
+        name: recipientName,
+        success: true,
+        ...sent,
+      });
     } catch (error) {
       results.push({
         email: recipient.email,
@@ -1262,16 +1369,25 @@ async function sendBulkEmailToCsv({
   };
 }
 
-async function getPipelineRecipientsForComposeService({ actor, actorAdminId, campaignId, pipelineIds }) {
+async function getPipelineRecipientsForComposeService({
+  actor,
+  actorAdminId,
+  campaignId,
+  pipelineIds,
+}) {
   await getActorAdmin(actorAdminId);
 
   if (!campaignId) throw new Error("campaignId is required");
 
   const allowedCampaign = await ensureCampaignAccess(actor, campaignId);
-  if (!allowedCampaign) throw new Error("You are not allowed to access this campaign");
+  if (!allowedCampaign) {
+    throw new Error("You are not allowed to access this campaign");
+  }
 
   const validIds = Array.isArray(pipelineIds)
-    ? pipelineIds.map((id) => cleanStr(id)).filter((id) => mongoose.Types.ObjectId.isValid(id))
+    ? pipelineIds
+      .map((id) => cleanStr(id))
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
     : [];
 
   if (!validIds.length) throw new Error("pipelineIds are required");
@@ -1319,20 +1435,26 @@ async function sendSelectedPipelineEmailsService({
   text,
   html,
   ownerAdminId = null,
+  attachments = [],
 }) {
   await getActorAdmin(actorAdminId);
 
   const allowedCampaign = await ensureCampaignAccess(actor, campaignId);
-  if (!allowedCampaign) throw new Error("You are not allowed to access this campaign");
+  if (!allowedCampaign) {
+    throw new Error("You are not allowed to access this campaign");
+  }
 
   const targetOwnerId = ownerAdminId
     ? await assertOwnerAssignable(actorAdminId, ownerAdminId)
     : toObjectIdStrict(actorAdminId, "actorAdminId");
 
-  const { adminId: execObj, admin, from, executiveName } = await getAdminSender(targetOwnerId);
+  const { adminId: execObj, admin, from, executiveName } =
+    await getAdminSender(targetOwnerId);
 
   const validIds = Array.isArray(pipelineIds)
-    ? pipelineIds.map((id) => cleanStr(id)).filter((id) => mongoose.Types.ObjectId.isValid(id))
+    ? pipelineIds
+      .map((id) => cleanStr(id))
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
     : [];
 
   if (!validIds.length) throw new Error("pipelineIds are required");
@@ -1400,6 +1522,7 @@ async function sendSelectedPipelineEmailsService({
         html: finalHtml,
         executiveId: execObj,
         actorAdminId,
+        attachments,
         meta: {
           source: "PIPELINE_SELECTION",
           recipientName,
@@ -1446,6 +1569,45 @@ async function sendSelectedPipelineEmailsService({
   };
 }
 
+const { GetObjectCommand, S3Client } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+
+const s3 = new S3Client({ region: process.env.AWS_REGION || "us-east-1" });
+
+async function addSignedUrlsToMessages(messages = []) {
+  const mapped = [];
+
+  for (const msg of messages) {
+    const attachments = [];
+
+    for (const attachment of msg.attachments || []) {
+      let downloadUrl = null;
+
+      if (attachment?.s3Bucket && attachment?.s3Key) {
+        const command = new GetObjectCommand({
+          Bucket: attachment.s3Bucket,
+          Key: attachment.s3Key,
+          ResponseContentDisposition: `attachment; filename="${attachment.filename || "attachment"}"`,
+        });
+
+        downloadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
+      }
+
+      attachments.push({
+        ...attachment,
+        downloadUrl,
+      });
+    }
+
+    mapped.push({
+      ...msg,
+      attachments,
+    });
+  }
+
+  return mapped;
+}
+
 async function getThreadConversationState({
   pipelineId = null,
   recipientEmail = null,
@@ -1480,7 +1642,6 @@ async function getThreadConversationState({
       .lean();
   }
 
-  // fallback by recipient email if no pipeline-linked thread found
   if (!thread && email) {
     const filter = { recipientEmail: email };
     if (scope.adminIds !== null) {

@@ -111,6 +111,21 @@ const adminEmailMessageSchema = new Schema(
     htmlPreview: String,
     s3Bucket: String,
     s3Key: String,
+    attachments: [
+      {
+        filename: { type: String, default: null },
+        contentType: { type: String, default: null },
+        contentDisposition: { type: String, default: null },
+        contentId: { type: String, default: null },
+        transferEncoding: { type: String, default: null },
+        size: { type: Number, default: 0 },
+        checksum: { type: String, default: null },
+        related: { type: Boolean, default: false },
+        s3Bucket: { type: String, default: null },
+        s3Key: { type: String, default: null },
+      },
+    ],
+
     rawHeaders: {
       type: Schema.Types.Mixed,
       default: null,

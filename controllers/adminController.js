@@ -13,6 +13,8 @@ const { ContentFormatModel: ContentFormat } = require("../models/contentFormat")
 const { PreferredHashtagModel: PreferredHashtag } = require("../models/preferredHashtag");
 const Country = require("../models/country");
 const { Category } = require("../models/categories");
+const subscriptionHelper = require("../utils/subscriptionHelper");
+const { sendSubscriptionLifecycleEmail } = require("../utils/subscriptionEmailHelper");
 
 const Campaign = require("../models/campaign");
 const Milestone = require("../models/milestone");
@@ -25,7 +27,6 @@ const PortalSettings = require("../models/portalSettings");
 const BrandAssigned = require("../models/brandAssigned");
 
 const { _sendCampaignInvitationInternal } = require("../controllers/emailController");
-const subscriptionHelper = require("../utils/subscriptionHelper");
 
 const ASSIGNEE_MODEL = AdminModel || Admin;
 const FULLY_MANAGED_PLAN_ID = "e5cb75da-6d0d-481b-b202-69b9cf864940";
@@ -566,6 +567,16 @@ exports.adminAssignBrandPlan = async (req, res) => {
       });
     }
 
+    const existingBrand = await Brand.findById(brandId)
+      .select("_id brandName name email proxyEmail subscription subscriptionExpired")
+      .lean();
+
+    if (!existingBrand) {
+      return res.status(404).json({
+        message: "Brand not found",
+      });
+    }
+
     const plan = await SubscriptionPlan.findOne({
       planId,
       role: "Brand",
@@ -578,6 +589,10 @@ exports.adminAssignBrandPlan = async (req, res) => {
       });
     }
 
+    const oldPlanName =
+      existingBrand?.subscription?.planName ||
+      (existingBrand?.subscriptionExpired ? "expired" : "free");
+
     const subscription = buildSubscriptionFromPlan(plan, {
       billingCycle,
       durationDays,
@@ -585,6 +600,9 @@ exports.adminAssignBrandPlan = async (req, res) => {
       durationMins,
       expiresAt,
     });
+
+    subscription.lastExpiringSoonEmailSentAt = null;
+    subscription.lastExpiredEmailSentAt = null;
 
     const updated = await Brand.findByIdAndUpdate(
       brandId,
@@ -599,7 +617,7 @@ exports.adminAssignBrandPlan = async (req, res) => {
         runValidators: true,
       }
     )
-      .select("_id brandName name email subscription subscriptionExpired")
+      .select("_id brandName name email proxyEmail subscription subscriptionExpired")
       .lean();
 
     if (!updated) {
@@ -608,8 +626,17 @@ exports.adminAssignBrandPlan = async (req, res) => {
       });
     }
 
+    await sendSubscriptionLifecycleEmail({
+      userType: "Brand",
+      user: updated,
+      plan,
+      oldPlanName,
+      eventType: "upgraded",
+    });
+
     return res.json({
       status: "success",
+      message: `Brand plan assigned successfully. Email notification sent to ${updated.email || updated.proxyEmail || "brand user"}.`,
       brand: {
         ...updated,
         brandId: String(updated._id),
@@ -637,6 +664,18 @@ exports.adminAssignInfluencerPlan = async (req, res) => {
       return res.status(400).json({ message: "influencerId and planId required" });
     }
 
+    if (!isObjectId(influencerId)) {
+      return res.status(400).json({ message: "Valid influencer _id required" });
+    }
+
+    const existingInfluencer = await Influencer.findById(influencerId)
+      .select("_id name email proxyEmail subscription subscriptionExpired")
+      .lean();
+
+    if (!existingInfluencer) {
+      return res.status(404).json({ message: "Influencer not found" });
+    }
+
     const plan = await SubscriptionPlan.findOne({
       planId,
       role: "Influencer",
@@ -647,9 +686,9 @@ exports.adminAssignInfluencerPlan = async (req, res) => {
       return res.status(404).json({ message: "Influencer plan not found/archived" });
     }
 
-    if (!isObjectId(influencerId)) {
-      return res.status(400).json({ message: "Valid influencer _id required" });
-    }
+    const oldPlanName =
+      existingInfluencer?.subscription?.planName ||
+      (existingInfluencer?.subscriptionExpired ? "expired" : "free");
 
     const subscription = buildSubscriptionFromPlan(plan, {
       billingCycle: "monthly",
@@ -659,19 +698,39 @@ exports.adminAssignInfluencerPlan = async (req, res) => {
       expiresAt,
     });
 
+    subscription.lastExpiringSoonEmailSentAt = null;
+    subscription.lastExpiredEmailSentAt = null;
+
     const updated = await Influencer.findByIdAndUpdate(
       influencerId,
-      { $set: { subscription, subscriptionExpired: false } },
-      { new: true }
+      {
+        $set: {
+          subscription,
+          subscriptionExpired: false,
+        },
+      },
+      { new: true, runValidators: true }
     )
-      .select("_id name email subscription subscriptionExpired")
+      .select("_id name email proxyEmail subscription subscriptionExpired")
       .lean();
 
     if (!updated) {
       return res.status(404).json({ message: "Influencer not found" });
     }
 
-    return res.json({ status: "success", influencer: updated });
+    await sendSubscriptionLifecycleEmail({
+      userType: "Influencer",
+      user: updated,
+      plan,
+      oldPlanName,
+      eventType: "upgraded",
+    });
+
+    return res.json({
+      status: "success",
+      message: `Influencer plan assigned successfully. Email notification sent to ${updated.email || updated.proxyEmail || "influencer"}.`,
+      influencer: updated,
+    });
   } catch (error) {
     console.error("adminAssignInfluencerPlan error:", error);
     return res.status(500).json({ message: "Internal server error" });

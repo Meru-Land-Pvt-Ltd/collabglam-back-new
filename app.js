@@ -6,6 +6,7 @@ const path = require("path");
 
 const { startReminderCron } = require("./services/reminderCron");
 const unseenMessageNotifier = require("./jobs/unseenMessageNotifier");
+const { startSubscriptionEmailJobs } = require("./jobs/subscriptionEmailJobs");
 
 // sockets
 const sockets = require("./sockets");
@@ -274,7 +275,7 @@ app.get("/file/id/:id", streamGridFsFileById);
 async function bootstrap() {
   try {
     startReminderCron();
-
+    startSubscriptionEmailJobs();
     await mongoose.connect(process.env.MONGODB_URI, {
       autoIndex: false,
       maxPoolSize: 20,
