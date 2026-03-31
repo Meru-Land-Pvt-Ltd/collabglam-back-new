@@ -1,14 +1,198 @@
 // controllers/subscriptionController.js
 
 const SubscriptionPlan = require("../models/subscription");
-const Brand = require("../models/brand");
-const Influencer = require("../models/influencer");
+
+const BrandModelImport = require("../models/brand");
+const InfluencerModelImport = require("../models/influencer");
+
+const Brand =
+  BrandModelImport?.BrandModel ||
+  BrandModelImport?.default ||
+  BrandModelImport;
+
+const Influencer =
+  InfluencerModelImport?.InfluencerModel ||
+  InfluencerModelImport?.default ||
+  InfluencerModelImport;
+
 const subscriptionHelper = require("../utils/subscriptionHelper");
+const { sendEmail, uploadEmailRecordToS3 } = require("../services/emailService");
+
+function assertValidModel(Model, label) {
+  if (!Model || typeof Model.find !== "function") {
+    throw new Error(`${label} model is invalid. Expected a Mongoose model.`);
+  }
+}
+
+assertValidModel(Brand, "Brand");
+assertValidModel(Influencer, "Influencer");
 
 function featureValueToLimit(value) {
   if (typeof value === "number") return value;
   if (value && typeof value === "object" && value.unlimited === true) return -1;
   return 0;
+}
+
+function getUserEmail(user) {
+  return String(
+    user?.email ||
+      user?.proxyEmail ||
+      user?.contactEmail ||
+      ""
+  )
+    .trim()
+    .toLowerCase();
+}
+
+function getUserDisplayName(user, userType) {
+  if (userType === "Brand") {
+    return user?.brandName || user?.name || "Brand User";
+  }
+
+  return user?.name || user?.fullName || user?.username || "Influencer";
+}
+
+function formatDateTime(value) {
+  if (!value) return "N/A";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "N/A";
+  return d.toUTCString();
+}
+
+function buildSubscriptionEmailTemplate({
+  userType,
+  userName,
+  planName,
+  oldPlanName,
+  expiresAt,
+  eventType,
+}) {
+  const endDate = formatDateTime(expiresAt);
+  const appName = "Collabglam";
+
+  let subject = "";
+  let heading = "";
+  let intro = "";
+
+  if (eventType === "upgraded") {
+    subject = `${appName}: Your ${userType} plan has been upgraded`;
+    heading = "Your subscription has been upgraded";
+    intro = oldPlanName
+      ? `Your plan has been upgraded from <strong>${oldPlanName}</strong> to <strong>${planName}</strong>.`
+      : `Your subscription is now active on the <strong>${planName}</strong> plan.`;
+  } else if (eventType === "renewed") {
+    subject = `${appName}: Your ${userType} plan has been renewed`;
+    heading = "Your subscription has been renewed";
+    intro = `Your <strong>${planName}</strong> subscription has been renewed successfully.`;
+  } else if (eventType === "expiring_soon") {
+    subject = `${appName}: Your ${userType} subscription is about to end`;
+    heading = "Your subscription is ending soon";
+    intro = `Your <strong>${planName}</strong> subscription is about to expire.`;
+  } else if (eventType === "expired") {
+    subject = `${appName}: Your ${userType} subscription has ended`;
+    heading = "Your subscription has ended";
+    intro = `Your <strong>${planName}</strong> subscription has expired.`;
+  } else {
+    subject = `${appName}: Subscription update`;
+    heading = "Subscription update";
+    intro = `There is an update on your <strong>${planName}</strong> subscription.`;
+  }
+
+  const text = [
+    `Hello ${userName},`,
+    "",
+    intro.replace(/<[^>]+>/g, ""),
+    `Plan: ${planName || "N/A"}`,
+    `Ends on: ${endDate}`,
+    "",
+    "If you need help, please contact support.",
+    "",
+    `- ${appName}`,
+  ].join("\n");
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111;">
+      <h2>${heading}</h2>
+      <p>Hello ${userName},</p>
+      <p>${intro}</p>
+      <p><strong>Plan:</strong> ${planName || "N/A"}</p>
+      <p><strong>Ends on:</strong> ${endDate}</p>
+      <p>If you need help, please contact support.</p>
+      <p>– ${appName}</p>
+    </div>
+  `;
+
+  return { subject, text, html };
+}
+
+async function sendSubscriptionLifecycleEmail({
+  userType,
+  user,
+  plan,
+  oldPlanName = null,
+  eventType,
+}) {
+  try {
+    const to = getUserEmail(user);
+
+    if (!to) {
+      console.warn(`[subscription-email] skipped: no email for ${userType}`, {
+        userId: user?._id || user?.influencerId,
+        eventType,
+      });
+      return;
+    }
+
+    const userName = getUserDisplayName(user, userType);
+    const planName =
+      plan?.displayName ||
+      plan?.label ||
+      plan?.name ||
+      user?.subscription?.planName ||
+      "Plan";
+    const expiresAt = user?.subscription?.expiresAt || null;
+
+    const { subject, text, html } = buildSubscriptionEmailTemplate({
+      userType,
+      userName,
+      planName,
+      oldPlanName,
+      expiresAt,
+      eventType,
+    });
+
+    const emailResp = await sendEmail({
+      to,
+      subject,
+      text,
+      html,
+      emailTags: [
+        { Name: "module", Value: "subscription" },
+        { Name: "event", Value: eventType },
+        { Name: "userType", Value: String(userType).toLowerCase() },
+      ],
+    });
+
+    try {
+      await uploadEmailRecordToS3({
+        type: "subscription_lifecycle",
+        eventType,
+        userType,
+        userId: String(user?._id || user?.influencerId || ""),
+        email: to,
+        planId: plan?.planId || user?.subscription?.planId || null,
+        planName,
+        oldPlanName,
+        expiresAt,
+        emailMessageId: emailResp?.messageId || null,
+        sentAt: new Date().toISOString(),
+      });
+    } catch (archiveErr) {
+      console.error("[subscription-email] archive failed:", archiveErr);
+    }
+  } catch (err) {
+    console.error("[subscription-email] send failed:", err);
+  }
 }
 
 const HIDDEN_FEATURE_KEYS = new Set([
@@ -35,8 +219,27 @@ function sanitizePlansForResponse(plans) {
   return plans.map(sanitizePlanForResponse);
 }
 
+function getQueryForUser(userType, userId) {
+  return userType === "Brand" ? { _id: userId } : { _id: userId };
+}
+
+function buildFeatureSnapshot(plan) {
+  return (plan.features || []).map((f) => ({
+    key: f.key,
+    limit: featureValueToLimit(f.value),
+    used: 0,
+  }));
+}
+
+function normalizedMonthlyCost(plan) {
+  if (!plan) return 0;
+  if (plan.isCustomPricing) return Number.MAX_SAFE_INTEGER;
+  if (typeof plan.monthlyCost === "number") return plan.monthlyCost;
+  if (typeof plan.annualCost === "number") return plan.annualCost / 12;
+  return 0;
+}
+
 // POST /subscription-plans/create
-// body: full plan object (role, name, monthlyCost required)
 exports.createPlan = async (req, res) => {
   try {
     const {
@@ -44,22 +247,17 @@ exports.createPlan = async (req, res) => {
       name,
       displayName,
       label,
-
       monthlyCost,
       annualCost,
       currency,
-
       isCustomPricing,
       isStartingAt,
-
       bestFor,
       mainOutcome,
       overview,
       cta,
-
       features,
       addons,
-
       durationDays,
       durationMins,
       durationMinutes,
@@ -74,7 +272,6 @@ exports.createPlan = async (req, res) => {
         .json({ message: "role, name and monthlyCost are required" });
     }
 
-    // Basic guard (you can loosen if your schema allows more)
     if (!["Brand", "Influencer"].includes(role)) {
       return res.status(400).json({ message: "role must be Brand or Influencer" });
     }
@@ -84,26 +281,20 @@ exports.createPlan = async (req, res) => {
       name,
       displayName: displayName || name.toUpperCase(),
       label: label || undefined,
-
       monthlyCost,
       annualCost: annualCost ?? undefined,
       currency: currency || "USD",
-
       isCustomPricing: !!isCustomPricing,
       isStartingAt: !!isStartingAt,
-
       bestFor: bestFor || undefined,
       mainOutcome: mainOutcome || undefined,
       overview: overview || undefined,
       cta: cta || undefined,
-
       features: Array.isArray(features) ? features : [],
       addons: Array.isArray(addons) ? addons : [],
-
       durationDays: durationDays ?? undefined,
       durationMins: durationMins ?? undefined,
       durationMinutes: durationMinutes ?? undefined,
-
       autoRenew: autoRenew ?? true,
       status: status || "active",
       sortOrder: sortOrder ?? 100,
@@ -114,7 +305,6 @@ exports.createPlan = async (req, res) => {
   } catch (err) {
     console.error("createPlan error:", err);
 
-    // Duplicate key (role+name unique) or planId unique conflicts
     if (err?.code === 11000) {
       return res.status(409).json({
         message: "Plan already exists (duplicate role+name or planId).",
@@ -127,7 +317,6 @@ exports.createPlan = async (req, res) => {
 };
 
 // POST /subscription-plans/list
-// body: { role?, includeArchived? }
 exports.getPlans = async (req, res) => {
   const { role, includeArchived } = req.body || {};
   const filter = {};
@@ -136,12 +325,10 @@ exports.getPlans = async (req, res) => {
   if (!includeArchived) filter.status = "active";
 
   try {
-    // sortOrder first (pricing table order), then monthlyCost
     const plans = await SubscriptionPlan.find(filter)
       .sort({ sortOrder: 1, monthlyCost: 1 })
       .lean();
 
-    // Hide fee features in response
     const safePlans = sanitizePlansForResponse(plans);
 
     return res.status(200).json({ message: "Plans retrieved", plans: safePlans });
@@ -151,7 +338,7 @@ exports.getPlans = async (req, res) => {
   }
 };
 
-// GET /subscription-plans/get?id=<planId>
+// GET /subscription-plans/getById?id=<planId>
 exports.getPlanById = async (req, res) => {
   const { id } = req.query;
   if (!id) return res.status(400).json({ message: "Query param id is required" });
@@ -160,9 +347,7 @@ exports.getPlanById = async (req, res) => {
     const plan = await SubscriptionPlan.findOne({ planId: id }).lean();
     if (!plan) return res.status(404).json({ message: "Plan not found" });
 
-    // Hide fee features in response
     const safePlan = sanitizePlanForResponse(plan);
-
     return res.status(200).json({ message: "Plan retrieved", plan: safePlan });
   } catch (err) {
     console.error("getPlanById error:", err);
@@ -171,7 +356,6 @@ exports.getPlanById = async (req, res) => {
 };
 
 // POST /subscription-plans/update
-// body: { planId?: <planId>, id?: <planId>, ...fieldsToUpdate }
 exports.updatePlan = async (req, res) => {
   const { planId, id, ...updates } = req.body || {};
   const targetPlanId = planId || id;
@@ -180,7 +364,6 @@ exports.updatePlan = async (req, res) => {
     return res.status(400).json({ message: "planId (or id) is required" });
   }
 
-  // Prevent changing planId via update
   delete updates.planId;
 
   try {
@@ -208,7 +391,6 @@ exports.updatePlan = async (req, res) => {
 };
 
 // POST /subscription-plans/delete
-// body: { planId?: <planId>, id?: <planId> }
 exports.deletePlan = async (req, res) => {
   const { planId, id } = req.body || {};
   const targetPlanId = planId || id;
@@ -256,7 +438,6 @@ exports.assignPlan = async (req, res) => {
       return res.status(404).json({ message: "Plan not found" });
     }
 
-    const now = new Date();
     const {
       billingCycle,
       durationDays,
@@ -264,6 +445,8 @@ exports.assignPlan = async (req, res) => {
       durationMins,
       expiresAt,
     } = req.body || {};
+
+    const now = new Date();
 
     const expire = subscriptionHelper.computeExpiry(plan, {
       billingCycle: billingCycle || "monthly",
@@ -273,42 +456,41 @@ exports.assignPlan = async (req, res) => {
       expiresAt,
     });
 
-    const featureSnapshot = (plan.features || []).map((f) => ({
-      key: f.key,
-      limit: featureValueToLimit(f.value),
-      used: 0,
-    }));
+    const featureSnapshot = buildFeatureSnapshot(plan);
+    const query = getQueryForUser(userType, userId);
 
-    const query =
-      userType === "Brand"
-        ? { _id: userId }
-        : { influencerId: userId };
-
-    const update = {
-      $set: {
-        "subscription.planId": plan.planId,
-        "subscription.planName": plan.name,
-        "subscription.startedAt": now,
-        "subscription.expiresAt": expire,
-        "subscription.features": featureSnapshot,
-        subscriptionExpired: false,
-      },
-    };
-
-    const updated = await Model.findOneAndUpdate(query, update, {
-      new: true,
-      runValidators: true,
-    });
-
-    if (!updated) {
+    const existingUser = await Model.findOne(query);
+    if (!existingUser) {
       return res
         .status(404)
         .json({ message: `${userType} with ID ${userId} not found` });
     }
 
+    const oldPlanName = existingUser?.subscription?.planName || "free";
+
+    existingUser.subscription = existingUser.subscription || {};
+    existingUser.subscription.planId = plan.planId;
+    existingUser.subscription.planName = plan.name;
+    existingUser.subscription.startedAt = now;
+    existingUser.subscription.expiresAt = expire;
+    existingUser.subscription.features = featureSnapshot;
+    existingUser.subscription.lastExpiringSoonEmailSentAt = null;
+    existingUser.subscription.lastExpiredEmailSentAt = null;
+    existingUser.subscriptionExpired = false;
+
+    await existingUser.save();
+
+    await sendSubscriptionLifecycleEmail({
+      userType,
+      user: existingUser,
+      plan,
+      oldPlanName,
+      eventType: "upgraded",
+    });
+
     return res.json({
       message: `${userType} subscribed to "${plan.name}". It will expire at ${expire.toISOString()}`,
-      subscription: updated.subscription,
+      subscription: existingUser.subscription,
     });
   } catch (error) {
     console.error("assignPlan error:", error);
@@ -319,7 +501,6 @@ exports.assignPlan = async (req, res) => {
 };
 
 // POST /subscription-plans/renew
-// body: { userType: 'Brand'|'Influencer', userId }
 exports.renewPlan = async (req, res) => {
   try {
     const { userType, userId } = req.body || {};
@@ -333,12 +514,9 @@ exports.renewPlan = async (req, res) => {
     }
 
     const Model = userType === "Brand" ? Brand : Influencer;
+    const query = getQueryForUser(userType, userId);
 
-    const user = await Model.findOne(
-      userType === "Brand"
-        ? { _id: userId }
-        : { _id: userId }
-    );
+    const user = await Model.findOne(query);
 
     if (!user) {
       return res
@@ -351,7 +529,7 @@ exports.renewPlan = async (req, res) => {
       return res.status(400).json({ message: "User has no active subscription planId" });
     }
 
-    const plan = await SubscriptionPlan.findOne({ planId: currentPlanId });
+    const plan = await SubscriptionPlan.findOne({ planId: currentPlanId }).lean();
     if (!plan) return res.status(404).json({ message: "Plan not found" });
 
     const now = new Date();
@@ -360,16 +538,23 @@ exports.renewPlan = async (req, res) => {
       expiresAt: user.subscription.expiresAt,
     });
 
+    user.subscription.planId = plan.planId;
+    user.subscription.planName = plan.name;
     user.subscription.startedAt = now;
     user.subscription.expiresAt = newExpires;
-    user.subscription.features = (plan.features || []).map((f) => ({
-      key: f.key,
-      limit: featureValueToLimit(f.value),
-      used: 0,
-    }));
+    user.subscription.features = buildFeatureSnapshot(plan);
+    user.subscription.lastExpiringSoonEmailSentAt = null;
+    user.subscription.lastExpiredEmailSentAt = null;
     user.subscriptionExpired = false;
 
     await user.save();
+
+    await sendSubscriptionLifecycleEmail({
+      userType,
+      user,
+      plan,
+      eventType: "renewed",
+    });
 
     return res.json({
       message: `${userType} subscription renewed until ${newExpires.toISOString()}`,
@@ -381,11 +566,11 @@ exports.renewPlan = async (req, res) => {
   }
 };
 
-// POST /subscription-plans/my-plan
-// body: { userType: 'Brand'|'Influencer', userId }
+// POST /subscription-plans/me
 exports.getMyPlan = async (req, res) => {
   try {
     const { userType, userId } = req.body || {};
+
     if (!userType || !userId) {
       return res.status(400).json({ message: "userType & userId required" });
     }
@@ -395,11 +580,9 @@ exports.getMyPlan = async (req, res) => {
     }
 
     const Model = userType === "Brand" ? Brand : Influencer;
+    const query = getQueryForUser(userType, userId);
 
-    const user = await Model.findOne(
-      userType === "Brand" ? { brandId: userId } : { _id: userId }
-    ).lean();
-
+    const user = await Model.findOne(query).lean();
     if (!user) return res.status(404).json({ message: `${userType} not found` });
 
     const sub = user.subscription || {};
@@ -407,12 +590,11 @@ exports.getMyPlan = async (req, res) => {
       ? await SubscriptionPlan.findOne({ planId: sub.planId }).lean()
       : null;
 
-    // Hide fee features in response
     const safePlanDoc = planDoc ? sanitizePlanForResponse(planDoc) : null;
 
     return res.json({
       message: "Current subscription fetched",
-      plan: safePlanDoc, // full plan metadata (with hidden fee features removed)
+      plan: safePlanDoc,
       startedAt: sub.startedAt || null,
       expiresAt: sub.expiresAt || null,
       expired: !!user.subscriptionExpired,
@@ -422,20 +604,6 @@ exports.getMyPlan = async (req, res) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 };
-
-function normalizedMonthlyCost(plan) {
-  if (!plan) return 0;
-
-  // Treat custom pricing as highest tier (so it always counts as "higher")
-  if (plan.isCustomPricing) return Number.MAX_SAFE_INTEGER;
-
-  if (typeof plan.monthlyCost === "number") return plan.monthlyCost;
-
-  // fallback: if only annual exists
-  if (typeof plan.annualCost === "number") return plan.annualCost / 12;
-
-  return 0;
-}
 
 exports.checkBrandPlanChange = async (req, res) => {
   try {
@@ -548,6 +716,7 @@ exports.checkBrandPlanChange = async (req, res) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 };
+
 exports.getCurrentBrandPlanLite = async (req, res) => {
   try {
     const brandId = req.query?.brandId;
@@ -591,6 +760,121 @@ exports.getCurrentBrandPlanLite = async (req, res) => {
     });
   } catch (err) {
     console.error("getCurrentBrandPlanLite error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+exports.sendExpiringSoonEmails = async (req, res) => {
+  try {
+    const now = new Date();
+    const withinHours = Number(req.body?.withinHours || 48);
+    const end = new Date(now.getTime() + withinHours * 60 * 60 * 1000);
+
+    const processUsers = async (Model, userType) => {
+      assertValidModel(Model, userType);
+
+      const users = await Model.find({
+        "subscription.planId": { $exists: true, $ne: null },
+        subscriptionExpired: { $ne: true },
+        "subscription.expiresAt": { $gt: now, $lte: end },
+        $or: [
+          { "subscription.lastExpiringSoonEmailSentAt": { $exists: false } },
+          { "subscription.lastExpiringSoonEmailSentAt": null },
+        ],
+      });
+
+      let count = 0;
+
+      for (const user of users) {
+        const plan = await SubscriptionPlan.findOne({
+          planId: user?.subscription?.planId,
+        }).lean();
+
+        await sendSubscriptionLifecycleEmail({
+          userType,
+          user,
+          plan,
+          eventType: "expiring_soon",
+        });
+
+        user.subscription = user.subscription || {};
+        user.subscription.lastExpiringSoonEmailSentAt = new Date();
+        await user.save();
+
+        count += 1;
+      }
+
+      return count;
+    };
+
+    const brandCount = await processUsers(Brand, "Brand");
+    const influencerCount = await processUsers(Influencer, "Influencer");
+
+    return res.status(200).json({
+      message: "Expiring soon emails processed",
+      brandCount,
+      influencerCount,
+      total: brandCount + influencerCount,
+    });
+  } catch (err) {
+    console.error("sendExpiringSoonEmails error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+exports.sendExpiredSubscriptionEmails = async (req, res) => {
+  try {
+    const now = new Date();
+
+    const processUsers = async (Model, userType) => {
+      assertValidModel(Model, userType);
+
+      const users = await Model.find({
+        "subscription.planId": { $exists: true, $ne: null },
+        "subscription.expiresAt": { $lte: now },
+        $or: [
+          { subscriptionExpired: { $ne: true } },
+          { "subscription.lastExpiredEmailSentAt": { $exists: false } },
+          { "subscription.lastExpiredEmailSentAt": null },
+        ],
+      });
+
+      let count = 0;
+
+      for (const user of users) {
+        const plan = await SubscriptionPlan.findOne({
+          planId: user?.subscription?.planId,
+        }).lean();
+
+        await sendSubscriptionLifecycleEmail({
+          userType,
+          user,
+          plan,
+          eventType: "expired",
+        });
+
+        user.subscriptionExpired = true;
+        user.subscription = user.subscription || {};
+        user.subscription.lastExpiredEmailSentAt = new Date();
+        await user.save();
+
+        count += 1;
+      }
+
+      return count;
+    };
+
+    const brandCount = await processUsers(Brand, "Brand");
+    const influencerCount = await processUsers(Influencer, "Influencer");
+
+    return res.status(200).json({
+      message: "Expired subscription emails processed",
+      brandCount,
+      influencerCount,
+      total: brandCount + influencerCount,
+    });
+  } catch (err) {
+    console.error("sendExpiredSubscriptionEmails error:", err);
     return res.status(500).json({ message: "Internal server error" });
   }
 };

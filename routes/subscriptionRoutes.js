@@ -16,5 +16,7 @@ router.post('/renew', ctrl.renewPlan);
 router.post('/me', ctrl.getMyPlan);
 router.post("/check-brand", ctrl.checkBrandPlanChange);
 router.get("/brand/current", ctrl.getCurrentBrandPlanLite );
+router.post("/send-expiring-soon-emails", ctrl.sendExpiringSoonEmails);
+router.post("/send-expired-emails", ctrl.sendExpiredSubscriptionEmails);
 
 module.exports = router;

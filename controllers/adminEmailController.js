@@ -1,4 +1,3 @@
-// controllers/adminEmail.controller.js
 const {
   getMailboxScopeService,
   sendBulkEmailToCsv,
@@ -54,7 +53,15 @@ async function sendBulkCsv(req, res) {
     if (!adminId) return;
 
     const csvBuffer = req.file?.buffer;
-    const { subject, text, html, ownerAdminId, campaignId, pipelineIdByEmail } = req.body;
+    const {
+      subject,
+      text,
+      html,
+      ownerAdminId,
+      campaignId,
+      pipelineIdByEmail,
+      attachments,
+    } = req.body;
 
     const result = await sendBulkEmailToCsv({
       adminId,
@@ -65,6 +72,7 @@ async function sendBulkCsv(req, res) {
       campaignId,
       pipelineIdByEmail,
       ownerAdminId,
+      attachments,
     });
 
     return res.status(200).json({
@@ -85,7 +93,7 @@ async function composeEmail(req, res) {
     const adminId = assertAuth(req, res);
     if (!adminId) return;
 
-    const { ownerAdminId, to, cc, bcc, subject, text, html } = req.body;
+    const { ownerAdminId, to, cc, bcc, subject, text, html, attachments } = req.body;
 
     const result = await composeManualEmailService({
       actorAdminId: adminId,
@@ -96,6 +104,7 @@ async function composeEmail(req, res) {
       subject,
       text,
       html,
+      attachments,
     });
 
     return res.status(200).json({
@@ -170,7 +179,7 @@ async function reply(req, res) {
     if (!adminId) return;
 
     const { threadId } = req.params;
-    const { subject, text, html, cc, bcc } = req.body;
+    const { subject, text, html, cc, bcc, attachments } = req.body;
 
     const result = await replyToThread({
       threadId,
@@ -180,6 +189,7 @@ async function reply(req, res) {
       html,
       cc,
       bcc,
+      attachments,
     });
 
     return res.status(200).json({
@@ -255,7 +265,7 @@ async function sendSelectedPipelineEmailsController(req, res) {
     const adminId = assertAuth(req, res);
     if (!adminId) return;
 
-    const { campaignId, pipelineIds, subject, text, html, ownerAdminId } = req.body;
+    const { campaignId, pipelineIds, subject, text, html, ownerAdminId, attachments } = req.body;
 
     const result = await sendSelectedPipelineEmailsService({
       actor: req.admin,
@@ -266,6 +276,7 @@ async function sendSelectedPipelineEmailsController(req, res) {
       text,
       html,
       ownerAdminId,
+      attachments,
     });
 
     return res.status(200).json({
@@ -310,7 +321,7 @@ async function sendSelectedBrandOutreachEmailsController(req, res) {
     const adminId = assertAuth(req, res);
     if (!adminId) return;
 
-    const { brandOutreachIds, subject, text, html, ownerAdminId } = req.body;
+    const { brandOutreachIds, subject, text, html, ownerAdminId, attachments } = req.body;
 
     const result = await sendSelectedBrandOutreachEmailsService({
       actorAdminId: adminId,
@@ -319,6 +330,7 @@ async function sendSelectedBrandOutreachEmailsController(req, res) {
       text,
       html,
       ownerAdminId,
+      attachments,
     });
 
     return res.status(200).json({
