@@ -2465,8 +2465,8 @@ exports.initiate = async (req, res) => {
       {
         $set: {
           "applicants.$.contractId": String(contract._id),
-          "applicants.$.statusInfluencer": "contractAccept",
-          "applicants.$.statusBrand": "under-brand-review",
+          "applicants.$.statusInfluencer": "under-influencer-review",
+          "applicants.$.statusBrand": "contract-send",
         },
       }
     );
@@ -2567,32 +2567,55 @@ exports.viewed = async (req, res) => {
 
 exports.influencerConfirm = async (req, res) => {
   try {
-    const { contractId, influencer: influencerData = {},signatureInfluencer, preview = false } = req.body;
+    const {
+      contractId,
+      influencer: influencerData = {},
+      signatureInfluencer = "",
+      preview = false,
+    } = req.body;
+
     assertRequired(req.body, ["contractId"]);
 
-    const contract = await Contract.findOne({ _id:contractId });
+    const contract = await Contract.findOne({ _id: contractId });
     if (!contract) return respondError(res, "Contract not found", 404);
+
     requireNotLocked(contract);
 
     if (contract.editsLockedAt) {
-      return respondError(res, "Contract is locked for signing; edits/accept changes are disabled", 400);
+      return respondError(
+        res,
+        "Contract is locked for signing; edits/accept changes are disabled",
+        400
+      );
     }
 
     const safeInfluencer = {
-      dataAccess: {},
+      ...(contract.content?.influencer?.toObject?.() || contract.content?.influencer || {}),
       ...influencerData,
-      dataAccess: influencerData?.dataAccess || {},
     };
 
     if (preview) {
       const tmp = contract.toObject?.() || contract;
-      tmp.influencer = { ...(tmp.influencer || {}), ...safeInfluencer };
+
+      tmp.content = tmp.content || {};
+      tmp.content.influencer = {
+        ...(tmp.content?.influencer || {}),
+        ...safeInfluencer,
+      };
+
+      if (signatureInfluencer) {
+        tmp.signatureInfluencer = signatureInfluencer;
+      }
 
       const tokens = buildTokenMap(tmp);
-      const text = renderTemplate(tmp.admin?.legalTemplateText || MASTER_TEMPLATE, tokens);
+      const text = renderTemplate(
+        tmp.admin?.legalTemplateText || MASTER_TEMPLATE,
+        tokens
+      );
       const html = renderContractHTML({ contract: tmp, templateText: text });
 
-      const headerTitle = "COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)";
+      const headerTitle =
+        "COLLABGLAM MASTER BRAND–INFLUENCER AGREEMENT (TRI-PARTY)";
       const headerDate =
         tokens["Agreement.EffectiveDateTime"] ||
         tokens["Agreement.EffectiveDateLong"] ||
@@ -2607,11 +2630,61 @@ exports.influencerConfirm = async (req, res) => {
       });
     }
 
-    const before = { influencer: contract.influencer?.toObject?.() || contract.influencer };
-    contract.influencer = { ...(contract.influencer || {}), ...safeInfluencer };
-    const after = { influencer: contract.influencer };
+    const before = {
+      influencer: contract.content?.influencer?.toObject?.() || contract.content?.influencer || {},
+      signatureInfluencer: contract.signatureInfluencer || "",
+    };
 
-    const editedFields = computeEditedFields(before, after, ["influencer"]);
+    contract.content = contract.content || {};
+    contract.content.influencer = safeInfluencer;
+
+    if (signatureInfluencer) {
+      contract.signatureInfluencer = signatureInfluencer;
+
+      contract.signatures = contract.signatures || {};
+      contract.signatures.influencer = {
+        ...(contract.signatures?.influencer?.toObject?.() ||
+          contract.signatures?.influencer ||
+          {}),
+        signed: true,
+        byUserId: req.user?.id || "",
+        name: safeInfluencer.legalName || contract.influencerName || "",
+        email: safeInfluencer.email || "",
+        at: new Date(),
+        sigImageDataUrl: signatureInfluencer,
+        sigImageBytes: Buffer.byteLength(signatureInfluencer, "utf8"),
+      };
+    }
+
+    // Optional sync fields
+    contract.influencerName =
+      safeInfluencer.legalName || contract.influencerName || "";
+
+    const fullAddress = [
+      safeInfluencer.addressLine1,
+      safeInfluencer.addressLine2,
+      safeInfluencer.city,
+      safeInfluencer.state,
+      safeInfluencer.zipPostalCode,
+      safeInfluencer.country,
+    ]
+      .filter(Boolean)
+      .join(", ");
+
+    if (fullAddress) {
+      contract.influencerAddress = fullAddress;
+    }
+
+    const after = {
+      influencer: contract.content.influencer,
+      signatureInfluencer: contract.signatureInfluencer || "",
+    };
+
+    const editedFields = computeEditedFields(before, after, [
+      "influencer",
+      "signatureInfluencer",
+    ]);
+
     if (editedFields.length) {
       markEdit(contract, "influencer", req.user?.id, editedFields);
       contract.status = CONTRACT_STATUS.INFLUENCER_EDITED;
@@ -2628,13 +2701,20 @@ exports.influencerConfirm = async (req, res) => {
       editedFields,
       version: contract.version,
       nextRole: sync.nextRole,
+      hasSignature: Boolean(signatureInfluencer),
     });
 
     await contract.save();
 
     await Campaign.updateOne(
       campaignQuery(contract.campaignId),
-      { $set: { isAccepted: 1, isContracted: 1, contractId: contract.contractId } }
+      {
+        $set: {
+          isAccepted: 1,
+          isContracted: 1,
+          contractId: contract.contractId,
+        },
+      }
     );
 
     await createAndEmit({
@@ -2653,7 +2733,9 @@ exports.influencerConfirm = async (req, res) => {
       influencerId: String(contract.influencerId),
       type: "contract.confirm.influencer.self",
       title: "You accepted the contract",
-      message: `You accepted “${contract.brand?.campaignTitle || contract.brandName || "Contract"}”.`,
+      message: `You accepted “${
+        contract.brand?.campaignTitle || contract.brandName || "Contract"
+      }”.`,
       entityType: "contract",
       entityId: String(contract.contractId),
       actionPath: `/influencer/my-campaign`,
@@ -2669,12 +2751,23 @@ exports.influencerConfirm = async (req, res) => {
       recipientName: getNameForRole({ contract, role: "brand" }),
     });
 
-    if (contract.awaitingRole === "brand") await safeStartReminder(contract, "brand");
+    if (contract.awaitingRole === "brand") {
+      await safeStartReminder(contract, "brand");
+    }
+
     await safeClearReminder(contract.contractId, "influencer");
 
-    return respondOK(res, { message: "Influencer acceptance saved", contract });
+    return respondOK(res, {
+      message: "Influencer acceptance saved",
+      contract,
+    });
   } catch (err) {
-    return respondError(res, err.message || "influencerConfirm error", err.status || 500, err);
+    return respondError(
+      res,
+      err.message || "influencerConfirm error",
+      err.status || 500,
+      err
+    );
   }
 };
 
@@ -3362,6 +3455,7 @@ exports.brandUpdateFields = async (req, res) => {
     if(contract.signatureBrand!="",contract.signatureInfluencer!=""){
       contract.editsLockedAt = new Date();
       contract.isFinalUpdate=true
+      contract.status = "BRAND_FINAL_UPDATE"
       await contract.save();
     }
 
@@ -3668,7 +3762,7 @@ exports.reject = async (req, res) => {
     const { contractId, influencerId, reason } = req.body;
     assertRequired(req.body, ["contractId"]);
 
-    const contract = await Contract.findOne({ contractId });
+    const contract = await Contract.findOne({ _id:contractId });
     if (!contract) return respondError(res, "Contract not found", 404);
     requireNotLocked(contract);
 
@@ -4350,21 +4444,28 @@ async function attachSignaturesToContract(contractDoc) {
       model: BrandSignature,
     },
     {
-      contractField: "influencerBrand", // keep this as your contract field
+      contractField: "signatureInfluencer",
       sigKey: "influencer",
-      model: BrandSignature, // use same model if both are in same table
+      model: InfluencerSignature, // or BrandSignature if both are actually in same collection
     },
   ];
 
+
+
   for (const item of lookups) {
     const value = contract[item.contractField];
-    if (!value) continue;
+    if (!value) {
+      console.log(`${item.contractField} is empty`);
+      continue;
+    }
 
     let row = null;
 
     try {
       row = await item.model.findById(value).select("signature").lean();
+     
     } catch (e) {
+     
       row = null;
     }
 
@@ -4376,13 +4477,24 @@ async function attachSignaturesToContract(contractDoc) {
     }
   }
 
+
   return contract;
 }
 
 function signaturePanelHTML(contract) {
   const tz = tzOr(contract);
-  const brandLabel = contract?.content?.brand?.legalName || contract.brandName || "—";
-  const influencerLabel = contract?.content?.influencer?.legalName || contract.influencerName || "—";
+
+  const brandLabel =
+    contract?.signatures?.brand?.name ||
+    contract?.content?.brand?.legalName ||
+    contract?.brandName ||
+    "—";
+
+  const influencerLabel =
+    contract?.signatures?.influencer?.name ||
+    contract?.content?.influencer?.legalName ||
+    contract?.influencerName ||
+    "—";
 
   const roles = [
     {
@@ -4403,7 +4515,10 @@ function signaturePanelHTML(contract) {
   ];
 
   const headerRow = roles
-    .map(({ header }) => `<th style="text-align:center;background:#fff;font-weight:700;">${esc(header)}</th>`)
+    .map(
+      ({ header }) =>
+        `<th>${esc(header)}</th>`
+    )
     .join("");
 
   const sigCells = [];
@@ -4412,45 +4527,99 @@ function signaturePanelHTML(contract) {
   const dateCells = [];
 
   for (const { key, entityLabel } of roles) {
-    const s = contract.signatures?.[key] || {};
+    const s = contract?.signatures?.[key] || {};
     const isCollabGlam = key === "collabglam";
-    const imgSrc = s.sigImageDataUrl || (isCollabGlam ? COLLABGLAM_FIXED_SIG_DATA_URL : null);
+
+    const imgSrc =
+      s.sigImageDataUrl || (isCollabGlam ? COLLABGLAM_FIXED_SIG_DATA_URL : "");
+
     const when = s.at
       ? formatDateTZ(s.at, tz, "MMMM D, YYYY")
       : contract?.content?.campaign?.effectiveDate
-        ? formatDateTZ(contract.content.campaign.effectiveDate, tz, "MMMM D, YYYY")
-        : "";
+      ? formatDateTZ(contract.content.campaign.effectiveDate, tz, "MMMM D, YYYY")
+      : "";
 
     const displayName = s.name || entityLabel || "";
+    const title = s.title || "";
 
     const sigContent = imgSrc
-      ? `<img class="sigimg" alt="Signature" src="${esc(imgSrc)}" style="max-height:50pt;max-width:100%;display:block;">`
-      : `<div style="height:50pt;"></div>`;
+      ? `<img class="sigimg" alt="Signature" src="${esc(imgSrc)}" />`
+      : `<div class="sig-placeholder"></div>`;
 
-    sigCells.push(`<td style="height:60pt;vertical-align:bottom;padding:4pt;">${sigContent}</td>`);
-    nameCells.push(`<td style="padding:4pt;"><strong>Name:</strong> ${esc(displayName)}</td>`);
-    titleCells.push(`<td style="padding:4pt;"><strong>Title:</strong> ${esc(s.title || "")}</td>`);
-    dateCells.push(`<td style="padding:4pt;"><strong>Date:</strong> ${esc(when)}</td>`);
+    sigCells.push(`
+      <td class="sig-cell">
+        ${sigContent}
+      </td>
+    `);
+
+    nameCells.push(`
+      <td>
+        <strong>Name:</strong> ${esc(displayName)}
+      </td>
+    `);
+
+    titleCells.push(`
+      <td>
+        <strong>Title:</strong> ${esc(title)}
+      </td>
+    `);
+
+    dateCells.push(`
+      <td>
+        <strong>Date:</strong> ${esc(when)}
+      </td>
+    `);
   }
 
+  const effectiveDateTime =
+    contract?.effectiveDate
+      ? formatDateTZ(contract.effectiveDate, tz, "MMMM D, YYYY HH:mm z")
+      : contract?.content?.campaign?.effectiveDate
+      ? formatDateTZ(contract.content.campaign.effectiveDate, tz, "MMMM D, YYYY")
+      : "";
+
   return `
-    <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:10pt;">
-      <thead>
-        <tr>${headerRow}</tr>
-      </thead>
-      <tbody>
-        <tr>${sigCells.join("")}</tr>
-        <tr>${nameCells.join("")}</tr>
-        <tr>${titleCells.join("")}</tr>
-        <tr>${dateCells.join("")}</tr>
-      </tbody>
-    </table>
+    <section class="sig-section">
+      <div class="sig-note">
+        CollabGlam LLC signs solely to acknowledge its role as platform operator, payment facilitator, and third-party beneficiary where expressly stated, and not as the primary commercial buyer or seller of the Deliverables.
+      </div>
+
+      <div class="sig-title">Signatures</div>
+
+      <div class="sig-table-wrap">
+        <table class="sig-table">
+          <thead>
+            <tr>${headerRow}</tr>
+          </thead>
+          <tbody>
+            <tr>${sigCells.join("")}</tr>
+            <tr>${nameCells.join("")}</tr>
+            <tr>${titleCells.join("")}</tr>
+            <tr>${dateCells.join("")}</tr>
+          </tbody>
+        </table>
+      </div>
+
+      ${
+        effectiveDateTime
+          ? `<div class="sig-effective">Effective Date & Time: ${esc(effectiveDateTime)}</div>`
+          : ""
+      }
+
+      <div class="end-of-agreement">--- End of Agreement ---</div>
+    </section>
   `;
 }
 
 function renderContractHTML({ contract, templateText }) {
   let legalHTML = legalTextToHTML(templateText);
-  legalHTML = legalHTML.replace('<div id="__SIG_PANEL__"></div>', signaturePanelHTML(contract));
+
+  // force signatures to render as one standalone section
+  legalHTML = legalHTML.replace(
+    '<div id="__SIG_PANEL__"></div>',
+    signaturePanelHTML(contract)
+  );
+
   legalHTML = injectTrustedHtmlPlaceholders(legalHTML, contract);
 
   return `<!DOCTYPE html>
@@ -4459,32 +4628,96 @@ function renderContractHTML({ contract, templateText }) {
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <style>
-    @page { size: A4; margin: 18mm 16mm; }
-    * { box-sizing: border-box; }
-    html, body { height: 100%; }
-    body { font-family: "Times New Roman", Times, serif; color: #000; font-size: 10.5pt; line-height: 1.35; }
-    main { max-width: 100%; }
-    img, table { max-width: 100%; }
+    @page {
+      size: A4;
+      margin: 18mm 16mm;
+    }
 
-    h1, h2, h3 { font-weight: 700; color: #000; margin: 10pt 0 6pt; }
-    h1 { font-size: 13pt; text-align: center; text-transform: uppercase; letter-spacing: .2px; }
-    h2 { font-size: 11pt; }
-    h3 { font-size: 10.5pt; }
+    * {
+      box-sizing: border-box;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
 
-    p { margin: 0 0 5pt; text-align: justify; color: #000; orphans: 3; widows: 3; }
+    html, body {
+      height: 100%;
+    }
 
-    .secno { font-weight: 700; }
-    .muted { color: #444; }
+    body {
+      font-family: "Times New Roman", Times, serif;
+      color: #000;
+      font-size: 10.5pt;
+      line-height: 1.35;
+    }
 
-    .signatures { margin: 10pt 0 6pt; display: grid; grid-template-columns: 1fr 1fr; gap: 10pt; }
-    .signature-block { border: 1px solid #000; padding: 8pt; break-inside: avoid; page-break-inside: avoid; }
-    .sigrole { font-weight: 700; margin-bottom: 4pt; }
-    .sigimg { display: block; max-height: 60pt; max-width: 100%; margin: 0 0 6pt; }
-    .sigmeta { font-size: 9.5pt; color: #000; }
+    main {
+      max-width: 100%;
+    }
 
-    table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 9.5pt; margin: 6pt 0; }
-    thead { display: table-header-group; }
-    tr { break-inside: avoid; page-break-inside: avoid; }
+    img, table {
+      max-width: 100%;
+    }
+
+    h1, h2, h3 {
+      font-weight: 700;
+      color: #000;
+      margin: 10pt 0 6pt;
+      break-after: avoid-page;
+      page-break-after: avoid;
+    }
+
+    h1 {
+      font-size: 13pt;
+      text-align: center;
+      text-transform: uppercase;
+      letter-spacing: .2px;
+    }
+
+    h2 {
+      font-size: 11pt;
+    }
+
+    h3 {
+      font-size: 10.5pt;
+    }
+
+    p {
+      margin: 0 0 5pt;
+      text-align: justify;
+      color: #000;
+      orphans: 3;
+      widows: 3;
+    }
+
+    .secno {
+      font-weight: 700;
+    }
+
+    .muted {
+      color: #444;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 9.5pt;
+      margin: 6pt 0;
+    }
+
+    thead {
+      display: table-header-group;
+    }
+
+    tfoot {
+      display: table-footer-group;
+    }
+
+    tr, td, th {
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+
     th, td {
       border: 1px solid #000;
       padding: 3pt 4pt;
@@ -4493,10 +4726,112 @@ function renderContractHTML({ contract, templateText }) {
       overflow-wrap: anywhere;
       hyphens: auto;
     }
-    th { text-align: left; background: #fff; font-weight: 700; }
-    tr:nth-child(even) td { background: #fafafa; }
 
-    .signature-block { break-inside: avoid; page-break-inside: avoid; }
+    th {
+      text-align: left;
+      background: #fff;
+      font-weight: 700;
+    }
+
+    tr:nth-child(even) td {
+      background: #fafafa;
+    }
+
+    /* SIGNATURE SECTION */
+    .sig-section {
+      margin-top: 12pt;
+      break-before: page;
+      page-break-before: always;
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+
+    .sig-section.no-page-break {
+      break-before: auto;
+      page-break-before: auto;
+    }
+
+    .sig-title,
+    .sig-note,
+    .sig-effective {
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+
+    .sig-title {
+      font-weight: 700;
+      margin: 0 0 6pt;
+    }
+
+    .sig-note {
+      margin: 0 0 8pt;
+      text-align: justify;
+    }
+
+    .sig-table-wrap {
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+
+    .sig-table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      margin-top: 6pt;
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+
+    .sig-table thead,
+    .sig-table tbody,
+    .sig-table tr {
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+
+    .sig-table th,
+    .sig-table td {
+      border: 1px solid #000;
+      padding: 4pt;
+      vertical-align: top;
+    }
+
+    .sig-table th {
+      text-align: center;
+      font-weight: 700;
+      background: #fff;
+    }
+
+    .sig-cell {
+      height: 74pt;
+      vertical-align: bottom !important;
+    }
+
+    .sigimg {
+      display: block;
+      max-height: 50pt;
+      max-width: 100%;
+      object-fit: contain;
+    }
+
+    .sig-placeholder {
+      height: 50pt;
+      width: 100%;
+    }
+
+    .sig-effective {
+      margin: 10pt 0 8pt;
+      text-align: center;
+      font-size: 9pt;
+    }
+
+    .end-of-agreement {
+      margin-top: 8pt;
+      text-align: center;
+      font-weight: 700;
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
   </style>
 </head>
 <body>

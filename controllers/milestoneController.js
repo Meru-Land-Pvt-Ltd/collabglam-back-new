@@ -476,8 +476,8 @@ exports.getMilestonesByCampaign = async (req, res) => {
       influencers = await Influencer.find(
         {
           $or: [
-            { influencerId: { $in: influencerIds } }, // if stored as custom influencerId
-            { _id: { $in: influencerIds } },          // if stored as Mongo ObjectId string
+            { influencerId: { $in: influencerIds } },
+            { _id: { $in: influencerIds } },
           ],
         },
         "_id influencerId name fullName username email"
@@ -499,12 +499,65 @@ exports.getMilestonesByCampaign = async (req, res) => {
       }
     });
 
-    const entriesWithNames = entries.map((e) => ({
-      ...e,
-      influencerName: e.influencerId
-        ? influencerMap.get(String(e.influencerId)) || "Unknown Influencer"
-        : "Unknown Influencer",
-    }));
+    const contractPairs = [
+      ...new Map(
+        entries
+          .filter((e) => e.influencerId && e.campaignId)
+          .map((e) => [`${String(e.influencerId)}_${String(e.campaignId)}`, e])
+      ).values(),
+    ];
+
+    const contracts = await Promise.all(
+      contractPairs.map((e) =>
+        Contract.findOne(
+          {
+            influencerId: String(e.influencerId),
+            campaignId: String(e.campaignId),
+          },
+          {
+            influencerId: 1,
+            campaignId: 1,
+            contractId: 1,
+            paymentType: 1,
+            currency: 1,
+            "content.scheduleA.commercial.currency": 1,
+            "content.scheduleA.commercial.totalCampaignFee": 1,
+            "content.scheduleA.commercial.milestones": 1,
+          }
+        ).lean()
+      )
+    );
+
+    const contractMap = new Map();
+
+    contracts.forEach((contract) => {
+      if (contract?.influencerId && contract?.campaignId) {
+        const key = `${String(contract.influencerId)}_${String(contract.campaignId)}`;
+        contractMap.set(key, contract);
+      }
+    });
+
+    const entriesWithNames = entries.map((e) => {
+      const contractKey = `${String(e.influencerId || "")}_${String(e.campaignId || "")}`;
+      const contract = contractMap.get(contractKey) || null;
+
+      return {
+        ...e,
+        influencerName: e.influencerId
+          ? influencerMap.get(String(e.influencerId)) || "Unknown Influencer"
+          : "Unknown Influencer",
+        contractId: contract?.contractId || "",
+        paymentType: contract?.paymentType || "",
+        currency:
+          contract?.currency ||
+          contract?.content?.scheduleA?.commercial?.currency ||
+          "",
+        totalCampaignFee:
+          contract?.content?.scheduleA?.commercial?.totalCampaignFee || 0,
+        milestones:
+          contract?.content?.scheduleA?.commercial?.milestones || [],
+      };
+    });
 
     entriesWithNames.sort(
       (a, b) => new Date(b.createdAt) - new Date(a.createdAt)

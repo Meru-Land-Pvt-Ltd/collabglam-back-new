@@ -734,59 +734,61 @@ exports.getListByCampaign = async (req, res) => {
       if (!contract) {
         return {
           lifecycleStatus: null,
+          lifecycleStatusRaw: null,
+          isFinalUpdate: false,
           isInvited: 0,
           isActive: 0,
           isCompleted: 0
         };
       }
 
-      const lifecycleStatus = normalizeText(
+      const rawLifecycleStatus =
         contract.status ||
-          contract.contractStatus ||
-          contract.lifecycleStatus ||
-          contract.currentStatus
-      );
+        contract.contractStatus ||
+        contract.lifecycleStatus ||
+        contract.currentStatus;
 
-      const awaitingRole = normalizeText(
-        contract.awaitingRole ||
-          contract.awaiting_role ||
-          contract.awaiting?.role
-      );
+      const lifecycleStatus = normalizeText(rawLifecycleStatus);
+      const lifecycleStatusRaw = normalizeStatus(rawLifecycleStatus);
 
       const isRejectedContract = Number(contract?.isRejected) === 1;
+
+      const isFinalUpdate =
+        contract?.isFinalUpdate === true ||
+        String(contract?.isFinalUpdate).toLowerCase() === 'true' ||
+        Number(contract?.isFinalUpdate) === 1;
 
       const isCompleted =
         lifecycleStatus === 'completed' || lifecycleStatus === 'complete' ? 1 : 0;
 
-      const isInvited =
-        lifecycleStatus === 'invited' ||
-        lifecycleStatus === 'invite_sent' ||
-        lifecycleStatus === 'pending' ||
-        (lifecycleStatus === 'ready_to_sign' && awaitingRole === 'influencer')
+      // ACTIVE ONLY FOR THESE TWO RAW STATUSES
+      const isActive =
+        !isRejectedContract &&
+        isCompleted === 0 &&
+        (
+          lifecycleStatusRaw === 'INFLUENCER_ACCEPTED' ||
+          lifecycleStatusRaw === 'READY_TO_SIGN'
+        )
           ? 1
           : 0;
 
-      const blockedActiveStatuses = new Set([
-        '',
-        'rejected',
-        'declined',
-        'cancelled',
-        'canceled',
-        'completed',
-        'complete'
-      ]);
-
-      const isActive =
-        isCompleted === 0 &&
-        isInvited === 0 &&
+      // keep invited separate from active
+      const isInvited =
         !isRejectedContract &&
-        !blockedActiveStatuses.has(lifecycleStatus) &&
-        !!lifecycleStatus
+        isCompleted === 0 &&
+        isActive === 0 &&
+        (
+          lifecycleStatus === 'invited' ||
+          lifecycleStatus === 'invite_sent' ||
+          lifecycleStatus === 'pending'
+        )
           ? 1
           : 0;
 
       return {
         lifecycleStatus,
+        lifecycleStatusRaw,
+        isFinalUpdate,
         isInvited,
         isActive,
         isCompleted
@@ -1202,6 +1204,8 @@ exports.getListByCampaign = async (req, res) => {
         isActive: lifecycle.isActive,
         isCompleted: lifecycle.isCompleted,
         lifecycleStatus: lifecycle.lifecycleStatus,
+        lifecycleStatusRaw: lifecycle.lifecycleStatusRaw,
+        isFinalUpdate: lifecycle.isFinalUpdate,
 
         modashProfile: chosen,
         modashProfiles: allProfiles,

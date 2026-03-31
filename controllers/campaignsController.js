@@ -3888,6 +3888,14 @@ exports.viewCampaignByIdForBrand = async (req, res) => {
       );
     }
 
+    const applyCampaign = await ApplyCampaign.findOne({
+      campaignId: campaignId,
+    }).lean();
+
+    const count = applyCampaign?.applicants?.length || 0;
+
+    campaign.count = count;
+
     const enriched = (await enrichCampaigns([campaign]))[0];
 
     return ApiResponse.sendOk(
@@ -4343,17 +4351,19 @@ exports.getAllActiveCampaignsForInfluencer = async (req, res) => {
     const safeLimit = Math.max(1, parseInt(limit, 10) || 10);
     const skip = (safePage - 1) * safeLimit;
 
-    // support both Mongo _id and custom influencerId
     const influencerLookup = mongoose.Types.ObjectId.isValid(String(influencerId))
       ? {
-        $or: [
-          { _id: influencerId },
-          { influencerId: String(influencerId) }
-        ]
-      }
+          $or: [
+            { _id: influencerId },
+            { influencerId: String(influencerId) }
+          ]
+        }
       : { influencerId: String(influencerId) };
 
-    const influencer = await Influencer.findOne(influencerLookup, "_id influencerId").lean();
+    const influencer = await Influencer.findOne(
+      influencerLookup,
+      "_id influencerId"
+    ).lean();
 
     if (!influencer) {
       return fail(res, 404, "NOT_FOUND", "Influencer not found", requestId);
@@ -4362,7 +4372,6 @@ exports.getAllActiveCampaignsForInfluencer = async (req, res) => {
     const internalInfluencerId = String(influencer._id);
     const publicInfluencerId = String(influencer.influencerId || influencer._id);
 
-    // find campaigns already applied by this influencer
     const appliedDocs = await ApplyCampaign.find(
       {
         $or: [
@@ -4391,7 +4400,6 @@ exports.getAllActiveCampaignsForInfluencer = async (req, res) => {
       isDraft: { $ne: 1 }
     };
 
-    // exclude already applied campaigns
     if (appliedCampaignIds.length) {
       filter.$and = [
         {
@@ -4416,6 +4424,18 @@ exports.getAllActiveCampaignsForInfluencer = async (req, res) => {
     const [total, campaigns] = await Promise.all([
       Campaign.countDocuments(filter),
       Campaign.find(filter)
+        .populate({
+          path: "campaignGoals",
+          select: "_id goal"
+        })
+        .populate({
+          path: "targetCountryIds",
+          select: "_id name countryName code isoCode flag"
+        })
+        .populate({
+          path: "targetAgeRanges",
+          select: "_id range"
+        })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(safeLimit)
@@ -5802,5 +5822,72 @@ exports.getDraftCampaigns = async (req, res) => {
     );
   } catch (err) {
     return sendControllerError(res, requestId, err);
+  }
+};
+
+exports.rejectedCampaign = async (req, res) => {
+  try {
+    const { influencerId } = req.params;
+
+    if (!influencerId) {
+      return res.status(400).json({
+        success: false,
+        message: "influencerId is required",
+      });
+    }
+
+    const rejectedCampaigns = await Contract.aggregate([
+      {
+        $match: {
+          influencerId: influencerId,
+          status: "REJECTED",
+        },
+      },
+      {
+        $project: {
+          _id: 1,
+          campaignId: 1,
+          status: 1,
+        },
+      },
+      {
+        $addFields: {
+          campaignObjectId: { $toObjectId: "$campaignId" },
+        },
+      },
+      {
+        $lookup: {
+          from: "campaigns",
+          localField: "campaignObjectId",
+          foreignField: "_id",
+          as: "campaignData",
+        },
+      },
+      {
+        $unwind: {
+          path: "$campaignData",
+          preserveNullAndEmptyArrays: true,
+        },
+      },
+      {
+        $project: {
+          _id: 1,
+          campaignId: 1,
+          status: 1,
+          campaignData: 1,
+        },
+      },
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      count: rejectedCampaigns.length,
+      data: rejectedCampaigns,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 };
