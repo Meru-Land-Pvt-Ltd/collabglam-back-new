@@ -2,7 +2,6 @@ const mongoose = require("mongoose");
 const { Types } = require("mongoose");
 const multer = require("multer");
 const OpenAI = require("openai");
-const crypto = require("crypto");
 const { DateTime } = require("luxon");
 const { normalizeAndUploadProductImages } = require("../utils/uploadBase64ImagesToS3.js");
 

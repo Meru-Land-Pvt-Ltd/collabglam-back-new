@@ -450,22 +450,41 @@ function renderAgreementHeaderTableHTML(content = {}, tz = DEFAULT_TZ) {
   return renderKeyValueTable([
     ["Brand Legal Name", content?.brand?.legalName || ""],
     ["Brand Contact Person Name", content?.brand?.contactPersonName || ""],
-    // ["Brand Notice Email / Phone", compactJoin([content?.brand?.noticeEmail, content?.brand?.noticePhone], " / ")],
     ["Brand Billing Address", content?.brand?.billingAddress || ""],
+
     ["Influencer Legal Name / Entity", content?.influencer?.legalName || ""],
     ["Influencer Posting Handle URL", content?.influencer?.postingHandleUrl || ""],
-    ["Influencer Contact Email / Phone", compactJoin([content?.influencer?.contactEmail, content?.influencer?.contactPhone, content?.influencer?.whatsApp], " / ")],
-    ["Influencer Address", content?.influencer?.address || ""],
+    [
+      "Influencer Contact Email / Phone",
+      [content?.influencer?.email, content?.influencer?.phone]
+        .filter(Boolean)
+        .join(" / "),
+    ],
+    ["Influencer Address Line 1", content?.influencer?.addressLine1 || ""],
+    ["Influencer Address Line 2", content?.influencer?.addressLine2 || ""],
+    ["Influencer City", content?.influencer?.city || ""],
+    ["Influencer State", content?.influencer?.state || ""],
+    ["Influencer Zip / Postal Code", content?.influencer?.zipPostalCode || ""],
+    ["Influencer Country", content?.influencer?.country || ""],
+
     ["Products / Services Covered", content?.campaign?.productsServicesCovered || ""],
     ["Territory / Target Country", content?.campaign?.territoryTargetCountry || ""],
-    ["Effective Date", content?.campaign?.effectiveDate ? formatDateTZ(content.campaign.effectiveDate, tz) : ""],
+    [
+      "Effective Date",
+      content?.campaign?.effectiveDate
+        ? formatDateTZ(content.campaign.effectiveDate, tz)
+        : "",
+    ],
     [
       "CollabGlam LLC",
       compactJoin(
         [
           content?.collabglam?.legalName || "CollabGlam LLC",
-          content?.collabglam?.address || "CollabGlam LLC, 732 S 6th STE N, Las Vegas, Nevada 89101, USA",
-          content?.collabglam?.email ? `Email: ${content.collabglam.email}` : "Email: help@collabglam.com",
+          content?.collabglam?.address ||
+            "CollabGlam LLC, 732 S 6th STE N, Las Vegas, Nevada 89101, USA",
+          content?.collabglam?.email
+            ? `Email: ${content.collabglam.email}`
+            : "Email: help@collabglam.com",
         ],
         " | "
       ),
@@ -977,11 +996,19 @@ function buildTokenMap(contract) {
     "Brand.Address": c?.brand?.billingAddress || "",
 
     "Influencer.LegalName": c?.influencer?.legalName || contract.influencerName || "",
-    "Influencer.ContactName": c?.influencer?.contactName || c?.influencer?.legalName || "",
-    "Influencer.PostingHandleUrl": c?.influencer?.postingHandleUrl || "",
-    "Influencer.ContactEmail": c?.influencer?.contactEmail || "",
-    "Influencer.ContactPhone": c?.influencer?.contactPhone || "",
-    "Influencer.Address": c?.influencer?.address || contract.influencerAddress || "",
+"Influencer.ContactName": c?.influencer?.contactName || c?.influencer?.legalName || "",
+"Influencer.PostingHandleUrl": c?.influencer?.postingHandleUrl || "",
+"Influencer.ContactEmail": c?.influencer?.email || "",
+"Influencer.ContactPhone": c?.influencer?.phone || "",
+"Influencer.TaxFormType": c?.influencer?.taxFormType || "",
+"Influencer.TaxId": c?.influencer?.taxId || "",
+"Influencer.AddressLine1": c?.influencer?.addressLine1 || "",
+"Influencer.AddressLine2": c?.influencer?.addressLine2 || "",
+"Influencer.City": c?.influencer?.city || "",
+"Influencer.State": c?.influencer?.state || "",
+"Influencer.ZipPostalCode": c?.influencer?.zipPostalCode || "",
+"Influencer.Country": c?.influencer?.country || "",
+"Influencer.Notes": c?.influencer?.notes || "", 
 
     "CollabGlam.SignatoryName":
       c?.collabglam?.signatoryName || contract.admin?.collabglamSignatoryName || "",
@@ -2705,7 +2732,17 @@ exports.influencerConfirm = async (req, res) => {
     });
 
     await contract.save();
-
+    await ApplyCampaign.updateOne(
+      {
+        campaignId: String(contract.campaignId),
+        "applicants.influencerId": String(contract.influencerId),
+      },
+      {
+        $set: {
+          "applicants.$.isShortlisted": 0,
+         
+        },
+      })
     await Campaign.updateOne(
       campaignQuery(contract.campaignId),
       {
@@ -3777,9 +3814,10 @@ exports.reject = async (req, res) => {
     contract.editsLockedAt = null;
     contract.statusFlags = contract.statusFlags || {};
     contract.statusFlags.awaitingCollabglam = false;
-
+  
     addAudit(contract, "influencer", "REJECTED", { reason });
     await contract.save();
+    
     await ApplyCampaign.updateOne(
   {
     campaignId: String(contract.campaignId),
@@ -3787,7 +3825,8 @@ exports.reject = async (req, res) => {
   },
   {
     $set: {
-      'applicants.$.statusInfluencer': 'rejected'
+      'applicants.$.statusInfluencer': 'rejected',
+      "applicants.$.isShortlisted": 0,
     }
   }
 );
