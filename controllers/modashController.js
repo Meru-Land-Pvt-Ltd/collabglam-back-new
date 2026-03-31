@@ -15,7 +15,7 @@ const { ensureBrandQuota } = require('../utils/quota');
 
 const MODASH_API_KEY = process.env.MODASH_API_KEY;
 const MODASH_BASE_URL = process.env.MODASH_BASE_URL || 'https://api.modash.io/v1';
-const MODASH_AUTH_HEADER = cleanStr(process.env.MODASH_AUTH_HEADER || '').toLowerCase();
+const MODASH_AUTH_HEADER = cleanStr(process.env.MODASH_AUTH_HEADER || 'authorization').toLowerCase();
 
 if (!MODASH_API_KEY) {
   throw new Error('MODASH_API_KEY is missing. Add it to your environment.');
@@ -572,7 +572,7 @@ async function modashRequest({ method, path, query, body }) {
         err.status = res.status;
         err.response = json || undefined;
 
-        if (res.status === 403) {
+        if (res.status === 401 || res.status === 403) {
           lastErr = err;
           continue;
         }
@@ -620,10 +620,10 @@ function normalizeSearchItem(item, platform) {
   const userId =
     cleanStr(
       (item && item.userId) ||
-        (src && src.userId) ||
-        (src && src.id) ||
-        (src && src.channelId) ||
-        (src && src.profileId)
+      (src && src.userId) ||
+      (src && src.id) ||
+      (src && src.channelId) ||
+      (src && src.profileId)
     ) || undefined;
 
   const categories = categoryNamesFromObjects(extractCategories(src));
@@ -1161,11 +1161,11 @@ function buildSavedInfluencerMongoFilter(input = {}) {
 
   const categories = parseMultiValue(
     input.categories ||
-      input.category ||
-      input.niche ||
-      input.niches ||
-      input.category_name ||
-      input.categoryName
+    input.category ||
+    input.niche ||
+    input.niches ||
+    input.category_name ||
+    input.categoryName
   );
   if (categories.length) {
     const categoryRegexes = categories.map((x) => containsCI(x));
@@ -2137,7 +2137,7 @@ async function exportSavedInfluencersCsv(req, res) {
       const yt =
         prov === 'youtube'
           ? rawUrl ||
-            (doc.userId ? `https://www.youtube.com/channel/${doc.userId}` : u ? `https://www.youtube.com/@${u}` : dash)
+          (doc.userId ? `https://www.youtube.com/channel/${doc.userId}` : u ? `https://www.youtube.com/@${u}` : dash)
           : dash;
 
       const ig = prov === 'instagram' ? rawUrl || (u ? `https://www.instagram.com/${u}` : dash) : dash;
