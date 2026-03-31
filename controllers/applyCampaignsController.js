@@ -586,7 +586,6 @@ exports.getListByCampaign = async (req, res) => {
 
       if (value == null) return null;
 
-      // if stored as decimal like 0.045 => 4.5%
       if (value > 0 && value <= 1) {
         value = value * 100;
       }
@@ -657,7 +656,6 @@ exports.getListByCampaign = async (req, res) => {
       return selectedPlatforms.map(normalizeText).includes(normalizeText(value));
     };
 
-    // CATEGORY FILTER ONLY FROM InfluencerModel.categories ARRAY
     const matchesCategoryIds = (rowCategoryIds, selectedCategoryIds) => {
       if (!selectedCategoryIds.length) return true;
       const current = (rowCategoryIds || []).map(String);
@@ -751,7 +749,9 @@ exports.getListByCampaign = async (req, res) => {
       const lifecycleStatus = normalizeText(rawLifecycleStatus);
       const lifecycleStatusRaw = normalizeStatus(rawLifecycleStatus);
 
-      const isRejectedContract = Number(contract?.isRejected) === 1;
+      const isRejectedContract =
+        Number(contract?.isRejected) === 1 ||
+        lifecycleStatusRaw === 'REJECTED';
 
       const isFinalUpdate =
         contract?.isFinalUpdate === true ||
@@ -761,19 +761,17 @@ exports.getListByCampaign = async (req, res) => {
       const isCompleted =
         lifecycleStatus === 'completed' || lifecycleStatus === 'complete' ? 1 : 0;
 
-      // ACTIVE ONLY FOR THESE TWO RAW STATUSES
       const isActive =
         !isRejectedContract &&
         isCompleted === 0 &&
         (
           lifecycleStatusRaw === 'INFLUENCER_ACCEPTED' ||
-          lifecycleStatusRaw === 'READY_TO_SIGN'||
-          lifecycleStatusRaw ==='MILESTONES_CREATED'
+          lifecycleStatusRaw === 'READY_TO_SIGN' ||
+          lifecycleStatusRaw === 'MILESTONES_CREATED'
         )
           ? 1
           : 0;
 
-      // keep invited separate from active
       const isInvited =
         !isRejectedContract &&
         isCompleted === 0 &&
@@ -1160,7 +1158,12 @@ exports.getListByCampaign = async (req, res) => {
 
       const isShortlisted = Number(applicant?.isShortlisted) === 1 ? 1 : 0;
       const isUndicided = Number(applicant?.isUndicided) === 1 ? 1 : 0;
-      const isRejected = Number(applicant?.isRejected) === 1 ? 1 : 0;
+      const isRejected =
+        Number(applicant?.isRejected) === 1 ||
+        lifecycle.lifecycleStatusRaw === 'REJECTED'
+          ? 1
+          : 0;
+
       const applicantStatuses = resolveApplicantStatuses(applicant);
 
       const appliedAt = resolveApplicantDate(applicant, recordCreatedAt);
@@ -1177,7 +1180,6 @@ exports.getListByCampaign = async (req, res) => {
         platform: primaryPlatform,
         handle,
 
-        // influencer table categories
         category: categoryName,
         categoryIds: influencerCategoryIds,
 
@@ -1188,19 +1190,16 @@ exports.getListByCampaign = async (req, res) => {
         createdAt: appliedAt,
         appliedAt,
 
-        // raw applicant flags
         isShortlisted,
         isUndicided,
         isUndecided: isUndicided,
         isRejected,
 
-        // applicant status fields from ApplyCampaign.applicants[]
         statusBrand: applicantStatuses.statusBrand,
         statusInfluencer: applicantStatuses.statusInfluencer,
         brandStatus: applicantStatuses.statusBrand,
         influencerStatus: applicantStatuses.statusInfluencer,
 
-        // lifecycle flags from contract
         isInvited: lifecycle.isInvited,
         isActive: lifecycle.isActive,
         isCompleted: lifecycle.isCompleted,
@@ -1259,7 +1258,6 @@ exports.getListByCampaign = async (req, res) => {
 
     let filtered = rows;
 
-    // optional createdPage logic from your current code
     if (createdPage === true || createdPage === 'true') {
       filtered = filtered.filter((row) => {
         const c = contractByInf.get(String(row.influencerId));
@@ -1278,7 +1276,6 @@ exports.getListByCampaign = async (req, res) => {
       });
     }
 
-    // search on row data
     if (search?.trim()) {
       const q = normalizeText(search);
       filtered = filtered.filter((row) => {
@@ -1294,10 +1291,8 @@ exports.getListByCampaign = async (req, res) => {
       });
     }
 
-    // 1) tab/status filter
     filtered = filtered.filter((row) => matchesInfluencerType(row, selectedStatus));
 
-    // 2) modash filters
     filtered = filtered.filter((row) => {
       if (!matchesEngagementRate(row.engagementRate, selectedEngagementRates)) return false;
       if (!matchesTier(row.audienceSize, selectedTiers)) return false;
@@ -1305,12 +1300,10 @@ exports.getListByCampaign = async (req, res) => {
       return true;
     });
 
-    // 3) categoryId filter from Influencer.categories[]
     filtered = filtered.filter((row) =>
       matchesCategoryIds(row.categoryIds, selectedCategoryIds)
     );
 
-    // 4) date filter only from ApplyCampaign
     filtered = filtered.filter((row) =>
       matchesDateFilter(row.appliedAt, selectedDateFilter)
     );

@@ -578,13 +578,11 @@ function normalizePaymentType(raw) {
     return PAYMENT_TYPES.GIFTING;
   }
 
-  return PAYMENT_TYPES.FIXED;
+  return "-";
 }
 
 function getCampaignPaymentType(campaign, contentInput = {}) {
-  return normalizePaymentType(
-    contentInput?.campaign?.paymentType || campaign?.paymentType
-  );
+  return normalizePaymentType(contentInput?.campaign?.paymentType);
 }
 
 function getCampaignFee(campaign, paymentType) {
@@ -650,8 +648,8 @@ function createDefaultContent({
     paymentType === PAYMENT_TYPES.MILESTONE
       ? "50% advance / 50% balance"
       : paymentType === PAYMENT_TYPES.FIXED
-        ? "100% on completion"
-        : "Product gifting only";
+        ? ""
+        : "-";
 
   const base = {
     brand: {
@@ -1036,7 +1034,7 @@ function buildTokenMap(contract) {
       renderDeliverablesScheduleTable(c?.scheduleA?.deliverables || []),
 
     "SOW.ReviewTermsTableHTML": renderKeyValueTable([
-      ["Included Revision Rounds", review?.includedRevisionRounds ?? 1],
+      ["Included Revision Rounds", review?.includedRevisionRounds ?? "-"],
       ["Additional Revision Fee", review?.additionalRevisionFee || ""],
       ["Reshoot Obligation", review?.reshootObligation || ""],
       ["Reshoot Fee", review?.reshootFee || ""],
@@ -1084,7 +1082,7 @@ function buildTokenMap(contract) {
     "SOW.ExclusivityTableHTML": renderKeyValueTable([
       [
         "Exclusivity / Competitor Blackout",
-        exclusivity?.competitorBlackout || "None",
+        exclusivity?.competitorBlackout || "-",
       ],
       ["Category / Competitor List", exclusivity?.categoryCompetitorList || ""],
       ["Exclusivity / Blackout Period", exclusivity?.blackoutPeriod || ""],
