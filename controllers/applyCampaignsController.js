@@ -767,7 +767,8 @@ exports.getListByCampaign = async (req, res) => {
         isCompleted === 0 &&
         (
           lifecycleStatusRaw === 'INFLUENCER_ACCEPTED' ||
-          lifecycleStatusRaw === 'READY_TO_SIGN'
+          lifecycleStatusRaw === 'READY_TO_SIGN'||
+          lifecycleStatusRaw ==='MILESTONES_CREATED'
         )
           ? 1
           : 0;

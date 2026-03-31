@@ -2,7 +2,6 @@ const mongoose = require("mongoose");
 const { Types } = require("mongoose");
 const multer = require("multer");
 const OpenAI = require("openai");
-const crypto = require("crypto");
 const { DateTime } = require("luxon");
 const { normalizeAndUploadProductImages } = require("../utils/uploadBase64ImagesToS3.js");
 
@@ -4354,11 +4353,11 @@ exports.getAllActiveCampaignsForInfluencer = async (req, res) => {
 
     const influencerLookup = mongoose.Types.ObjectId.isValid(String(influencerId))
       ? {
-        $or: [
-          { _id: influencerId },
-          { influencerId: String(influencerId) }
-        ]
-      }
+          $or: [
+            { _id: influencerId },
+            { influencerId: String(influencerId) }
+          ]
+        }
       : { influencerId: String(influencerId) };
 
     const influencer = await Influencer.findOne(
@@ -4874,10 +4873,10 @@ exports.getCampaignsByBrandId = async (req, res) => {
 
     const cats = categoryIds.length
       ? await Category.find({
-        _id: { $in: categoryIds.map((id) => toObjectId(id)) },
-      })
-        .select("_id name")
-        .lean()
+          _id: { $in: categoryIds.map((id) => toObjectId(id)) },
+        })
+          .select("_id name")
+          .lean()
       : [];
 
     const catMap = new Map(cats.map((c) => [String(c._id), c]));
@@ -4887,30 +4886,30 @@ exports.getCampaignsByBrandId = async (req, res) => {
 
     const contractStatsRaw = campaignIds.length
       ? await Contract.aggregate([
-        {
-          $match: {
-            brandId: { $in: [toObjectId(brandId), brandId] },
-            campaignId: { $in: campaignIds },
-          },
-        },
-        {
-          $group: {
-            _id: "$campaignId",
-            contractsCount: { $sum: 1 },
-            applicantCount: { $sum: 1 },
-            acceptedCount: {
-              $sum: {
-                $cond: [{ $eq: ["$isAccepted", 1] }, 1, 0],
-              },
-            },
-            assignedCount: {
-              $sum: {
-                $cond: [{ $eq: ["$isAssigned", 1] }, 1, 0],
-              },
+          {
+            $match: {
+              brandId: { $in: [toObjectId(brandId), brandId] },
+              campaignId: { $in: campaignIds },
             },
           },
-        },
-      ])
+          {
+            $group: {
+              _id: "$campaignId",
+              contractsCount: { $sum: 1 },
+              applicantCount: { $sum: 1 },
+              acceptedCount: {
+                $sum: {
+                  $cond: [{ $eq: ["$isAccepted", 1] }, 1, 0],
+                },
+              },
+              assignedCount: {
+                $sum: {
+                  $cond: [{ $eq: ["$isAssigned", 1] }, 1, 0],
+                },
+              },
+            },
+          },
+        ])
       : [];
 
     const contractMap = new Map(
@@ -5890,163 +5889,5 @@ exports.rejectedCampaign = async (req, res) => {
       success: false,
       message: err.message,
     });
-  }
-};
-
-exports.enableCampaignShare = async (req, res) => {
-  const requestId = getRequestId(req);
-
-  try {
-    const { campaignId, brandId } = req.body;
-
-    if (!campaignId || !mongoose.Types.ObjectId.isValid(campaignId)) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
-    }
-
-    if (!brandId || !mongoose.Types.ObjectId.isValid(brandId)) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid brandId is required", requestId);
-    }
-
-    const campaign = await Campaign.findOne({
-      _id: campaignId,
-      brandId: brandId,
-    });
-
-    if (!campaign) {
-      return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
-    }
-
-    if (!campaign.publicShareToken) {
-      const crypto = require("crypto");
-      campaign.publicShareToken = crypto.randomBytes(16).toString("hex");
-    }
-
-    campaign.isPublic = true;
-    await campaign.save();
-
-    const ALLOWED_FRONTEND_ORIGINS = [
-      "https://collabglam.com",
-      "http://localhost:3000",
-      "http://192.168.1.57:3000",
-    ];
-
-    const requestOrigin = String(req.headers.origin || "").trim();
-
-    const frontendBase = ALLOWED_FRONTEND_ORIGINS.includes(requestOrigin)
-      ? requestOrigin
-      : "https://collabglam.com";
-
-    const shareUrl = `${frontendBase}/campaign/share/${campaign.publicShareToken}`;
-
-    return ApiResponse.sendOk(
-      res,
-      200,
-      {
-        message: "Public share link enabled",
-        shareUrl,
-        publicShareToken: campaign.publicShareToken,
-        isPublic: true,
-      },
-      requestId
-    );
-  } catch (err) {
-    return sendControllerError(res, requestId, err);
-  }
-};
-
-exports.disableCampaignShare = async (req, res) => {
-  const requestId = getRequestId(req);
-
-  try {
-    const { campaignId, brandId } = req.body;
-
-    if (!campaignId || !mongoose.Types.ObjectId.isValid(campaignId)) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
-    }
-
-    if (!brandId || !mongoose.Types.ObjectId.isValid(brandId)) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid brandId is required", requestId);
-    }
-
-    const campaign = await Campaign.findOne({
-      _id: campaignId,
-      brandId: brandId,
-    });
-
-    if (!campaign) {
-      return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
-    }
-
-    campaign.isPublic = false;
-    await campaign.save();
-
-    return ApiResponse.sendOk(
-      res,
-      200,
-      {
-        message: "Public share link disabled",
-        isPublic: false,
-      },
-      requestId
-    );
-  } catch (err) {
-    return sendControllerError(res, requestId, err);
-  }
-};
-
-exports.getPublicCampaignByToken = async (req, res) => {
-  const requestId = getRequestId(req);
-
-  try {
-    const { token } = req.params;
-
-    if (!token || !String(token).trim()) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid token is required", requestId);
-    }
-
-    const campaign = await Campaign.findOne({
-      publicShareToken: token,
-      isPublic: true,
-    }).lean();
-
-    if (!campaign) {
-      return fail(res, 404, "NOT_FOUND", "Campaign not found or not public", requestId);
-    }
-
-    return ApiResponse.sendOk(
-      res,
-      200,
-      {
-        doc: {
-          _id: campaign._id,
-          campaignTitle: campaign.campaignTitle,
-          description: campaign.description,
-          campaignType: campaign.campaignType,
-          campaignBudget: campaign.campaignBudget,
-          budget: campaign.budget,
-          paymentType: campaign.paymentType,
-          platformSelection: campaign.platformSelection || [],
-          targetCountryIds: campaign.targetCountryIds || [],
-          targetAgeRanges: campaign.targetAgeRanges || [],
-          productImages: campaign.productImages || [],
-          productLink: campaign.productLink || "",
-          videoLink: campaign.videoLink || "",
-          additionalNotes: campaign.additionalNotes || "",
-          startAt: campaign.startAt,
-          endAt: campaign.endAt,
-          status: campaign.status,
-          brandName: campaign.brandName || "",
-          categoryId: campaign.categoryId || null,
-          subcategoryIds: campaign.subcategoryIds || [],
-          contentFormats: campaign.contentFormats || [],
-          contentLanguageIds: campaign.contentLanguageIds || [],
-          preferredHashtags: campaign.preferredHashtags || [],
-          campaignGoals: campaign.campaignGoals || [],
-        },
-      },
-      requestId
-    );
-  } catch (err) {
-    return sendControllerError(res, requestId, err);
   }
 };

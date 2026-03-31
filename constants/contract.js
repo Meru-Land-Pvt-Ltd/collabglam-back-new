@@ -18,7 +18,17 @@ const CONTRACT_STATUS = Object.freeze({
   REJECTED: "REJECTED",
   SUPERSEDED: "SUPERSEDED",
 });
-
+// "Influencer.LegalName": c?.influencer?.legalName || contract.influencerName || "",
+//     "Influencer.ContactName": c?.influencer?.contactName || c?.influencer?.legalName || "",
+//     "Influencer.PostingHandleUrl": c?.influencer?.postingHandleUrl || "",
+//     "Influencer.ContactEmail": c?.influencer?.email || "",
+//     "Influencer.ContactPhone": c?.influencer?.phone || "",
+//     "Influencer.Address1": c?.influencer?.addressLine1 || contract.influencerAddress || "",
+//     "Influencer.Address2": c?.influencer?.addressLine2 || contract.influencerAddress || "",
+//     "Influencer.city": c?.influencer?.city || contract.influencerAddress || "",
+//     "Influencer.state": c?.influencer?.state || contract.influencerAddress || "",
+//     "Influencer.country": c?.influencer?.country || contract.influencerAddress || "",
+//     "Influencer.state": c?.influencer?.state || contract.influencerAddress || "",
 /**
  * Legacy statuses (readable during migration).
  * On WRITE, always store canonical.
