@@ -80,4 +80,8 @@ router.post("/get-by-brand", brandAuth,campaignController.getCampaignsByBrandId)
 router.post("/edit-draft", brandAuth, campaignController.editDraftCampaign);
 router.post("/get-drafts", brandAuth, campaignController.getDraftCampaigns);
 
+router.post("/share/enable", brandAuth, campaignController.enableCampaignShare);
+router.post("/share/disable", brandAuth, campaignController.disableCampaignShare);
+router.get("/public/:token", campaignController.getPublicCampaignByToken);
+
 module.exports = router;  

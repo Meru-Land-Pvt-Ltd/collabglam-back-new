@@ -69,7 +69,7 @@ const corsOrigins = process.env.FRONTEND_ORIGIN || [
   "https://collabglam.com",
   "http://localhost:3000",
   "http://localhost:3001",
-  "http://192.168.1.17:3000",
+  "http://192.168.1.57:3000",
   "https://mhd.sharemitra.com",
 ];
 
