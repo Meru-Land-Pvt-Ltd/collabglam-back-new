@@ -3,7 +3,7 @@ const { Types } = require("mongoose");
 const multer = require("multer");
 const OpenAI = require("openai");
 const { DateTime } = require("luxon");
-const { normalizeAndUploadProductImages,uploadMultipleFilesToS3 } = require("../utils/uploadBase64ImagesToS3.js");
+const { normalizeAndUploadProductImages } = require("../utils/uploadBase64ImagesToS3.js");
 
 const Campaign = require("../models/campaign");
 const Brand = require("../models/brand");
@@ -1578,22 +1578,12 @@ exports.createCampaign = async (req, res) => {
   const requestId = getRequestId(req);
 
   try {
-    console.time("createCampaign.total");
 
-    console.time("detectGeoFromRequest");
     const geo = await detectGeoFromRequest(req);
-    console.timeEnd("detectGeoFromRequest");
-
-    console.time("getCampaignTimezone");
     const campaignTz = getCampaignTimezone(req.body);
-    console.timeEnd("getCampaignTimezone");
 
-    console.time("findBrandDocByAnyId");
     const brandDoc = await findBrandDocByAnyId(req.body.brandId);
-    console.timeEnd("findBrandDocByAnyId");
-
     if (!brandDoc) {
-      console.timeEnd("createCampaign.total");
       return fail(
         res,
         HttpStatus.NOT_FOUND,
@@ -1603,61 +1593,45 @@ exports.createCampaign = async (req, res) => {
       );
     }
 
-    console.time("resolveActorFromPayload");
     const actor = await resolveActorFromPayload(
       req,
       String(brandDoc.brandId || brandDoc._id || req.body.brandId || "")
     );
-    console.timeEnd("resolveActorFromPayload");
 
-    console.time("inferMode");
     const mode = inferMode(req.body.status, req.body.scheduledAt);
-    console.timeEnd("inferMode");
 
-    console.time("validateForMode");
     const v = await validateForMode(res, requestId, mode, req.body);
-    console.timeEnd("validateForMode");
-    if (!v.ok) {
-      console.timeEnd("createCampaign.total");
-      return v.resp;
-    }
+    if (!v.ok) return v.resp;
 
     const status =
       mode === "draft"
         ? "draft"
         : mode === "schedule"
-        ? "scheduled"
-        : "active";
+          ? "scheduled"
+          : "active";
 
     let timing = {};
 
     if (status === "draft") {
-      console.time("parseDraftWindowSoft");
       timing = parseDraftWindowSoft(req.body, campaignTz);
-      console.timeEnd("parseDraftWindowSoft");
     } else if (status === "scheduled") {
-      console.time("parseSchedule");
       const sch = parseSchedule(req.body, campaignTz, requestId, res);
-      console.timeEnd("parseSchedule");
-      if (!sch.ok) {
-        console.timeEnd("createCampaign.total");
-        return sch.resp;
-      }
+      if (!sch.ok) return sch.resp;
       timing = sch.value;
     } else {
-      console.time("parseCampaignWindow");
       const win = parseCampaignWindow(req.body, campaignTz, requestId, res, true);
-      console.timeEnd("parseCampaignWindow");
-      if (!win.ok) {
-        console.timeEnd("createCampaign.total");
-        return win.resp;
-      }
+      if (!win.ok) return win.resp;
       timing = win.value;
     }
 
     req.body.campaignTimezone = campaignTz;
 
-    console.time("buildCampaignDoc");
+    const uploadedProductImages = await normalizeAndUploadProductImages(
+      req.body.productImages
+    );
+
+    req.body.productImages = uploadedProductImages;
+
     const docToCreate = buildCampaignDoc(req.body, geo, status, 0, timing, {
       brandName: String(brandDoc.name || brandDoc.brandName || ""),
       createdBy: actor,
@@ -1667,20 +1641,14 @@ exports.createCampaign = async (req, res) => {
         ? v.rel.subs.map((s) => String(s.name || ""))
         : [],
     });
-    console.timeEnd("buildCampaignDoc");
 
-    console.time("Campaign.create");
     const created = await Campaign.create(docToCreate);
-    console.timeEnd("Campaign.create");
 
     if (status === "draft" && actor.role === "admin") {
-      console.time("notifyBrandDraftReady");
       await notifyBrandDraftReady(created).catch(console.error);
-      console.timeEnd("notifyBrandDraftReady");
     }
 
     if (status === "active") {
-      console.time("notifyMatchingInfluencersForNewCampaign");
       await notifyMatchingInfluencersForNewCampaign(
         {
           ...created.toObject(),
@@ -1688,14 +1656,9 @@ exports.createCampaign = async (req, res) => {
         },
         normalizeObjectIdArray(req.body.subcategoryIds)
       );
-      console.timeEnd("notifyMatchingInfluencersForNewCampaign");
     }
 
-    console.time("enrichCampaigns");
     const enriched = (await enrichCampaigns([created]))[0];
-    console.timeEnd("enrichCampaigns");
-
-    console.timeEnd("createCampaign.total");
 
     return ApiResponse.sendOk(
       res,
@@ -1704,7 +1667,6 @@ exports.createCampaign = async (req, res) => {
       requestId
     );
   } catch (err) {
-    console.timeEnd("createCampaign.total");
     return sendControllerError(res, requestId, err);
   }
 };
@@ -4391,11 +4353,11 @@ exports.getAllActiveCampaignsForInfluencer = async (req, res) => {
 
     const influencerLookup = mongoose.Types.ObjectId.isValid(String(influencerId))
       ? {
-        $or: [
-          { _id: influencerId },
-          { influencerId: String(influencerId) }
-        ]
-      }
+          $or: [
+            { _id: influencerId },
+            { influencerId: String(influencerId) }
+          ]
+        }
       : { influencerId: String(influencerId) };
 
     const influencer = await Influencer.findOne(
@@ -4911,10 +4873,10 @@ exports.getCampaignsByBrandId = async (req, res) => {
 
     const cats = categoryIds.length
       ? await Category.find({
-        _id: { $in: categoryIds.map((id) => toObjectId(id)) },
-      })
-        .select("_id name")
-        .lean()
+          _id: { $in: categoryIds.map((id) => toObjectId(id)) },
+        })
+          .select("_id name")
+          .lean()
       : [];
 
     const catMap = new Map(cats.map((c) => [String(c._id), c]));
@@ -4924,30 +4886,30 @@ exports.getCampaignsByBrandId = async (req, res) => {
 
     const contractStatsRaw = campaignIds.length
       ? await Contract.aggregate([
-        {
-          $match: {
-            brandId: { $in: [toObjectId(brandId), brandId] },
-            campaignId: { $in: campaignIds },
-          },
-        },
-        {
-          $group: {
-            _id: "$campaignId",
-            contractsCount: { $sum: 1 },
-            applicantCount: { $sum: 1 },
-            acceptedCount: {
-              $sum: {
-                $cond: [{ $eq: ["$isAccepted", 1] }, 1, 0],
-              },
-            },
-            assignedCount: {
-              $sum: {
-                $cond: [{ $eq: ["$isAssigned", 1] }, 1, 0],
-              },
+          {
+            $match: {
+              brandId: { $in: [toObjectId(brandId), brandId] },
+              campaignId: { $in: campaignIds },
             },
           },
-        },
-      ])
+          {
+            $group: {
+              _id: "$campaignId",
+              contractsCount: { $sum: 1 },
+              applicantCount: { $sum: 1 },
+              acceptedCount: {
+                $sum: {
+                  $cond: [{ $eq: ["$isAccepted", 1] }, 1, 0],
+                },
+              },
+              assignedCount: {
+                $sum: {
+                  $cond: [{ $eq: ["$isAssigned", 1] }, 1, 0],
+                },
+              },
+            },
+          },
+        ])
       : [];
 
     const contractMap = new Map(
@@ -5926,193 +5888,6 @@ exports.rejectedCampaign = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: err.message,
-    });
-  }
-};
-
-exports.enableCampaignShare = async (req, res) => {
-  const requestId = getRequestId(req);
-
-  try {
-    const { campaignId, brandId } = req.body;
-
-    if (!campaignId || !mongoose.Types.ObjectId.isValid(campaignId)) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
-    }
-
-    if (!brandId || !mongoose.Types.ObjectId.isValid(brandId)) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid brandId is required", requestId);
-    }
-
-    const campaign = await Campaign.findOne({
-      _id: campaignId,
-      brandId: brandId,
-    });
-
-    if (!campaign) {
-      return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
-    }
-
-    if (!campaign.publicShareToken) {
-      const crypto = require("crypto");
-      campaign.publicShareToken = crypto.randomBytes(16).toString("hex");
-    }
-
-    campaign.isPublic = true;
-    await campaign.save();
-
-    const ALLOWED_FRONTEND_ORIGINS = [
-      "https://collabglam.com",
-      "http://localhost:3000",
-      "http://192.168.1.57:3000",
-    ];
-
-    const requestOrigin = String(req.headers.origin || "").trim();
-
-    const frontendBase = ALLOWED_FRONTEND_ORIGINS.includes(requestOrigin)
-      ? requestOrigin
-      : "https://collabglam.com";
-
-    const shareUrl = `${frontendBase}/campaign/share/${campaign.publicShareToken}`;
-
-    return ApiResponse.sendOk(
-      res,
-      200,
-      {
-        message: "Public share link enabled",
-        shareUrl,
-        publicShareToken: campaign.publicShareToken,
-        isPublic: true,
-      },
-      requestId
-    );
-  } catch (err) {
-    return sendControllerError(res, requestId, err);
-  }
-};
-
-exports.disableCampaignShare = async (req, res) => {
-  const requestId = getRequestId(req);
-
-  try {
-    const { campaignId, brandId } = req.body;
-
-    if (!campaignId || !mongoose.Types.ObjectId.isValid(campaignId)) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
-    }
-
-    if (!brandId || !mongoose.Types.ObjectId.isValid(brandId)) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid brandId is required", requestId);
-    }
-
-    const campaign = await Campaign.findOne({
-      _id: campaignId,
-      brandId: brandId,
-    });
-
-    if (!campaign) {
-      return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
-    }
-
-    campaign.isPublic = false;
-    await campaign.save();
-
-    return ApiResponse.sendOk(
-      res,
-      200,
-      {
-        message: "Public share link disabled",
-        isPublic: false,
-      },
-      requestId
-    );
-  } catch (err) {
-    return sendControllerError(res, requestId, err);
-  }
-};
-
-exports.getPublicCampaignByToken = async (req, res) => {
-  const requestId = getRequestId(req);
-
-  try {
-    const { token } = req.params;
-
-    if (!token || !String(token).trim()) {
-      return fail(res, 400, "VALIDATION_ERROR", "Valid token is required", requestId);
-    }
-
-    const campaign = await Campaign.findOne({
-      publicShareToken: token,
-      isPublic: true,
-    }).lean();
-
-    if (!campaign) {
-      return fail(res, 404, "NOT_FOUND", "Campaign not found or not public", requestId);
-    }
-
-    return ApiResponse.sendOk(
-      res,
-      200,
-      {
-        doc: {
-          _id: campaign._id,
-          campaignTitle: campaign.campaignTitle,
-          description: campaign.description,
-          campaignType: campaign.campaignType,
-          campaignBudget: campaign.campaignBudget,
-          budget: campaign.budget,
-          paymentType: campaign.paymentType,
-          platformSelection: campaign.platformSelection || [],
-          targetCountryIds: campaign.targetCountryIds || [],
-          targetAgeRanges: campaign.targetAgeRanges || [],
-          productImages: campaign.productImages || [],
-          productLink: campaign.productLink || "",
-          videoLink: campaign.videoLink || "",
-          additionalNotes: campaign.additionalNotes || "",
-          startAt: campaign.startAt,
-          endAt: campaign.endAt,
-          status: campaign.status,
-          brandName: campaign.brandName || "",
-          categoryId: campaign.categoryId || null,
-          subcategoryIds: campaign.subcategoryIds || [],
-          contentFormats: campaign.contentFormats || [],
-          contentLanguageIds: campaign.contentLanguageIds || [],
-          preferredHashtags: campaign.preferredHashtags || [],
-          campaignGoals: campaign.campaignGoals || [],
-        },
-      },
-      requestId
-    );
-  } catch (err) {
-    return sendControllerError(res, requestId, err);
-  }
-};
-
-exports.uploadImagesToS3 = async (req, res) => {
-  try {
-    if (!req.files || !Array.isArray(req.files) || req.files.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "At least one image is required",
-      });
-    }
-
-    const uploadedImages = await uploadMultipleFilesToS3(
-      req.files,
-      "campaign-images"
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: "Images uploaded successfully",
-      count: uploadedImages.length,
-      urls: uploadedImages.map((item) => item.url),
-    });
-  } catch (error) {
-    console.error("uploadImagesToS3 error:", error);
-    return res.status(500).json({
-      success: false,
-      message: error.message || "Failed to upload images",
     });
   }
 };

@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-
+const uploadImages = require("../middlewares/uploadImages")
 const campaignController = require("../controllers/campaignsController");
 const { verifyBrandOrAdmin } = require("../middlewares/verifyBrandOrAdmin");
 const { brandAuth } = require("../auth/brandAuth");
@@ -74,7 +74,7 @@ router.post(
   campaignController.getAllActiveCampaignsForInfluencer
 );
 
-
+router.post("/upload-image",uploadImages.array("images", 10),campaignController.uploadImagesToS3)
 router.post("/get-by-brand", brandAuth,campaignController.getCampaignsByBrandId);
 
 router.post("/edit-draft", brandAuth, campaignController.editDraftCampaign);

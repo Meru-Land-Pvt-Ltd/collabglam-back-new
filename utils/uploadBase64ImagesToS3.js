@@ -5,8 +5,8 @@ require("dotenv").config();
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
   credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID1,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY1,
   },
 });
 
@@ -139,7 +139,62 @@ async function normalizeAndUploadProductImages(productImages) {
 
   return output;
 }
+async function uploadSingleFileToS3(file, prefix = "campaign-images") {
+  if (!file) {
+    throw new Error("No file provided");
+  }
 
+  const contentType = file.mimetype;
+  const extension = ALLOWED_TYPES[contentType];
+
+  if (!extension) {
+    throw new Error(`Unsupported image type: ${contentType}`);
+  }
+
+  if (!file.buffer || !file.buffer.length) {
+    throw new Error("Empty file buffer");
+  }
+
+  const fileName = `${Date.now()}-${crypto.randomUUID()}.${extension}`;
+  const key = `${prefix}/${fileName}`;
+
+  const command = new PutObjectCommand({
+    Bucket: process.env.AWS_S3_BUCKET_NAME,
+    Key: key,
+    Body: file.buffer,
+    ContentType: contentType,
+  });
+
+  await s3.send(command);
+
+  const url = `https://${process.env.AWS_S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+
+  return {
+    name: file.originalname || fileName,
+    key,
+    url,
+    dataUrl: url,
+    contentType,
+    size: file.size || file.buffer.length,
+  };
+}
+
+async function uploadMultipleFilesToS3(files = [], prefix = "campaign-images") {
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new Error("No files provided");
+  }
+
+  const uploadedFiles = [];
+
+  for (const file of files) {
+    const uploaded = await uploadSingleFileToS3(file, prefix);
+    uploadedFiles.push(uploaded);
+  }
+
+  return uploadedFiles;
+}
 module.exports = {
   normalizeAndUploadProductImages,
+  uploadSingleFileToS3,
+  uploadMultipleFilesToS3
 };
