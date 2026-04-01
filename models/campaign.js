@@ -209,7 +209,13 @@ const CampaignSchema = new Schema(
     createdBy: { type: actorSchema, default: null },
     pendingUpdate: { type: pendingUpdateSchema, default: () => ({ status: "none" }) },
     isPublic: { type: Boolean, default: false },
-    publicShareToken: { type: String, default: null, index: true },
+    publicShareToken: {
+      type: String,
+      default: null,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
   },
 
   {

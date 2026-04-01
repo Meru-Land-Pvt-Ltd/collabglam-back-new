@@ -134,7 +134,7 @@ function uniqueValidObjectIds(ids) {
 }
 
 const PROXY_MAIL_DOMAIN =
-  process.env.PROXY_MAIL_DOMAIN || "mail.collabglam.cloud";
+  process.env.PROXY_MAIL_DOMAIN || "mail.collabglam.com";
 
 function slugifyInfluencerName(name = "") {
   const base = String(name || "")
@@ -1009,7 +1009,7 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
 
     const expiresIn = process.env.JWT_EXPIRES_IN || "7d";
     const proxyMailDomain =
-      process.env.PROXY_MAIL_DOMAIN || "mail.collabglam.cloud";
+      process.env.PROXY_MAIL_DOMAIN || "mail.collabglam.com";
 
     if (!email || !isValidEmail(email)) {
       return res.status(400).json({ message: "Valid email is required" });

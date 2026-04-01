@@ -20,16 +20,89 @@ const toNumber = (v, def = 0) => {
   return def;
 };
 
-const calcFrozenAll = (freezes) =>
-  (freezes || []).reduce((sum, f) => sum + (Number(f.freezeAmount) || 0), 0);
+const calcAllocationTotal = (allocations = []) =>
+  allocations.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+
+const calcReleasedTotal = (allocations = []) =>
+  allocations.reduce((sum, item) => sum + (Number(item.releasedAmount) || 0), 0);
+
+const syncCampaignFreeze = (freeze) => {
+  if (!freeze) return null;
+
+  freeze.influencerAllocations = Array.isArray(freeze.influencerAllocations)
+    ? freeze.influencerAllocations
+    : [];
+
+  const totalFrozenAmount = Number(freeze.totalFrozenAmount || 0);
+  const totalAllocatedAmount = calcAllocationTotal(freeze.influencerAllocations);
+  const totalReleasedAmount = calcReleasedTotal(freeze.influencerAllocations);
+
+  freeze.totalAllocatedAmount = totalAllocatedAmount;
+  freeze.totalReleasedAmount = totalReleasedAmount;
+
+  freeze.currentFrozenAmount = Math.max(
+    0,
+    totalFrozenAmount - totalReleasedAmount
+  );
+
+  freeze.availableToAllocate = Math.max(
+    0,
+    totalFrozenAmount - totalAllocatedAmount
+  );
+
+  return freeze;
+};
+
+const calcFrozenAll = (freezes = []) =>
+  freezes.reduce((sum, freeze) => {
+    syncCampaignFreeze(freeze);
+    return sum + (Number(freeze.currentFrozenAmount) || 0);
+  }, 0);
 
 const syncUsableBalance = (wallet) => {
-  const frozenAll = calcFrozenAll(wallet.freezes || []);
+  wallet.freezes = Array.isArray(wallet.freezes) ? wallet.freezes : [];
+  wallet.freezes.forEach(syncCampaignFreeze);
+
+  const frozenAll = calcFrozenAll(wallet.freezes);
   wallet.usableBalance = Math.max(
     0,
     (Number(wallet.walletBalance) || 0) - frozenAll
   );
-  return { frozenAll, usableBalance: wallet.usableBalance };
+
+  return {
+    walletBalance: Number(wallet.walletBalance) || 0,
+    frozenBalance: frozenAll,
+    usableBalance: wallet.usableBalance,
+  };
+};
+
+const ensureCampaignFreeze = (wallet, brandId, campaignId) => {
+  wallet.freezes = Array.isArray(wallet.freezes) ? wallet.freezes : [];
+
+  let freezeIndex = wallet.freezes.findIndex(
+    (f) =>
+      String(f.brandId) === String(brandId) &&
+      String(f.campaignId) === String(campaignId)
+  );
+
+  if (freezeIndex === -1) {
+    wallet.freezes.push({
+      brandId,
+      campaignId,
+      totalFrozenAmount: 0,
+      currentFrozenAmount: 0,
+      totalAllocatedAmount: 0,
+      totalReleasedAmount: 0,
+      availableToAllocate: 0,
+      influencerAllocations: [],
+    });
+
+    freezeIndex = wallet.freezes.length - 1;
+  }
+
+  const campaignFreeze = wallet.freezes[freezeIndex];
+  syncCampaignFreeze(campaignFreeze);
+  return campaignFreeze;
 };
 
 const getOrCreateWallet = async (brandId) => {
@@ -102,25 +175,17 @@ const getBrandWallet = async (req, res) => {
       );
     }
 
-    const frozenBalance = calcFrozenAll(wallet.freezes || []);
-    const correctUsable = Math.max(
-      0,
-      (Number(wallet.walletBalance) || 0) - frozenBalance
-    );
-
-    if (Number(wallet.usableBalance) !== correctUsable) {
-      wallet.usableBalance = correctUsable;
-      await wallet.save();
-    }
+    const snap = syncUsableBalance(wallet);
+    await wallet.save();
 
     return ApiResponse.sendOk(
       res,
       HttpStatus.OK,
       {
         brandId,
-        walletBalance: wallet.walletBalance,
-        frozenBalance,
-        usableBalance: wallet.usableBalance,
+        walletBalance: snap.walletBalance,
+        frozenBalance: snap.frozenBalance,
+        usableBalance: snap.usableBalance,
         freezes: wallet.freezes || [],
       },
       requestId
@@ -163,6 +228,16 @@ const topupBrandWallet = async (req, res) => {
       );
     }
 
+    if (!campaignId) {
+      return ApiResponse.sendFail(
+        res,
+        HttpStatus.BAD_REQUEST,
+        EC("VALIDATION_ERROR"),
+        "campaignId is required",
+        requestId
+      );
+    }
+
     if (!amount || amount <= 0) {
       return ApiResponse.sendFail(
         res,
@@ -199,10 +274,8 @@ const topupBrandWallet = async (req, res) => {
             currency,
             unit_amount: Math.round(amount * 100),
             product_data: {
-              name: "Brand wallet topup",
-              description: campaignId
-                ? `Wallet topup for campaign ${campaignId}`
-                : "Wallet topup",
+              name: "Campaign wallet topup",
+              description: `Wallet topup for campaign ${campaignId}`,
             },
           },
         },
@@ -221,6 +294,7 @@ const topupBrandWallet = async (req, res) => {
       {
         message: "Stripe checkout session created",
         brandId,
+        campaignId,
         amount,
         currency,
         sessionId: session.id,
@@ -243,7 +317,7 @@ const topupBrandWallet = async (req, res) => {
 // ======================================================================
 // POST /brand-wallet/topup/confirm
 // body: { brandId, sessionId }
-// Verifies Stripe payment and credits wallet
+// Verifies Stripe payment and credits wallet + freezes that amount to campaign
 // ======================================================================
 const confirmBrandWalletTopup = async (req, res) => {
   const requestId = getRequestId(req);
@@ -310,6 +384,7 @@ const confirmBrandWalletTopup = async (req, res) => {
 
     const amount = toNumber(session.amount_total, 0) / 100;
     const currency = clean(session.currency || "inr").toLowerCase();
+    const campaignId = clean(session.metadata?.campaignId);
 
     if (!amount || amount <= 0) {
       return ApiResponse.sendFail(
@@ -321,9 +396,19 @@ const confirmBrandWalletTopup = async (req, res) => {
       );
     }
 
+    if (!campaignId) {
+      return ApiResponse.sendFail(
+        res,
+        HttpStatus.BAD_REQUEST,
+        EC("VALIDATION_ERROR"),
+        "campaignId missing in Stripe session metadata",
+        requestId
+      );
+    }
+
     const wallet = await getOrCreateWallet(brandId);
 
-    wallet.topups = wallet.topups || [];
+    wallet.topups = Array.isArray(wallet.topups) ? wallet.topups : [];
 
     const alreadyCredited = wallet.topups.some(
       (t) =>
@@ -340,6 +425,7 @@ const confirmBrandWalletTopup = async (req, res) => {
       wallet.topups.push({
         amount,
         currency,
+        campaignId,
         status: "success",
         stripeSessionId: session.id,
         stripePaymentIntentId:
@@ -349,6 +435,16 @@ const confirmBrandWalletTopup = async (req, res) => {
         createdAt: new Date(),
       });
 
+      const campaignFreeze = ensureCampaignFreeze(wallet, brandId, campaignId);
+
+      campaignFreeze.totalFrozenAmount =
+        Number(campaignFreeze.totalFrozenAmount || 0) + amount;
+
+      syncCampaignFreeze(campaignFreeze);
+
+      wallet.markModified("freezes");
+      wallet.markModified("topups");
+
       syncUsableBalance(wallet);
       await wallet.save();
     } else {
@@ -356,7 +452,11 @@ const confirmBrandWalletTopup = async (req, res) => {
       await wallet.save();
     }
 
-    const frozenBalance = calcFrozenAll(wallet.freezes || []);
+    const campaignFreeze = (wallet.freezes || []).find(
+      (f) =>
+        String(f.brandId) === String(brandId) &&
+        String(f.campaignId) === String(campaignId)
+    );
 
     return ApiResponse.sendOk(
       res,
@@ -364,12 +464,14 @@ const confirmBrandWalletTopup = async (req, res) => {
       {
         message: alreadyCredited
           ? "Wallet topup already confirmed"
-          : "Wallet topped up successfully",
+          : "Campaign wallet topped up successfully",
         brandId,
+        campaignId,
         addedAmount: amount,
         walletBalance: wallet.walletBalance,
-        frozenBalance,
+        frozenBalance: calcFrozenAll(wallet.freezes || []),
         usableBalance: wallet.usableBalance,
+        campaignFreeze: campaignFreeze || null,
       },
       requestId
     );
@@ -421,24 +523,81 @@ const getFrozenAmountForCampaign = async (req, res) => {
         {
           brandId,
           campaignId,
-          influencerId: influencerId || null,
-          frozenAmount: 0,
+          totalFrozenAmount: 0,
+          currentFrozenAmount: 0,
+          totalAllocatedAmount: 0,
+          totalReleasedAmount: 0,
+          availableToAllocate: 0,
+          influencer: influencerId
+            ? {
+              influencerId,
+              amount: 0,
+              releasedAmount: 0,
+              pendingAmount: 0,
+            }
+            : null,
         },
         requestId
       );
     }
 
-    let frozenAmount = 0;
+    const campaignFreeze = (wallet.freezes || []).find(
+      (f) =>
+        String(f.brandId) === String(brandId) &&
+        String(f.campaignId) === String(campaignId)
+    );
 
-    for (const f of wallet.freezes || []) {
-      const sameCampaign = String(f.campaignId) === String(campaignId);
-      const sameInfluencer = influencerId
-        ? String(f.influencerId) === String(influencerId)
-        : true;
+    if (!campaignFreeze) {
+      return ApiResponse.sendOk(
+        res,
+        HttpStatus.OK,
+        {
+          brandId,
+          campaignId,
+          totalFrozenAmount: 0,
+          currentFrozenAmount: 0,
+          totalAllocatedAmount: 0,
+          totalReleasedAmount: 0,
+          availableToAllocate: 0,
+          influencer: influencerId
+            ? {
+              influencerId,
+              amount: 0,
+              releasedAmount: 0,
+              pendingAmount: 0,
+            }
+            : null,
+        },
+        requestId
+      );
+    }
 
-      if (sameCampaign && sameInfluencer) {
-        frozenAmount += Number(f.freezeAmount) || 0;
-      }
+    syncCampaignFreeze(campaignFreeze);
+
+    let influencer = null;
+
+    if (influencerId) {
+      const allocation = (campaignFreeze.influencerAllocations || []).find(
+        (a) => String(a.influencerId) === String(influencerId)
+      );
+
+      influencer = allocation
+        ? {
+          influencerId,
+          amount: Number(allocation.amount || 0),
+          releasedAmount: Number(allocation.releasedAmount || 0),
+          pendingAmount: Math.max(
+            0,
+            Number(allocation.amount || 0) -
+            Number(allocation.releasedAmount || 0)
+          ),
+        }
+        : {
+          influencerId,
+          amount: 0,
+          releasedAmount: 0,
+          pendingAmount: 0,
+        };
     }
 
     return ApiResponse.sendOk(
@@ -447,8 +606,12 @@ const getFrozenAmountForCampaign = async (req, res) => {
       {
         brandId,
         campaignId,
-        influencerId: influencerId || null,
-        frozenAmount,
+        totalFrozenAmount: Number(campaignFreeze.totalFrozenAmount || 0),
+        currentFrozenAmount: Number(campaignFreeze.currentFrozenAmount || 0),
+        totalAllocatedAmount: Number(campaignFreeze.totalAllocatedAmount || 0),
+        totalReleasedAmount: Number(campaignFreeze.totalReleasedAmount || 0),
+        availableToAllocate: Number(campaignFreeze.availableToAllocate || 0),
+        influencer,
       },
       requestId
     );
@@ -470,6 +633,8 @@ module.exports = {
   confirmBrandWalletTopup,
   getFrozenAmountForCampaign,
   calcFrozenAll,
+  syncCampaignFreeze,
   syncUsableBalance,
+  ensureCampaignFreeze,
   getOrCreateWallet,
 };
