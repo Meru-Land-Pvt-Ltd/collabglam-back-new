@@ -896,17 +896,19 @@ exports.releaseMilestone = async (req, res) => {
     const freezeIndex = (wallet.freezes || []).findIndex(
       (f) =>
         String(f.brandId) === String(doc.brandId) &&
-        String(f.campaignId) === String(entry.campaignId) &&
-        String(f.influencerId) === String(entry.influencerId)
+        String(f.campaignId) === String(entry.campaignId)
     );
 
     if (freezeIndex < 0) {
       return res.status(400).json({
-        message: "Frozen amount not found for this campaign and influencer.",
+        message: "Frozen amount not found for this campaign.",
       });
     }
 
-    const frozenAmount = Number(wallet.freezes[freezeIndex].freezeAmount || 0);
+    const campaignFreeze = wallet.freezes[freezeIndex];
+    syncCampaignFreeze(campaignFreeze);
+
+    const frozenAmount = Number(campaignFreeze.currentFrozenAmount || 0);
     const releaseAmount = Number(entry.amount || 0);
 
     if (frozenAmount < releaseAmount) {
@@ -917,9 +919,29 @@ exports.releaseMilestone = async (req, res) => {
       });
     }
 
-    wallet.freezes[freezeIndex].freezeAmount = Math.max(0, frozenAmount - releaseAmount);
+    campaignFreeze.influencerAllocations = Array.isArray(campaignFreeze.influencerAllocations)
+      ? campaignFreeze.influencerAllocations
+      : [];
 
-    if (wallet.freezes[freezeIndex].freezeAmount === 0) {
+    const allocationIndex = campaignFreeze.influencerAllocations.findIndex(
+      (a) => String(a.influencerId) === String(entry.influencerId)
+    );
+
+    if (allocationIndex >= 0) {
+      campaignFreeze.influencerAllocations[allocationIndex].releasedAmount =
+        Number(campaignFreeze.influencerAllocations[allocationIndex].releasedAmount || 0) +
+        releaseAmount;
+    } else {
+      campaignFreeze.influencerAllocations.push({
+        influencerId: entry.influencerId,
+        amount: 0,
+        releasedAmount: releaseAmount,
+      });
+    }
+
+    syncCampaignFreeze(campaignFreeze);
+
+    if (Number(campaignFreeze.currentFrozenAmount || 0) === 0) {
       wallet.freezes.splice(freezeIndex, 1);
     }
 
@@ -940,8 +962,7 @@ exports.releaseMilestone = async (req, res) => {
     createAndEmit({
       influencerId: entry.influencerId,
       type: "milestone.initiated",
-      title: `Milestone payout initiated${entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ""
-        }`,
+      title: `Milestone payout initiated${entry.milestoneTitle ? `: ${entry.milestoneTitle}` : ""}`,
       message:
         `Brand has released $${Number(entry.amount).toFixed(2)} for this campaign. ` +
         `It should be received within 24 - 48 hrs.`,

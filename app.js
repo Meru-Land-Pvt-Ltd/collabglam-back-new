@@ -64,7 +64,7 @@ const server = http.createServer(app);
 const GridFSBucket = mongoose.mongo.GridFSBucket;
 const { Types } = mongoose;
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 8000;
 const JSON_LIMIT = process.env.JSON_LIMIT || "50mb";
 const URLENCODED_LIMIT = process.env.URLENCODED_LIMIT || "50mb";
 const FILE_SIZE_LIMIT_MB = Number(process.env.FILE_SIZE_LIMIT_MB || 100);
@@ -425,7 +425,7 @@ app.use((err, req, res, next) => {
 ========================================================= */
 async function bootstrap() {
   try {
-    await mongoose.connect(process.env.MONGODB_URI, {
+    await mongoose.connect(process.env.MONGODB_URI1, {
       autoIndex: false,
       maxPoolSize: 20,
       minPoolSize: 5,
