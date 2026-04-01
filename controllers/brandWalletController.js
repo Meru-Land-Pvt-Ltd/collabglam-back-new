@@ -79,14 +79,14 @@ const syncUsableBalance = (wallet) => {
 const ensureCampaignFreeze = (wallet, brandId, campaignId) => {
   wallet.freezes = Array.isArray(wallet.freezes) ? wallet.freezes : [];
 
-  let campaignFreeze = wallet.freezes.find(
+  let freezeIndex = wallet.freezes.findIndex(
     (f) =>
       String(f.brandId) === String(brandId) &&
       String(f.campaignId) === String(campaignId)
   );
 
-  if (!campaignFreeze) {
-    campaignFreeze = {
+  if (freezeIndex === -1) {
+    wallet.freezes.push({
       brandId,
       campaignId,
       totalFrozenAmount: 0,
@@ -95,11 +95,12 @@ const ensureCampaignFreeze = (wallet, brandId, campaignId) => {
       totalReleasedAmount: 0,
       availableToAllocate: 0,
       influencerAllocations: [],
-    };
+    });
 
-    wallet.freezes.push(campaignFreeze);
+    freezeIndex = wallet.freezes.length - 1;
   }
 
+  const campaignFreeze = wallet.freezes[freezeIndex];
   syncCampaignFreeze(campaignFreeze);
   return campaignFreeze;
 };
@@ -435,10 +436,15 @@ const confirmBrandWalletTopup = async (req, res) => {
       });
 
       const campaignFreeze = ensureCampaignFreeze(wallet, brandId, campaignId);
+
       campaignFreeze.totalFrozenAmount =
         Number(campaignFreeze.totalFrozenAmount || 0) + amount;
 
       syncCampaignFreeze(campaignFreeze);
+
+      wallet.markModified("freezes");
+      wallet.markModified("topups");
+
       syncUsableBalance(wallet);
       await wallet.save();
     } else {
@@ -524,11 +530,11 @@ const getFrozenAmountForCampaign = async (req, res) => {
           availableToAllocate: 0,
           influencer: influencerId
             ? {
-                influencerId,
-                amount: 0,
-                releasedAmount: 0,
-                pendingAmount: 0,
-              }
+              influencerId,
+              amount: 0,
+              releasedAmount: 0,
+              pendingAmount: 0,
+            }
             : null,
         },
         requestId
@@ -555,11 +561,11 @@ const getFrozenAmountForCampaign = async (req, res) => {
           availableToAllocate: 0,
           influencer: influencerId
             ? {
-                influencerId,
-                amount: 0,
-                releasedAmount: 0,
-                pendingAmount: 0,
-              }
+              influencerId,
+              amount: 0,
+              releasedAmount: 0,
+              pendingAmount: 0,
+            }
             : null,
         },
         requestId
@@ -577,21 +583,21 @@ const getFrozenAmountForCampaign = async (req, res) => {
 
       influencer = allocation
         ? {
-            influencerId,
-            amount: Number(allocation.amount || 0),
-            releasedAmount: Number(allocation.releasedAmount || 0),
-            pendingAmount: Math.max(
-              0,
-              Number(allocation.amount || 0) -
-                Number(allocation.releasedAmount || 0)
-            ),
-          }
+          influencerId,
+          amount: Number(allocation.amount || 0),
+          releasedAmount: Number(allocation.releasedAmount || 0),
+          pendingAmount: Math.max(
+            0,
+            Number(allocation.amount || 0) -
+            Number(allocation.releasedAmount || 0)
+          ),
+        }
         : {
-            influencerId,
-            amount: 0,
-            releasedAmount: 0,
-            pendingAmount: 0,
-          };
+          influencerId,
+          amount: 0,
+          releasedAmount: 0,
+          pendingAmount: 0,
+        };
     }
 
     return ApiResponse.sendOk(
