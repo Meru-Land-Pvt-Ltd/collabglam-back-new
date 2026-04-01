@@ -425,7 +425,7 @@ app.use((err, req, res, next) => {
 ========================================================= */
 async function bootstrap() {
   try {
-    await mongoose.connect(process.env.MONGODB_URI1, {
+    await mongoose.connect(process.env.MONGODB_URI, {
       autoIndex: false,
       maxPoolSize: 20,
       minPoolSize: 5,
