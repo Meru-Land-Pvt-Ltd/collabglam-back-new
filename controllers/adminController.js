@@ -27,6 +27,14 @@ const SubscriptionPlan = require("../models/subscription");
 const PortalSettings = require("../models/portalSettings");
 const BrandAssigned = require("../models/brandAssigned");
 
+const { BrandWalletModel } = require("../models/brandWallet");
+const {
+  syncCampaignFreeze,
+  syncUsableBalance,
+  ensureCampaignFreeze,
+  getOrCreateWallet,
+} = require("../controllers/brandWalletController");
+
 const { _sendCampaignInvitationInternal } = require("../controllers/emailController");
 
 const ASSIGNEE_MODEL = AdminModel || Admin;
@@ -2757,6 +2765,141 @@ exports.getPublicCampaignByToken = async (req, res) => {
     );
   } catch (err) {
     return sendControllerError(res, requestId, err);
+  }
+};
+
+exports.adminAddCampaignFunds = async (req, res) => {
+  try {
+    const brandId = String(req.body?.brandId || "").trim();
+    const campaignId = String(req.body?.campaignId || "").trim();
+    const currency = String(req.body?.currency || "usd").trim().toLowerCase();
+    const note = String(
+      req.body?.note || "Admin added campaign funds manually"
+    ).trim();
+    const amount = Number(req.body?.amount || 0);
+
+    const adminId = String(req.admin?.adminId || req.admin?._id || "").trim();
+    const adminEmail = String(req.admin?.email || "").trim();
+
+    if (!brandId) {
+      return res.status(400).json({
+        success: false,
+        message: "brandId is required",
+      });
+    }
+
+    if (!campaignId) {
+      return res.status(400).json({
+        success: false,
+        message: "campaignId is required",
+      });
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "amount must be a valid number greater than 0",
+      });
+    }
+
+    const campaignFilter = {
+      $or: [{ campaignsId: campaignId }],
+    };
+
+    if (mongoose.Types.ObjectId.isValid(campaignId)) {
+      campaignFilter.$or.push({ _id: new mongoose.Types.ObjectId(campaignId) });
+    }
+
+    const campaign = await Campaign.findOne(campaignFilter).lean();
+
+    if (!campaign) {
+      return res.status(404).json({
+        success: false,
+        message: "Campaign not found",
+      });
+    }
+
+    if (String(campaign.brandId) !== String(brandId)) {
+      return res.status(400).json({
+        success: false,
+        message: "This campaign does not belong to the provided brandId",
+      });
+    }
+
+    const normalizedCampaignId = String(campaign.campaignsId || campaign._id);
+
+    const wallet = await getOrCreateWallet(brandId);
+    wallet.topups = Array.isArray(wallet.topups) ? wallet.topups : [];
+
+    wallet.walletBalance = Math.max(
+      0,
+      Number(wallet.walletBalance || 0) + amount
+    );
+
+    const campaignFreeze = ensureCampaignFreeze(
+      wallet,
+      brandId,
+      normalizedCampaignId
+    );
+
+    campaignFreeze.totalFrozenAmount =
+      Number(campaignFreeze.totalFrozenAmount || 0) + amount;
+
+    syncCampaignFreeze(campaignFreeze);
+
+    wallet.topups.push({
+      amount,
+      currency,
+      campaignId: normalizedCampaignId,
+      status: "success",
+      paymentIntentId: null,
+      stripeSessionId: null,
+      stripePaymentIntentId: null,
+      source: "admin_manual",
+      note,
+      addedByAdminId: adminId || null,
+      addedByAdminEmail: adminEmail || null,
+      createdAt: new Date(),
+    });
+
+    wallet.markModified("freezes");
+    wallet.markModified("topups");
+
+    const walletSnap = syncUsableBalance(wallet);
+    await wallet.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Campaign funds added and frozen successfully",
+      data: {
+        brandId,
+        campaignId: normalizedCampaignId,
+        campaignMongoId: String(campaign._id),
+        addedAmount: amount,
+        currency,
+        wallet: {
+          walletBalance: walletSnap.walletBalance,
+          frozenBalance: walletSnap.frozenBalance,
+          usableBalance: walletSnap.usableBalance,
+        },
+        campaignFreeze: {
+          brandId: campaignFreeze.brandId,
+          campaignId: campaignFreeze.campaignId,
+          totalFrozenAmount: Number(campaignFreeze.totalFrozenAmount || 0),
+          currentFrozenAmount: Number(campaignFreeze.currentFrozenAmount || 0),
+          totalAllocatedAmount: Number(campaignFreeze.totalAllocatedAmount || 0),
+          totalReleasedAmount: Number(campaignFreeze.totalReleasedAmount || 0),
+          availableToAllocate: Number(campaignFreeze.availableToAllocate || 0),
+          influencerAllocations: campaignFreeze.influencerAllocations || [],
+        },
+      },
+    });
+  } catch (error) {
+    console.error("adminAddCampaignFunds error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error?.message || "Internal server error",
+    });
   }
 };
 

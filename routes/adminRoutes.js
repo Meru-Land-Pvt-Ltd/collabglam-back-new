@@ -24,6 +24,7 @@ const {
   enableCampaignShare,
   disableCampaignShare,
   getPublicCampaignByToken,
+  adminAddCampaignFunds,
 } = require("../controllers/adminController");
 
 const { adminAuth } = require("../middlewares/adminAuth");
@@ -68,5 +69,7 @@ router.post("/assignInfluencerPlan", adminAuth, adminAssignInfluencerPlan);
 router.post("/campaign/share/enable", adminAuth, enableCampaignShare);
 router.post("/campaign/share/disable", adminAuth, disableCampaignShare);
 router.get("/campaign/share/:token", getPublicCampaignByToken);
+
+router.post("/campaign/add-funds", adminAuth, adminAddCampaignFunds);
 
 module.exports = router;

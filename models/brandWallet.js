@@ -46,13 +46,19 @@ const WalletTopupSchema = new Schema(
     createdAt: { type: Date, default: Date.now },
 
     paymentIntentId: { type: String, default: null },
-
-    // add these because controller is already using them
     stripeSessionId: { type: String, default: null },
     stripePaymentIntentId: { type: String, default: null },
 
-    // campaign-based topup
     campaignId: { type: String, default: null },
+
+    source: {
+      type: String,
+      enum: ["stripe", "admin_manual"],
+      default: "stripe",
+    },
+    note: { type: String, default: "" },
+    addedByAdminId: { type: String, default: null },
+    addedByAdminEmail: { type: String, default: null },
   },
   { _id: false }
 );
