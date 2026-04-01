@@ -3,6 +3,8 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const http = require("http");
 const path = require("path");
+const multer = require("multer");
+const { Readable } = require("stream");
 
 const { startReminderCron } = require("./services/reminderCron");
 const unseenMessageNotifier = require("./jobs/unseenMessageNotifier");
@@ -51,9 +53,9 @@ const supportRoutes = require("./routes/supportRoutes");
 const timezoneRoutes = require("./routes/timezoneRoutes");
 const adminEmailRoutes = require("./routes/adminEmailRoute");
 const groupChatRoutes = require("./routes/groupChatRoutes");
-const pipelineRoutes = require("./routes/influencerPipeline")
-const brandOuteachRoutes = require('./routes/brandOutreachRoutes');
-const brandNetworkRoutes = require('./routes/brandNetworkRoutes');
+const pipelineRoutes = require("./routes/influencerPipeline");
+const brandOuteachRoutes = require("./routes/brandOutreachRoutes");
+const brandNetworkRoutes = require("./routes/brandNetworkRoutes");
 const paymentDetailsRoutes = require("./routes/paymentDetailsRoutes");
 
 const app = express();
@@ -63,7 +65,9 @@ const GridFSBucket = mongoose.mongo.GridFSBucket;
 const { Types } = mongoose;
 
 const PORT = process.env.PORT || 5000;
-const JSON_LIMIT = process.env.JSON_LIMIT || "30mb";
+const JSON_LIMIT = process.env.JSON_LIMIT || "50mb";
+const URLENCODED_LIMIT = process.env.URLENCODED_LIMIT || "50mb";
+const FILE_SIZE_LIMIT_MB = Number(process.env.FILE_SIZE_LIMIT_MB || 100);
 const GRIDFS_BUCKET_NAME = process.env.GRIDFS_BUCKET || "uploads";
 
 const corsOrigins = process.env.FRONTEND_ORIGIN || [
@@ -87,7 +91,7 @@ app.set("broadcastToRoom", sockets.legacyBroadcastToRoom);
 app.set("broadcastToGroupChatRoom", sockets.broadcastToGroupChatRoom);
 
 /* =========================================================
-   MIDDLEWARE
+   CORS
 ========================================================= */
 app.use(
   cors({
@@ -96,77 +100,23 @@ app.use(
   })
 );
 
+/* =========================================================
+   BODY PARSERS
+   Keep JSON smaller. Large files should use multipart/form-data.
+========================================================= */
 app.use(express.json({ limit: JSON_LIMIT }));
 app.use(
   express.urlencoded({
     extended: true,
-    limit: JSON_LIMIT,
+    limit: URLENCODED_LIMIT,
     parameterLimit: 100000,
   })
 );
 
-// serve legacy local uploads if any old files still exist
+/* =========================================================
+   STATIC FILES
+========================================================= */
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
-/* =========================================================
-   ROUTES
-========================================================= */
-app.use("/influencer", influencerRoutes);
-app.use("/country", countryRoutes);
-app.use("/brand", brandRoutes);
-app.use("/campaign", campaignRoutes);
-app.use("/category", categoryRoutes);
-app.use("/audience", audienceRoutes);
-app.use("/apply", applyCampaingRoutes);
-app.use("/contract", contractRoutes);
-app.use("/milestone", milestoneRoutes);
-app.use("/subscription", subscriptionRoutes);
-app.use("/chat", chatRoutes);
-app.use("/payment", paymentRoutes);
-app.use("/admin", adminRoutes);
-app.use("/policy", policyRoutes);
-app.use("/contact", contactRoutes);
-app.use("/faqs", faqsRoutes);
-app.use("/dash", dashboardRoutes);
-app.use("/platform", platformRoutes);
-app.use("/audienceRange", audienceRangeRoutes);
-app.use("/filters", filtersRoutes);
-app.use("/media-kit", mediaKitRoutes);
-app.use("/modash", modashRoutes);
-app.use("/languages", languageRoutes);
-app.use("/business", businessRoutes);
-app.use("/unsubscribe", unsubscribeRoutes);
-app.use("/dispute", disputeRoutes);
-app.use("/notifications", notificationsRoutes);
-app.use("/emails", emailRoutes);
-app.use("/newinvitations", Invitationsroutes);
-app.use("/youtube", youtubeRoutes);
-app.use("/campaign-invitation", campaignInvitationRoutes);
-app.use("/deliverable", delieverableRoutes);
-app.use("/list", listRoutes);
-app.use("/wallet", brandWalletRoutes);
-app.use("/admins", masterRoutes);
-app.use("/support", supportRoutes);
-app.use("/timezone", timezoneRoutes);
-app.use("/admin-email", adminEmailRoutes);
-app.use("/group-chat", groupChatRoutes);
-app.use("/pipeline", pipelineRoutes);
-app.use("/brand-network", brandNetworkRoutes);
-app.use("/brand-outreach", brandOuteachRoutes)
-app.use('/pitch-folders', require('./routes/pitchFolderRoutes'));
-app.use('/payment-details', paymentDetailsRoutes);
-/* =========================================================
-   ERROR HANDLER
-========================================================= */
-app.use((err, req, res, next) => {
-  if (err && (err.type === "entity.too.large" || err.status === 413)) {
-    return res.status(413).json({
-      message: "Payload too large. Reduce size or increase JSON_LIMIT.",
-    });
-  }
-
-  return next(err);
-});
 
 /* =========================================================
    GRIDFS HELPERS
@@ -234,7 +184,7 @@ async function streamGridFsFileById(req, res) {
     let _id;
     try {
       _id = new Types.ObjectId(id);
-    } catch (_) {
+    } catch (error) {
       return res.status(400).json({ message: "Invalid file id." });
     }
 
@@ -264,18 +214,217 @@ async function streamGridFsFileById(req, res) {
 }
 
 /* =========================================================
-   GLOBAL FILE ROUTES
+   MULTER CONFIG
+   For actual file uploads, use multipart/form-data.
+========================================================= */
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: FILE_SIZE_LIMIT_MB * 1024 * 1024,
+    files: 10,
+  },
+});
+
+async function uploadBufferToGridFS(file, metadata = {}) {
+  const bucket = getGridFsBucket();
+
+  return new Promise((resolve, reject) => {
+    const filename = `${Date.now()}-${file.originalname}`;
+    const uploadStream = bucket.openUploadStream(filename, {
+      contentType: file.mimetype,
+      metadata: {
+        originalName: file.originalname,
+        mimeType: file.mimetype,
+        size: file.size,
+        ...metadata,
+      },
+    });
+
+    Readable.from(file.buffer)
+      .pipe(uploadStream)
+      .on("error", reject)
+      .on("finish", (uploadedFile) => {
+        resolve(uploadedFile);
+      });
+  });
+}
+
+/* =========================================================
+   HEALTH CHECK
+========================================================= */
+app.get("/", (req, res) => {
+  return res.status(200).json({
+    message: "Server is running",
+  });
+});
+
+/* =========================================================
+   FILE ROUTES
 ========================================================= */
 app.get("/file/:filename", streamGridFsFileByFilename);
 app.get("/file/id/:id", streamGridFsFileById);
+
+/**
+ * Single file upload
+ * Frontend should send multipart/form-data with field name: file
+ */
+app.post("/file/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "No file uploaded." });
+    }
+
+    const uploadedFile = await uploadBufferToGridFS(req.file, {
+      uploadedBy: req.body.uploadedBy || null,
+      folder: req.body.folder || null,
+    });
+
+    return res.status(201).json({
+      message: "File uploaded successfully.",
+      file: {
+        id: uploadedFile._id,
+        filename: uploadedFile.filename,
+        contentType: req.file.mimetype,
+        size: req.file.size,
+        url: `/file/id/${uploadedFile._id}`,
+      },
+    });
+  } catch (err) {
+    console.error("Error uploading file:", err);
+    return res.status(500).json({ message: "Failed to upload file." });
+  }
+});
+
+/**
+ * Multiple file upload
+ * Frontend should send multipart/form-data with field name: files
+ */
+app.post("/file/uploads", upload.array("files", 10), async (req, res) => {
+  try {
+    const files = req.files || [];
+
+    if (!files.length) {
+      return res.status(400).json({ message: "No files uploaded." });
+    }
+
+    const uploadedFiles = [];
+    for (const file of files) {
+      const uploaded = await uploadBufferToGridFS(file, {
+        uploadedBy: req.body.uploadedBy || null,
+        folder: req.body.folder || null,
+      });
+
+      uploadedFiles.push({
+        id: uploaded._id,
+        filename: uploaded.filename,
+        contentType: file.mimetype,
+        size: file.size,
+        url: `/file/id/${uploaded._id}`,
+      });
+    }
+
+    return res.status(201).json({
+      message: "Files uploaded successfully.",
+      files: uploadedFiles,
+    });
+  } catch (err) {
+    console.error("Error uploading multiple files:", err);
+    return res.status(500).json({ message: "Failed to upload files." });
+  }
+});
+
+/* =========================================================
+   API ROUTES
+========================================================= */
+app.use("/influencer", influencerRoutes);
+app.use("/country", countryRoutes);
+app.use("/brand", brandRoutes);
+app.use("/campaign", campaignRoutes);
+app.use("/category", categoryRoutes);
+app.use("/audience", audienceRoutes);
+app.use("/apply", applyCampaingRoutes);
+app.use("/contract", contractRoutes);
+app.use("/milestone", milestoneRoutes);
+app.use("/subscription", subscriptionRoutes);
+app.use("/chat", chatRoutes);
+app.use("/payment", paymentRoutes);
+app.use("/admin", adminRoutes);
+app.use("/policy", policyRoutes);
+app.use("/contact", contactRoutes);
+app.use("/faqs", faqsRoutes);
+app.use("/dash", dashboardRoutes);
+app.use("/platform", platformRoutes);
+app.use("/audienceRange", audienceRangeRoutes);
+app.use("/filters", filtersRoutes);
+app.use("/media-kit", mediaKitRoutes);
+app.use("/modash", modashRoutes);
+app.use("/languages", languageRoutes);
+app.use("/business", businessRoutes);
+app.use("/unsubscribe", unsubscribeRoutes);
+app.use("/dispute", disputeRoutes);
+app.use("/notifications", notificationsRoutes);
+app.use("/emails", emailRoutes);
+app.use("/newinvitations", Invitationsroutes);
+app.use("/youtube", youtubeRoutes);
+app.use("/campaign-invitation", campaignInvitationRoutes);
+app.use("/deliverable", delieverableRoutes);
+app.use("/list", listRoutes);
+app.use("/wallet", brandWalletRoutes);
+app.use("/admins", masterRoutes);
+app.use("/support", supportRoutes);
+app.use("/timezone", timezoneRoutes);
+app.use("/admin-email", adminEmailRoutes);
+app.use("/group-chat", groupChatRoutes);
+app.use("/pipeline", pipelineRoutes);
+app.use("/brand-network", brandNetworkRoutes);
+app.use("/brand-outreach", brandOuteachRoutes);
+app.use("/pitch-folders", require("./routes/pitchFolderRoutes"));
+app.use("/payment-details", paymentDetailsRoutes);
+
+/* =========================================================
+   404 HANDLER
+========================================================= */
+app.use((req, res) => {
+  return res.status(404).json({
+    message: "Route not found.",
+  });
+});
+
+/* =========================================================
+   ERROR HANDLER
+========================================================= */
+app.use((err, req, res, next) => {
+  console.error("Global error:", err);
+
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({
+        message: `File too large. Max allowed size is ${FILE_SIZE_LIMIT_MB}MB.`,
+      });
+    }
+
+    return res.status(400).json({
+      message: err.message || "Upload error.",
+    });
+  }
+
+  if (err && (err.type === "entity.too.large" || err.status === 413)) {
+    return res.status(413).json({
+      message:
+        "Payload too large. Do not send large files in JSON. Use multipart/form-data upload instead.",
+    });
+  }
+
+  return res.status(err.status || 500).json({
+    message: err.message || "Internal server error.",
+  });
+});
 
 /* =========================================================
    STARTUP
 ========================================================= */
 async function bootstrap() {
   try {
-    startReminderCron();
-    startSubscriptionEmailJobs();
     await mongoose.connect(process.env.MONGODB_URI, {
       autoIndex: false,
       maxPoolSize: 20,
@@ -283,12 +432,18 @@ async function bootstrap() {
       serverSelectionTimeoutMS: 10000,
       socketTimeoutMS: 45000,
     });
+
     console.log("✅ Connected to MongoDB");
 
     const bucket = getGridFsBucket();
     app.set("gridfsBucket", bucket);
 
+    startReminderCron();
+    startSubscriptionEmailJobs();
     unseenMessageNotifier.start();
+
+    console.log("✅ Started reminder cron");
+    console.log("✅ Started subscription email jobs");
     console.log("✅ Started unseen message notifier job");
 
     server.listen(PORT, () => {

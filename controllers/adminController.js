@@ -15,6 +15,7 @@ const Country = require("../models/country");
 const { Category } = require("../models/categories");
 const subscriptionHelper = require("../utils/subscriptionHelper");
 const { sendSubscriptionLifecycleEmail } = require("../utils/subscriptionEmailHelper");
+const crypto = require("crypto");
 
 const Campaign = require("../models/campaign");
 const Milestone = require("../models/milestone");
@@ -25,6 +26,14 @@ const Invitation = require("../models/NewInvitations");
 const SubscriptionPlan = require("../models/subscription");
 const PortalSettings = require("../models/portalSettings");
 const BrandAssigned = require("../models/brandAssigned");
+
+const { BrandWalletModel } = require("../models/brandWallet");
+const {
+  syncCampaignFreeze,
+  syncUsableBalance,
+  ensureCampaignFreeze,
+  getOrCreateWallet,
+} = require("../controllers/brandWalletController");
 
 const { _sendCampaignInvitationInternal } = require("../controllers/emailController");
 
@@ -2486,6 +2495,411 @@ exports.getCampaignsByInfluencerId = async (req, res) => {
   } catch (error) {
     console.error("Error in getCampaignsByInfluencerId:", error);
     return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+exports.enableCampaignShare = async (req, res) => {
+  try {
+    const { campaignId, brandId } = req.body;
+
+    if (!campaignId || !String(campaignId).trim()) {
+      return res.status(400).json({ message: "Valid campaignId is required" });
+    }
+
+    const filter = {
+      $or: [{ campaignsId: String(campaignId).trim() }],
+    };
+
+    if (mongoose.Types.ObjectId.isValid(String(campaignId))) {
+      filter.$or.push({ _id: new mongoose.Types.ObjectId(String(campaignId)) });
+    }
+
+    const campaign = await Campaign.findOne(filter);
+
+    if (!campaign) {
+      return res.status(404).json({ message: "Campaign not found" });
+    }
+
+    if (
+      brandId &&
+      String(brandId).trim() &&
+      String(campaign.brandId) !== String(brandId).trim()
+    ) {
+      return res.status(404).json({ message: "Campaign not found for this brand" });
+    }
+
+    if (!campaign.publicShareToken) {
+      campaign.publicShareToken = crypto.randomBytes(16).toString("hex");
+    }
+
+    campaign.isPublic = true;
+    await campaign.save();
+
+    const ALLOWED_FRONTEND_ORIGINS = [
+      "https://collabglam.com",
+      "http://localhost:3000",
+      "http://192.168.1.57:3000",
+    ];
+
+    const requestOrigin = String(req.headers.origin || "").trim();
+
+    const frontendBase = ALLOWED_FRONTEND_ORIGINS.includes(requestOrigin)
+      ? requestOrigin
+      : "https://collabglam.com";
+
+    const shareUrl = `${frontendBase}/campaign/share/${campaign.publicShareToken}`;
+
+    return res.status(200).json({
+      message: "Public share link enabled",
+      shareUrl,
+      publicShareToken: campaign.publicShareToken,
+      isPublic: true,
+    });
+  } catch (err) {
+    console.error("enableCampaignShare error:", err);
+    return res.status(500).json({
+      message: "Internal server error",
+      error: err.message,
+    });
+  }
+};
+
+exports.disableCampaignShare = async (req, res) => {
+  try {
+    const { campaignId, brandId } = req.body;
+
+    if (!campaignId || !String(campaignId).trim()) {
+      return res.status(400).json({ message: "Valid campaignId is required" });
+    }
+
+    const filter = {
+      $or: [{ campaignsId: String(campaignId).trim() }],
+    };
+
+    if (mongoose.Types.ObjectId.isValid(String(campaignId))) {
+      filter.$or.push({ _id: new mongoose.Types.ObjectId(String(campaignId)) });
+    }
+
+    const campaign = await Campaign.findOne(filter);
+
+    if (!campaign) {
+      return res.status(404).json({ message: "Campaign not found" });
+    }
+
+    if (
+      brandId &&
+      String(brandId).trim() &&
+      String(campaign.brandId) !== String(brandId).trim()
+    ) {
+      return res.status(404).json({ message: "Campaign not found for this brand" });
+    }
+
+    campaign.isPublic = false;
+    await campaign.save();
+
+    return res.status(200).json({
+      message: "Public share link disabled",
+      isPublic: false,
+    });
+  } catch (err) {
+    console.error("disableCampaignShare error:", err);
+    return res.status(500).json({
+      message: "Internal server error",
+      error: err.message,
+    });
+  }
+};
+
+exports.getPublicCampaignByToken = async (req, res) => {
+  try {
+    const { token } = req.params;
+
+    if (!token || !String(token).trim()) {
+      return res.status(400).json({ message: "Valid token is required" });
+    }
+
+    const campaign = await Campaign.findOne({
+      publicShareToken: String(token).trim(),
+      isPublic: true,
+    }).lean();
+
+    if (!campaign) {
+      return res.status(404).json({ message: "Campaign not found or not public" });
+    }
+
+    return res.status(200).json({
+      doc: {
+        _id: campaign._id,
+        campaignId: campaign.campaignsId || String(campaign._id),
+        campaignTitle: campaign.campaignTitle || "",
+        description: campaign.description || "",
+        campaignType: campaign.campaignType || "",
+        campaignBudget: campaign.campaignBudget || 0,
+        budget: campaign.budget || 0,
+        paymentType: campaign.paymentType || "",
+        platformSelection: campaign.platformSelection || [],
+        targetCountryIds: campaign.targetCountryIds || [],
+        targetAgeRanges: campaign.targetAgeRanges || [],
+        productImages: campaign.productImages || [],
+        productLink: campaign.productLink || "",
+        videoLink: campaign.videoLink || "",
+        additionalNotes: campaign.additionalNotes || "",
+        startAt: campaign.startAt || campaign.timeline?.startDate || null,
+        endAt: campaign.endAt || campaign.timeline?.endDate || null,
+        status: campaign.status || campaign.campaignStatus || "",
+        brandName: campaign.brandName || "",
+        categoryId: campaign.categoryId || null,
+        subcategoryIds: campaign.subcategoryIds || [],
+        contentFormats: campaign.contentFormats || [],
+        contentLanguageIds: campaign.contentLanguageIds || [],
+        preferredHashtags: campaign.preferredHashtags || [],
+        campaignGoals: campaign.campaignGoals || [],
+      },
+    });
+  } catch (err) {
+    console.error("getPublicCampaignByToken error:", err);
+    return res.status(500).json({
+      message: "Internal server error",
+      error: err.message,
+    });
+  }
+};
+
+exports.disableCampaignShare = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const { campaignId, brandId } = req.body;
+
+    if (!campaignId || !String(campaignId).trim()) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid campaignId is required", requestId);
+    }
+
+    const filter = {
+      $or: [{ campaignsId: String(campaignId).trim() }],
+    };
+
+    if (mongoose.Types.ObjectId.isValid(String(campaignId))) {
+      filter.$or.push({ _id: new mongoose.Types.ObjectId(String(campaignId)) });
+    }
+
+    const campaign = await Campaign.findOne(filter);
+
+    if (!campaign) {
+      return fail(res, 404, "NOT_FOUND", "Campaign not found", requestId);
+    }
+
+    if (brandId && String(brandId).trim() && String(campaign.brandId) !== String(brandId).trim()) {
+      return fail(res, 404, "NOT_FOUND", "Campaign not found for this brand", requestId);
+    }
+
+    campaign.isPublic = false;
+    await campaign.save();
+
+    return ApiResponse.sendOk(
+      res,
+      200,
+      {
+        message: "Public share link disabled",
+        isPublic: false,
+      },
+      requestId
+    );
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
+  }
+};
+
+exports.getPublicCampaignByToken = async (req, res) => {
+  const requestId = getRequestId(req);
+
+  try {
+    const { token } = req.params;
+
+    if (!token || !String(token).trim()) {
+      return fail(res, 400, "VALIDATION_ERROR", "Valid token is required", requestId);
+    }
+
+    const campaign = await Campaign.findOne({
+      publicShareToken: String(token).trim(),
+      isPublic: true,
+    }).lean();
+
+    if (!campaign) {
+      return fail(res, 404, "NOT_FOUND", "Campaign not found or not public", requestId);
+    }
+
+    return ApiResponse.sendOk(
+      res,
+      200,
+      {
+        doc: {
+          _id: campaign._id,
+          campaignId: campaign.campaignsId || String(campaign._id),
+          campaignTitle: campaign.campaignTitle || "",
+          description: campaign.description || "",
+          campaignType: campaign.campaignType || "",
+          campaignBudget: campaign.campaignBudget || 0,
+          budget: campaign.budget || 0,
+          paymentType: campaign.paymentType || "",
+          platformSelection: campaign.platformSelection || [],
+          targetCountryIds: campaign.targetCountryIds || [],
+          targetAgeRanges: campaign.targetAgeRanges || [],
+          productImages: campaign.productImages || [],
+          productLink: campaign.productLink || "",
+          videoLink: campaign.videoLink || "",
+          additionalNotes: campaign.additionalNotes || "",
+          startAt: campaign.startAt || campaign.timeline?.startDate || null,
+          endAt: campaign.endAt || campaign.timeline?.endDate || null,
+          status: campaign.status || campaign.campaignStatus || "",
+          brandName: campaign.brandName || "",
+          categoryId: campaign.categoryId || null,
+          subcategoryIds: campaign.subcategoryIds || [],
+          contentFormats: campaign.contentFormats || [],
+          contentLanguageIds: campaign.contentLanguageIds || [],
+          preferredHashtags: campaign.preferredHashtags || [],
+          campaignGoals: campaign.campaignGoals || [],
+        },
+      },
+      requestId
+    );
+  } catch (err) {
+    return sendControllerError(res, requestId, err);
+  }
+};
+
+exports.adminAddCampaignFunds = async (req, res) => {
+  try {
+    const brandId = String(req.body?.brandId || "").trim();
+    const campaignId = String(req.body?.campaignId || "").trim();
+    const currency = String(req.body?.currency || "usd").trim().toLowerCase();
+    const note = String(
+      req.body?.note || "Admin added campaign funds manually"
+    ).trim();
+    const amount = Number(req.body?.amount || 0);
+
+    const adminId = String(req.admin?.adminId || req.admin?._id || "").trim();
+    const adminEmail = String(req.admin?.email || "").trim();
+
+    if (!brandId) {
+      return res.status(400).json({
+        success: false,
+        message: "brandId is required",
+      });
+    }
+
+    if (!campaignId) {
+      return res.status(400).json({
+        success: false,
+        message: "campaignId is required",
+      });
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "amount must be a valid number greater than 0",
+      });
+    }
+
+    const campaignFilter = {
+      $or: [{ campaignsId: campaignId }],
+    };
+
+    if (mongoose.Types.ObjectId.isValid(campaignId)) {
+      campaignFilter.$or.push({ _id: new mongoose.Types.ObjectId(campaignId) });
+    }
+
+    const campaign = await Campaign.findOne(campaignFilter).lean();
+
+    if (!campaign) {
+      return res.status(404).json({
+        success: false,
+        message: "Campaign not found",
+      });
+    }
+
+    if (String(campaign.brandId) !== String(brandId)) {
+      return res.status(400).json({
+        success: false,
+        message: "This campaign does not belong to the provided brandId",
+      });
+    }
+
+    const normalizedCampaignId = String(campaign.campaignsId || campaign._id);
+
+    const wallet = await getOrCreateWallet(brandId);
+    wallet.topups = Array.isArray(wallet.topups) ? wallet.topups : [];
+
+    wallet.walletBalance = Math.max(
+      0,
+      Number(wallet.walletBalance || 0) + amount
+    );
+
+    const campaignFreeze = ensureCampaignFreeze(
+      wallet,
+      brandId,
+      normalizedCampaignId
+    );
+
+    campaignFreeze.totalFrozenAmount =
+      Number(campaignFreeze.totalFrozenAmount || 0) + amount;
+
+    syncCampaignFreeze(campaignFreeze);
+
+    wallet.topups.push({
+      amount,
+      currency,
+      campaignId: normalizedCampaignId,
+      status: "success",
+      paymentIntentId: null,
+      stripeSessionId: null,
+      stripePaymentIntentId: null,
+      source: "admin_manual",
+      note,
+      addedByAdminId: adminId || null,
+      addedByAdminEmail: adminEmail || null,
+      createdAt: new Date(),
+    });
+
+    wallet.markModified("freezes");
+    wallet.markModified("topups");
+
+    const walletSnap = syncUsableBalance(wallet);
+    await wallet.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Campaign funds added and frozen successfully",
+      data: {
+        brandId,
+        campaignId: normalizedCampaignId,
+        campaignMongoId: String(campaign._id),
+        addedAmount: amount,
+        currency,
+        wallet: {
+          walletBalance: walletSnap.walletBalance,
+          frozenBalance: walletSnap.frozenBalance,
+          usableBalance: walletSnap.usableBalance,
+        },
+        campaignFreeze: {
+          brandId: campaignFreeze.brandId,
+          campaignId: campaignFreeze.campaignId,
+          totalFrozenAmount: Number(campaignFreeze.totalFrozenAmount || 0),
+          currentFrozenAmount: Number(campaignFreeze.currentFrozenAmount || 0),
+          totalAllocatedAmount: Number(campaignFreeze.totalAllocatedAmount || 0),
+          totalReleasedAmount: Number(campaignFreeze.totalReleasedAmount || 0),
+          availableToAllocate: Number(campaignFreeze.availableToAllocate || 0),
+          influencerAllocations: campaignFreeze.influencerAllocations || [],
+        },
+      },
+    });
+  } catch (error) {
+    console.error("adminAddCampaignFunds error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error?.message || "Internal server error",
+    });
   }
 };
 
