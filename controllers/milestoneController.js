@@ -19,21 +19,6 @@ const {
 const APP_BASE_URL = process.env.APP_BASE_URL || "";
 
 // ---------------- wallet helpers ----------------
-const calcFrozenAll = (freezes = []) =>
-  freezes.reduce((sum, f) => sum + (Number(f.freezeAmount) || 0), 0);
-
-const syncUsableBalance = (wallet) => {
-  const frozenAll = calcFrozenAll(wallet.freezes || []);
-  wallet.usableBalance = Math.max(
-    0,
-    (Number(wallet.walletBalance) || 0) - frozenAll
-  );
-  return {
-    walletBalance: Number(wallet.walletBalance) || 0,
-    frozenBalance: frozenAll,
-    usableBalance: wallet.usableBalance,
-  };
-};
 
 const getOrCreateBrandWallet = async (brandId, session = null) => {
   let query = BrandWalletModel.findOne({ brandId });
@@ -85,10 +70,62 @@ const getWalletSnapshotByBrandId = async (brandId) => {
   };
 };
 
-// ======================================================================
-// POST /milestone/create
-// body: { brandId, influencerId, campaignId, milestoneTitle, amount, milestoneDescription }
-// ======================================================================
+const calcAllocationTotal = (allocations = []) =>
+  allocations.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+
+const calcReleasedTotal = (allocations = []) =>
+  allocations.reduce((sum, item) => sum + (Number(item.releasedAmount) || 0), 0);
+
+const syncCampaignFreeze = (freeze) => {
+  if (!freeze) return null;
+
+  freeze.influencerAllocations = Array.isArray(freeze.influencerAllocations)
+    ? freeze.influencerAllocations
+    : [];
+
+  const totalFrozenAmount = Number(freeze.totalFrozenAmount || 0);
+  const totalAllocatedAmount = calcAllocationTotal(freeze.influencerAllocations);
+  const totalReleasedAmount = calcReleasedTotal(freeze.influencerAllocations);
+
+  freeze.totalAllocatedAmount = totalAllocatedAmount;
+  freeze.totalReleasedAmount = totalReleasedAmount;
+
+  freeze.currentFrozenAmount = Math.max(
+    0,
+    totalFrozenAmount - totalReleasedAmount
+  );
+
+  freeze.availableToAllocate = Math.max(
+    0,
+    totalFrozenAmount - totalAllocatedAmount
+  );
+
+  return freeze;
+};
+
+const calcFrozenAll = (freezes = []) =>
+  freezes.reduce((sum, freeze) => {
+    syncCampaignFreeze(freeze);
+    return sum + (Number(freeze.currentFrozenAmount) || 0);
+  }, 0);
+
+const syncUsableBalance = (wallet) => {
+  wallet.freezes = Array.isArray(wallet.freezes) ? wallet.freezes : [];
+  wallet.freezes.forEach(syncCampaignFreeze);
+
+  const frozenAll = calcFrozenAll(wallet.freezes || []);
+  wallet.usableBalance = Math.max(
+    0,
+    (Number(wallet.walletBalance) || 0) - frozenAll
+  );
+
+  return {
+    walletBalance: Number(wallet.walletBalance) || 0,
+    frozenBalance: frozenAll,
+    usableBalance: wallet.usableBalance,
+  };
+};
+
 exports.createMilestone = async (req, res) => {
   const session = await mongoose.startSession();
 
@@ -141,11 +178,11 @@ exports.createMilestone = async (req, res) => {
         abort(404, "Campaign not found");
       }
 
-      // NEW: if campaign created by admin, skip contract validation
+      // 2) If campaign created by admin, skip contract validation
       const isAdminCreatedCampaign =
         String(camp?.createdBy?.role ?? "").trim().toLowerCase() === "admin";
 
-      // 2) Contract check before any mutation
+      // 3) Contract check before any mutation
       let contractDoc = null;
 
       if (!isAdminCreatedCampaign) {
@@ -180,7 +217,7 @@ exports.createMilestone = async (req, res) => {
         }
       }
 
-      // 3) milestone doc
+      // 4) milestone doc
       let doc = await Milestone.findOne({ brandId }).session(session);
       if (!doc) {
         doc = new Milestone({
@@ -192,7 +229,7 @@ exports.createMilestone = async (req, res) => {
 
       doc.totalAmount = Number(doc.totalAmount || 0);
 
-      // 4) Previous milestone check for same influencer + campaign
+      // 5) Previous milestone check for same influencer + campaign
       const prev = (doc.milestoneHistory || []).filter(
         (e) =>
           String(e.influencerId) === String(influencerId) &&
@@ -211,7 +248,7 @@ exports.createMilestone = async (req, res) => {
         }
       }
 
-      // 5) Campaign budget check
+      // 6) Campaign budget check
       const campaignBudget = Number(camp.budget);
       const hasBudget = !isNaN(campaignBudget) && campaignBudget > 0;
 
@@ -232,26 +269,61 @@ exports.createMilestone = async (req, res) => {
         }
       }
 
-      // 6) Wallet check only
+      // 7) Wallet campaign freeze check
       const wallet = await getOrCreateBrandWallet(brandId, session);
+      wallet.freezes = Array.isArray(wallet.freezes) ? wallet.freezes : [];
+
+      const campaignFreeze = wallet.freezes.find(
+        (f) =>
+          String(f.brandId) === String(brandId) &&
+          String(f.campaignId) === String(campaignId)
+      );
+
+      if (!campaignFreeze) {
+        abort(
+          400,
+          "No campaign wallet found. Please top up this campaign wallet first.",
+          {
+            walletBalance: Number(wallet.walletBalance || 0),
+            frozenBalance: calcFrozenAll(wallet.freezes || []),
+            usableBalance: Number(wallet.usableBalance || 0),
+            campaignId,
+            availableToAllocate: 0,
+            needToAdd: amountNum,
+          }
+        );
+      }
+
+      syncCampaignFreeze(campaignFreeze);
       const walletSnapBefore = syncUsableBalance(wallet);
 
-      if (walletSnapBefore.usableBalance < amountNum) {
-        const needToAdd = Math.max(0, amountNum - walletSnapBefore.usableBalance);
+      if (Number(campaignFreeze.availableToAllocate || 0) < amountNum) {
+        const needToAdd = Math.max(
+          0,
+          amountNum - Number(campaignFreeze.availableToAllocate || 0)
+        );
 
         abort(
           400,
-          `Insufficient wallet balance. Please add $${needToAdd.toFixed(2)} to your wallet.`,
+          `Insufficient campaign frozen balance. Please add $${needToAdd.toFixed(
+            2
+          )} to this campaign wallet.`,
           {
             walletBalance: walletSnapBefore.walletBalance,
             frozenBalance: walletSnapBefore.frozenBalance,
             usableBalance: walletSnapBefore.usableBalance,
+            campaignId,
+            totalFrozenAmount: Number(campaignFreeze.totalFrozenAmount || 0),
+            currentFrozenAmount: Number(campaignFreeze.currentFrozenAmount || 0),
+            totalAllocatedAmount: Number(campaignFreeze.totalAllocatedAmount || 0),
+            totalReleasedAmount: Number(campaignFreeze.totalReleasedAmount || 0),
+            availableToAllocate: Number(campaignFreeze.availableToAllocate || 0),
             needToAdd,
           }
         );
       }
 
-      // 7) First create milestone entry
+      // 8) First create milestone entry
       doc.milestoneHistory.push({
         influencerId,
         campaignId,
@@ -267,32 +339,36 @@ exports.createMilestone = async (req, res) => {
 
       const createdEntry = doc.milestoneHistory[doc.milestoneHistory.length - 1];
 
-      // 8) Freeze only AFTER milestone save succeeds
-      wallet.freezes = Array.isArray(wallet.freezes) ? wallet.freezes : [];
+      // 9) Allocate inside the campaign freeze only AFTER milestone save succeeds
+      campaignFreeze.influencerAllocations = Array.isArray(
+        campaignFreeze.influencerAllocations
+      )
+        ? campaignFreeze.influencerAllocations
+        : [];
 
-      const freezeIndex = wallet.freezes.findIndex(
-        (f) =>
-          String(f.brandId) === String(brandId) &&
-          String(f.campaignId) === String(campaignId) &&
-          String(f.influencerId) === String(influencerId)
+      const allocationIndex = campaignFreeze.influencerAllocations.findIndex(
+        (a) => String(a.influencerId) === String(influencerId)
       );
 
-      if (freezeIndex >= 0) {
-        wallet.freezes[freezeIndex].freezeAmount =
-          Number(wallet.freezes[freezeIndex].freezeAmount || 0) + amountNum;
+      if (allocationIndex >= 0) {
+        campaignFreeze.influencerAllocations[allocationIndex].amount =
+          Number(
+            campaignFreeze.influencerAllocations[allocationIndex].amount || 0
+          ) + amountNum;
       } else {
-        wallet.freezes.push({
-          brandId,
-          campaignId,
+        campaignFreeze.influencerAllocations.push({
           influencerId,
-          freezeAmount: amountNum,
+          amount: amountNum,
+          releasedAmount: 0,
         });
       }
+
+      syncCampaignFreeze(campaignFreeze);
 
       const walletSnapAfter = syncUsableBalance(wallet);
       await wallet.save({ session });
 
-      // 9) Update contract status only if contract exists
+      // 10) Update contract status only if contract exists
       let updatedContract = null;
 
       if (contractDoc) {
@@ -338,7 +414,7 @@ exports.createMilestone = async (req, res) => {
 
       responsePayload = {
         ...(responsePayload || {}),
-        message: "Milestone created and amount frozen successfully",
+        message: "Milestone created and amount allocated from campaign wallet successfully",
         milestoneId: String(doc._id),
         totalAmount: doc.totalAmount,
         entry: {
@@ -356,6 +432,15 @@ exports.createMilestone = async (req, res) => {
           walletBalance: walletSnapAfter.walletBalance,
           frozenBalance: walletSnapAfter.frozenBalance,
           usableBalance: walletSnapAfter.usableBalance,
+        },
+        campaignWallet: {
+          campaignId,
+          totalFrozenAmount: Number(campaignFreeze.totalFrozenAmount || 0),
+          currentFrozenAmount: Number(campaignFreeze.currentFrozenAmount || 0),
+          totalAllocatedAmount: Number(campaignFreeze.totalAllocatedAmount || 0),
+          totalReleasedAmount: Number(campaignFreeze.totalReleasedAmount || 0),
+          availableToAllocate: Number(campaignFreeze.availableToAllocate || 0),
+          influencerAllocations: campaignFreeze.influencerAllocations || [],
         },
         contractStatus: updatedContract?.status || null,
         milestonesCreatedAt: updatedContract?.milestonesCreatedAt || null,
