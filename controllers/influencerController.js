@@ -2989,14 +2989,23 @@ exports.markInfluencerTourSeen = async (req, res) => {
 
 exports.getLiteInfluencerByIdPost = async (req, res) => {
   try {
-    const { influencerId } = req.body || {};
+    const rawInfluencerId = String(req.body?.influencerId || "").trim();
 
-    if (!influencerId) {
+    if (!rawInfluencerId) {
       return res.status(400).json({ message: "influencerId is required" });
     }
 
-    const influencer = await InfluencerModel.findOne({ influencerId })
-      .select("influencerId name email")
+    const lookup = mongoose.Types.ObjectId.isValid(rawInfluencerId)
+      ? {
+          $or: [
+            { _id: rawInfluencerId },
+            { influencerId: rawInfluencerId },
+          ],
+        }
+      : { influencerId: rawInfluencerId };
+
+    const influencer = await InfluencerModel.findOne(lookup)
+      .select("_id influencerId name email")
       .lean();
 
     if (!influencer) {
@@ -3004,7 +3013,7 @@ exports.getLiteInfluencerByIdPost = async (req, res) => {
     }
 
     return res.status(200).json({
-      influencerId: influencer.influencerId,
+      influencerId: influencer.influencerId || String(influencer._id),
       name: influencer.name || "",
       email: influencer.email || "",
     });
