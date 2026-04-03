@@ -1,6 +1,5 @@
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
-const { ROLES } = require("./master");
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 const normalizePaymentType = (v) => {

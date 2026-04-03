@@ -23,7 +23,7 @@ const { uploadToGridFS } = require("../utils/gridfs");
 // ===============================
 // Constants
 // ===============================
-const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 20MB
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10MB SES raw email limit
 const BRAND_COOLDOWN_MS = 48 * 60 * 60 * 1000; // 2 days
 const DEFAULT_RELAY_DOMAIN = "mail.collabglam.com";
 const HANDLE_RX = /^@[A-Za-z0-9._\-]+$/;
@@ -105,6 +105,60 @@ function getInfluencerLabel(influencer) {
   );
 }
 
+function getCampaignTitle(campaignLike) {
+  return (
+    safeStr(campaignLike?.campaignTitle).trim() ||
+    safeStr(campaignLike?.productOrServiceName).trim() ||
+    safeStr(campaignLike?.title).trim() ||
+    safeStr(campaignLike?.campaignType).trim() ||
+    safeStr(campaignLike?.brandName).trim() ||
+    "Campaign"
+  );
+}
+
+function normalizeCampaignObjectId(campaignLike) {
+  const id = toIdString(campaignLike?._id || campaignLike);
+  return isObjectId(id) ? new mongoose.Types.ObjectId(id) : null;
+}
+
+function buildCampaignSnapshot(campaignLike) {
+  const id = campaignLike?._id || campaignLike?.id || null;
+  if (!id) return null;
+
+  return {
+    _id: id,
+    title: getCampaignTitle(campaignLike),
+    campaignType: safeStr(campaignLike?.campaignType).trim(),
+  };
+}
+
+function serializeCampaign(campaignLike, campaignSnapshot = null) {
+  const populated = campaignLike && typeof campaignLike === "object" ? campaignLike : null;
+  const campaignId = populated?._id
+    ? String(populated._id)
+    : campaignLike
+    ? String(campaignLike)
+    : campaignSnapshot?._id
+    ? String(campaignSnapshot._id)
+    : null;
+
+  const title = populated
+    ? getCampaignTitle(populated)
+    : safeStr(campaignSnapshot?.title).trim();
+
+  const campaignType = populated
+    ? safeStr(populated.campaignType).trim()
+    : safeStr(campaignSnapshot?.campaignType).trim();
+
+  if (!campaignId && !title && !campaignType) return null;
+
+  return {
+    _id: campaignId,
+    title,
+    campaignType,
+  };
+}
+
 function slugifyLocalPart(value, fallback = "user") {
   const slug = safeLower(value).replace(/[^a-z0-9]+/g, "").slice(0, 30);
   return slug || fallback;
@@ -176,7 +230,7 @@ function publicBrand(brandLike = {}) {
   const id = brandLike?._id ? String(brandLike._id) : null;
   return {
     _id: id,
-    brandId: id, // compatibility for old frontend keys
+    brandId: id,
     name:
       brandLike?.brandName ||
       brandLike?.name ||
@@ -195,7 +249,7 @@ function publicInfluencer(influencerLike = {}) {
   const id = influencerLike?._id ? String(influencerLike._id) : null;
   return {
     _id: id,
-    influencerId: id, // compatibility for old frontend keys
+    influencerId: id,
     name:
       influencerLike?.name ||
       influencerLike?.influencerSnapshot?.name ||
@@ -225,7 +279,7 @@ async function uploadEmailAttachmentsToGridFS({ req, safeAttachments, metadata }
 
     if (buffer.length > MAX_ATTACHMENT_BYTES) {
       const err = new Error(
-        `Attachment "${att.filename}" is too large. Max allowed size is 20MB.`
+        `Attachment "${att.filename}" is too large. Max allowed size is 10MB.`
       );
       err.statusCode = 413;
       throw err;
@@ -282,11 +336,14 @@ function buildRawMimeEmail({
   fromAlias,
   fromName,
   toRealEmail,
+  headerTo,
   cc = [],
   subject,
   htmlBody,
   textBody,
   replyTo,
+  inReplyTo,
+  references = [],
   attachments = [],
 }) {
   const safeSubject = encodeHeaderUtf8(subject || "(no subject)");
@@ -295,6 +352,11 @@ function buildRawMimeEmail({
   const mixedBoundary = `mix_${crypto.randomUUID()}`;
 
   const normalizedCc = normalizeRecipientList(cc);
+  const visibleTo = safeStr(headerTo || toRealEmail).trim() || toRealEmail;
+
+  const normalizedReferences = Array.isArray(references)
+    ? references.map((v) => safeStr(v).trim()).filter(Boolean)
+    : [];
 
   const textPart = splitBase64Lines(
     Buffer.from(safeStr(textBody || ""), "utf8").toString("base64")
@@ -306,10 +368,14 @@ function buildRawMimeEmail({
 
   const headers = [
     `From: ${safeFromName} <${fromAlias}>`,
-    `To: ${toRealEmail}`,
+    `To: ${visibleTo}`,
     normalizedCc.length ? `Cc: ${normalizedCc.join(", ")}` : "",
     replyTo ? `Reply-To: ${replyTo}` : "",
     `Subject: ${safeSubject}`,
+    inReplyTo ? `In-Reply-To: <${inReplyTo}>` : "",
+    normalizedReferences.length
+      ? `References: ${normalizedReferences.map((v) => `<${v}>`).join(" ")}`
+      : "",
     "MIME-Version: 1.0",
   ].filter(Boolean);
 
@@ -392,12 +458,15 @@ async function sendViaSES({
   fromAlias,
   fromName,
   toRealEmail,
+  headerTo,
   cc,
   bcc,
   subject,
   htmlBody,
   textBody,
   replyTo,
+  inReplyTo,
+  references,
   attachments,
 }) {
   const ccList = normalizeRecipientList(cc);
@@ -407,11 +476,14 @@ async function sendViaSES({
     fromAlias,
     fromName,
     toRealEmail,
+    headerTo,
     cc: ccList,
     subject,
     htmlBody,
     textBody,
     replyTo,
+    inReplyTo,
+    references,
     attachments: attachments || [],
   });
 
@@ -422,7 +494,13 @@ async function sendViaSES({
   });
 
   try {
-    return await ses.send(cmd);
+    const result = await ses.send(cmd);
+
+    if (!result?.MessageId) {
+      throw new Error("SES send succeeded without a MessageId");
+    }
+
+    return result;
   } catch (err) {
     console.error("SES raw send error:", err);
     throw err;
@@ -431,8 +509,6 @@ async function sendViaSES({
 
 // ===============================
 // Finders
-// brand / influencer use Mongo _id as source of truth.
-// Legacy business-id fallback is kept only for transition safety.
 // ===============================
 async function findBrandById(id) {
   if (!id) return null;
@@ -595,12 +671,19 @@ async function enforceBrandPolicyOrThrow(threadId) {
 // ===============================
 // Thread creation / sync
 // ===============================
-async function syncThreadWithLiveParticipants(thread, brand, influencer, subject) {
+async function syncThreadWithLiveParticipants(
+  thread,
+  brand,
+  influencer,
+  campaign,
+  subject
+) {
   const brandProxy = await ensureBrandProxyEmail(brand);
   const influencerProxy = await ensureInfluencerProxyEmail(influencer);
 
   thread.brand = brand._id;
   thread.influencer = influencer._id;
+  thread.campaign = campaign?._id || null;
 
   thread.brandAliasEmail = brandProxy;
   thread.influencerAliasEmail = influencerProxy;
@@ -618,19 +701,36 @@ async function syncThreadWithLiveParticipants(thread, brand, influencer, subject
     email: influencer.email,
   };
 
+  thread.campaignSnapshot = buildCampaignSnapshot(campaign);
+
   if (!thread.subject && subject) thread.subject = subject;
 
   return thread;
 }
 
-async function getOrCreateThread({ brand, influencer, createdBy, subject }) {
+async function getOrCreateThread({
+  brand,
+  influencer,
+  campaign,
+  createdBy,
+  subject,
+}) {
+  const normalizedCampaignId = normalizeCampaignObjectId(campaign);
+
   let thread = await EmailThread.findOne({
     brand: brand._id,
     influencer: influencer._id,
+    campaign: normalizedCampaignId,
   });
 
   if (thread) {
-    await syncThreadWithLiveParticipants(thread, brand, influencer, subject);
+    await syncThreadWithLiveParticipants(
+      thread,
+      brand,
+      influencer,
+      campaign || null,
+      subject
+    );
     await thread.save();
     return thread;
   }
@@ -641,15 +741,19 @@ async function getOrCreateThread({ brand, influencer, createdBy, subject }) {
   thread = await EmailThread.create({
     brand: brand._id,
     influencer: influencer._id,
+    campaign: normalizedCampaignId,
 
     brandSnapshot: {
       name: getBrandLabel(brand),
       email: brand.email,
     },
+
     influencerSnapshot: {
       name: getInfluencerLabel(influencer),
       email: influencer.email,
     },
+
+    campaignSnapshot: buildCampaignSnapshot(campaign),
 
     brandAliasEmail: brandProxy,
     influencerAliasEmail: influencerProxy,
@@ -673,6 +777,7 @@ async function createAndSendMessage({
   thread,
   brand,
   influencer,
+  campaign,
   direction,
   subject,
   body,
@@ -682,18 +787,25 @@ async function createAndSendMessage({
 }) {
   const safeAttachments = normalizeAttachments(attachments);
 
+  const metadata = {
+    kind: "email-attachment",
+    brand: String(brand._id),
+    influencer: String(influencer._id),
+    brandId: String(brand._id),
+    influencerId: String(influencer._id),
+    direction,
+    context,
+  };
+
+  if (campaign?._id) {
+    metadata.campaign = String(campaign._id);
+    metadata.campaignId = String(campaign._id);
+  }
+
   const uploadedFiles = await uploadEmailAttachmentsToGridFS({
     req,
     safeAttachments,
-    metadata: {
-      kind: "email-attachment",
-      brand: String(brand._id),
-      influencer: String(influencer._id),
-      brandId: String(brand._id), // compatibility for old dashboards / logs
-      influencerId: String(influencer._id),
-      direction,
-      context,
-    },
+    metadata,
   });
 
   const attachmentMeta = uploadedFiles.map((f) => ({
@@ -737,48 +849,86 @@ async function createAndSendMessage({
       : `${influencerLabel} via ${process.env.PLATFORM_NAME || "CollabGlam"}`;
 
   const replyTo = fromProxyEmail;
+  const headerTo = toProxyEmail || toRealEmail;
 
-const sesResult = await sendViaSES({
-  fromAlias,
-  fromName,
-  toRealEmail,
-  subject,
-  htmlBody,
-  textBody,
-  replyTo,
-  attachments: safeAttachments,
-});
+    const previousExternalMessages = await EmailMessage.find({
+    thread: thread._id,
+    forwardedSesMessageId: { $exists: true, $ne: null },
+  })
+    .sort({ createdAt: 1 })
+    .select({ forwardedSesMessageId: 1 })
+    .lean();
 
-const dbMessageId = sesResult?.MessageId || crypto.randomUUID();
+  const previousForwardedIds = previousExternalMessages
+    .map((m) => safeStr(m.forwardedSesMessageId).trim())
+    .filter(Boolean);
 
-const msg = await EmailMessage.create({
-  thread: thread._id,
-  direction,
-  messageId: dbMessageId,
+  const threadInReplyTo =
+    previousForwardedIds.length > 0
+      ? previousForwardedIds[previousForwardedIds.length - 1]
+      : undefined;
 
-  fromUser: direction === "brand_to_influencer" ? brand._id : influencer._id,
-  fromUserModel: direction === "brand_to_influencer" ? "Brand" : "Influencer",
+  const threadReferences = previousForwardedIds;
 
-  fromAliasEmail: fromAlias,
-  fromProxyEmail,
-  fromRealEmail,
-  toRealEmail,
-  toProxyEmail,
+  const sesResult = await sendViaSES({
+    fromAlias,
+    fromName,
+    toRealEmail,
+    headerTo,
+    subject,
+    htmlBody,
+    textBody,
+    replyTo,
+    inReplyTo: threadInReplyTo,
+    references: threadReferences,
+    attachments: safeAttachments,
+  });
 
-  subject,
-  htmlBody,
-  textBody,
+  const dbMessageId = sesResult.MessageId;
 
-  attachments: attachmentMeta,
-  sentAt: new Date(),
-  forwardedSesMessageId: sesResult?.MessageId || undefined,
-});
+  const msg = await EmailMessage.create({
+    thread: thread._id,
+    direction,
+    messageId: dbMessageId,
+
+    fromUser: direction === "brand_to_influencer" ? brand._id : influencer._id,
+    fromUserModel: direction === "brand_to_influencer" ? "Brand" : "Influencer",
+
+    fromAliasEmail: fromAlias,
+    fromProxyEmail,
+    fromRealEmail,
+    toRealEmail,
+    toProxyEmail,
+
+    subject,
+    htmlBody,
+    textBody,
+
+    attachments: attachmentMeta,
+    sentAt: new Date(),
+    forwardedSesMessageId: sesResult.MessageId,
+  });
+
+  thread.brand = brand._id;
+  thread.influencer = influencer._id;
+  thread.campaign = campaign?._id || null;
 
   thread.lastMessageAt = msg.createdAt;
   thread.lastMessageDirection = direction;
   thread.lastMessageSnippet = safeStr(textBody).slice(0, 200);
-  thread.brandSnapshot = { name: brandLabel, email: brand.email };
-  thread.influencerSnapshot = { name: influencerLabel, email: influencer.email };
+
+  thread.brandSnapshot = {
+    name: brandLabel,
+    email: brand.email,
+  };
+
+  thread.influencerSnapshot = {
+    name: influencerLabel,
+    email: influencer.email,
+  };
+
+  thread.campaignSnapshot = buildCampaignSnapshot(campaign);
+
   thread.brandDisplayAlias = thread.brandAliasEmail;
   thread.influencerDisplayAlias = thread.influencerAliasEmail;
 
@@ -790,7 +940,7 @@ const msg = await EmailMessage.create({
     success: true,
     thread,
     message: msg,
-    sesMessageId: sesResult?.MessageId || null,
+    sesMessageId: sesResult.MessageId,
   };
 }
 
@@ -932,9 +1082,20 @@ async function sendCampaignInvitationInternal(payload = {}) {
       brand,
     });
 
+  let campaign = null;
+  if (campaignId) {
+    campaign = await findCampaignByIdOrCampaignsId(campaignId);
+    if (!campaign) {
+      const err = new Error("Campaign not found");
+      err.statusCode = 404;
+      throw err;
+    }
+  }
+
   const thread = await getOrCreateThread({
     brand,
     influencer,
+    campaign,
     createdBy: "brand",
     subject: customSubject || undefined,
   });
@@ -945,22 +1106,10 @@ async function sendCampaignInvitationInternal(payload = {}) {
   let htmlBody = "";
   let textBody = "";
 
-  if (campaignId) {
-    const campaign = await findCampaignByIdOrCampaignsId(campaignId);
-    if (!campaign) {
-      const err = new Error("Campaign not found");
-      err.statusCode = 404;
-      throw err;
-    }
-
+  if (campaign) {
     const brandName = getBrandLabel(brand);
-    const campaignTitle =
-      campaign.productOrServiceName ||
-      campaign.campaignType ||
-      campaign.brandName ||
-      "Our Campaign";
-
-    const campaignObjective = campaign.goal || "";
+    const campaignTitle = getCampaignTitle(campaign);
+    const campaignObjective = campaign.goal || campaign.description || "";
 
     const defaultDeliverables =
       Array.isArray(campaign.creativeBrief) && campaign.creativeBrief.length
@@ -1058,6 +1207,7 @@ async function sendCampaignInvitationInternal(payload = {}) {
     thread,
     brand,
     influencer,
+    campaign,
     direction: "brand_to_influencer",
     subject,
     body: textBody,
@@ -1075,7 +1225,7 @@ async function sendCampaignInvitationInternal(payload = {}) {
     brandDisplayAlias: result.thread.brandDisplayAlias,
     influencerDisplayAlias: result.thread.influencerDisplayAlias,
     subject,
-    campaignId: campaignId || null,
+    campaignId: campaign ? String(campaign._id) : null,
   };
 }
 
@@ -1126,7 +1276,7 @@ async function getTemplateByKey(req, res) {
 // POST /api/email/threads
 async function createThread(req, res) {
   try {
-    const { brandId, influencerId, subject } = req.body;
+    const { brandId, influencerId, campaignId, subject } = req.body;
 
     if (!brandId || !influencerId) {
       return res
@@ -1136,15 +1286,22 @@ async function createThread(req, res) {
 
     const brand = await findBrandById(brandId);
     const influencer = await findInfluencerById(influencerId);
+    const campaign = campaignId
+      ? await findCampaignByIdOrCampaignsId(campaignId)
+      : null;
 
     if (!brand) return res.status(404).json({ error: "Brand not found" });
     if (!influencer) {
       return res.status(404).json({ error: "Influencer not found" });
     }
+    if (campaignId && !campaign) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
 
     const thread = await getOrCreateThread({
       brand,
       influencer,
+      campaign,
       createdBy: "system",
       subject,
     });
@@ -1157,6 +1314,7 @@ async function createThread(req, res) {
       brandDisplayAlias: thread.brandDisplayAlias,
       influencerDisplayAlias: thread.influencerDisplayAlias,
       subject: thread.subject || "",
+      campaign: serializeCampaign(thread.campaign, thread.campaignSnapshot),
     });
   } catch (err) {
     console.error("createThread error:", err);
@@ -1167,7 +1325,7 @@ async function createThread(req, res) {
 // POST /api/email/brand-to-influencer
 async function sendBrandToInfluencer(req, res) {
   try {
-    const { brandId, influencerId, subject, body, attachments } = req.body;
+    const { brandId, influencerId, campaignId, subject, body, attachments } = req.body;
 
     if (!brandId || !influencerId || !subject || !body) {
       return res.status(400).json({
@@ -1177,15 +1335,22 @@ async function sendBrandToInfluencer(req, res) {
 
     const brand = await findBrandById(brandId);
     const influencer = await findInfluencerById(influencerId);
+    const campaign = campaignId
+      ? await findCampaignByIdOrCampaignsId(campaignId)
+      : null;
 
     if (!brand) return res.status(404).json({ error: "Brand not found" });
     if (!influencer) {
       return res.status(404).json({ error: "Influencer not found" });
     }
+    if (campaignId && !campaign) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
 
     const thread = await getOrCreateThread({
       brand,
       influencer,
+      campaign,
       createdBy: "brand",
       subject,
     });
@@ -1197,6 +1362,7 @@ async function sendBrandToInfluencer(req, res) {
       thread,
       brand,
       influencer,
+      campaign,
       direction: "brand_to_influencer",
       subject,
       body,
@@ -1209,6 +1375,7 @@ async function sendBrandToInfluencer(req, res) {
       threadId: String(result.thread._id),
       messageId: String(result.message._id),
       forwardedSesMessageId: result.sesMessageId,
+      campaignId: result.thread.campaign ? String(result.thread.campaign) : null,
     });
   } catch (err) {
     console.error("sendBrandToInfluencer error:", err);
@@ -1223,7 +1390,15 @@ async function sendBrandToInfluencer(req, res) {
 // POST /api/email/influencer-to-brand
 async function sendInfluencerToBrand(req, res) {
   try {
-    const { threadId, brandId, influencerId, subject, body, attachments } = req.body;
+    const {
+      threadId,
+      brandId,
+      influencerId,
+      campaignId,
+      subject,
+      body,
+      attachments,
+    } = req.body;
 
     if (!subject || !body) {
       return res.status(400).json({
@@ -1233,9 +1408,9 @@ async function sendInfluencerToBrand(req, res) {
 
     let brand = null;
     let influencer = null;
+    let campaign = null;
     let thread = null;
 
-    // Preferred flow: reply by threadId
     if (threadId) {
       if (!mongoose.Types.ObjectId.isValid(String(threadId))) {
         return res.status(400).json({ error: "Invalid threadId" });
@@ -1243,21 +1418,18 @@ async function sendInfluencerToBrand(req, res) {
 
       thread = await EmailThread.findById(threadId)
         .populate("brand", "_id name brandName email proxyEmail")
-        .populate("influencer", "_id name email proxyEmail influencerId");
+        .populate("influencer", "_id name email proxyEmail influencerId")
+        .populate("campaign", "_id campaignTitle campaignType productOrServiceName brandName");
 
       if (!thread) {
         return res.status(404).json({ error: "Thread not found" });
       }
 
-      brand =
-        thread.brand?._id
-          ? thread.brand
-          : await findBrandById(thread.brand);
-
-      influencer =
-        thread.influencer?._id
-          ? thread.influencer
-          : await findInfluencerById(thread.influencer);
+      brand = thread.brand?._id ? thread.brand : await findBrandById(thread.brand);
+      influencer = thread.influencer?._id
+        ? thread.influencer
+        : await findInfluencerById(thread.influencer);
+      campaign = thread.campaign?._id ? thread.campaign : thread.campaign || null;
 
       if (!brand) {
         return res.status(404).json({ error: "Brand not found for this thread" });
@@ -1267,16 +1439,14 @@ async function sendInfluencerToBrand(req, res) {
         return res.status(404).json({ error: "Influencer not found for this thread" });
       }
 
-      // If auth middleware is attached, enforce ownership
       const authInfluencerId = req.influencer?._id || req.influencer?.influencerId;
       if (authInfluencerId && String(influencer._id) !== String(authInfluencerId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
-      await syncThreadWithLiveParticipants(thread, brand, influencer, subject);
+      await syncThreadWithLiveParticipants(thread, brand, influencer, campaign, subject);
       await thread.save();
     } else {
-      // Backward compatibility flow
       if (!brandId || !influencerId) {
         return res.status(400).json({
           error: "Either threadId OR brandId + influencerId are required.",
@@ -1285,15 +1455,22 @@ async function sendInfluencerToBrand(req, res) {
 
       brand = await findBrandById(brandId);
       influencer = await findInfluencerById(influencerId);
+      campaign = campaignId
+        ? await findCampaignByIdOrCampaignsId(campaignId)
+        : null;
 
       if (!brand) return res.status(404).json({ error: "Brand not found" });
       if (!influencer) {
         return res.status(404).json({ error: "Influencer not found" });
       }
+      if (campaignId && !campaign) {
+        return res.status(404).json({ error: "Campaign not found" });
+      }
 
       thread = await getOrCreateThread({
         brand,
         influencer,
+        campaign,
         createdBy: "influencer",
         subject,
       });
@@ -1304,6 +1481,7 @@ async function sendInfluencerToBrand(req, res) {
       thread,
       brand,
       influencer,
+      campaign,
       direction: "influencer_to_brand",
       subject,
       body,
@@ -1316,6 +1494,7 @@ async function sendInfluencerToBrand(req, res) {
       threadId: String(result.thread._id),
       messageId: String(result.message._id),
       forwardedSesMessageId: result.sesMessageId,
+      campaignId: result.thread.campaign ? String(result.thread.campaign) : null,
     });
   } catch (err) {
     console.error("sendInfluencerToBrand error:", err);
@@ -1358,6 +1537,7 @@ async function getBrandContacts(req, res) {
           flags: { invited: false, applied: false, conversation: false },
           invitation: null,
           appliedCampaigns: [],
+          campaign: null,
         };
 
       map.set(key, {
@@ -1370,6 +1550,7 @@ async function getBrandContacts(req, res) {
 
     const threads = await EmailThread.find(threadMatchForBrand(brand))
       .populate("influencer", "_id name proxyEmail email influencerId")
+      .populate("campaign", "_id campaignTitle campaignType productOrServiceName brandName")
       .sort({ lastMessageAt: -1, updatedAt: -1, createdAt: -1 })
       .limit(500)
       .lean();
@@ -1377,9 +1558,7 @@ async function getBrandContacts(req, res) {
     for (const t of threads) {
       const inf = t.influencer || null;
       const influencerMongoId = inf?._id ? String(inf._id) : null;
-      const key = influencerMongoId
-        ? `inf:${influencerMongoId}`
-        : `doc:${String(inf?._id || t.influencer)}`;
+      const key = `thread:${String(t._id)}`;
 
       upsert(key, {
         _id: influencerMongoId,
@@ -1393,6 +1572,7 @@ async function getBrandContacts(req, res) {
         lastMessageAt: t.lastMessageAt || null,
         lastMessageSnippet: t.lastMessageSnippet || "",
         flags: { conversation: true },
+        campaign: serializeCampaign(t.campaign, t.campaignSnapshot),
       });
     }
 
@@ -1402,6 +1582,7 @@ async function getBrandContacts(req, res) {
       .select({
         _id: 1,
         campaignsId: 1,
+        campaignTitle: 1,
         productOrServiceName: 1,
         campaignType: 1,
         brandName: 1,
@@ -1409,10 +1590,7 @@ async function getBrandContacts(req, res) {
       .lean();
 
     const campaignTitleById = new Map(
-      campaigns.map((c) => [
-        String(c.campaignsId || c._id),
-        c.productOrServiceName || c.campaignType || c.brandName || "Campaign",
-      ])
+      campaigns.map((c) => [String(c.campaignsId || c._id), getCampaignTitle(c)])
     );
 
     const campaignIds = campaigns
@@ -1547,6 +1725,7 @@ async function getBrandInbox(req, res) {
 
     const threads = await EmailThread.find(threadMatchForBrand(brand))
       .populate("influencer", "_id name proxyEmail email influencerId")
+      .populate("campaign", "_id campaignTitle campaignType productOrServiceName brandName")
       .sort({ lastMessageAt: -1, updatedAt: -1, createdAt: -1 })
       .limit(limit)
       .lean();
@@ -1593,6 +1772,7 @@ async function getBrandInbox(req, res) {
 
       return {
         threadId: String(t._id),
+        campaign: serializeCampaign(t.campaign, t.campaignSnapshot),
         influencer: {
           _id: inf?._id ? String(inf._id) : null,
           influencerId: inf?._id ? String(inf._id) : null,
@@ -1633,6 +1813,7 @@ async function getThreadsForBrand(req, res) {
 
     const threads = await EmailThread.find(threadMatchForBrand(brand))
       .populate("influencer", "_id name proxyEmail email influencerId")
+      .populate("campaign", "_id campaignTitle campaignType productOrServiceName brandName")
       .sort({ lastMessageAt: -1, updatedAt: -1, createdAt: -1 })
       .lean();
 
@@ -1648,6 +1829,7 @@ async function getThreadsForBrand(req, res) {
         lastMessageAt: t.lastMessageAt || null,
         lastMessageDirection: t.lastMessageDirection || null,
         lastMessageSnippet: t.lastMessageSnippet || "",
+        campaign: serializeCampaign(t.campaign, t.campaignSnapshot),
         influencer: {
           _id: t.influencer?._id ? String(t.influencer._id) : null,
           influencerId: t.influencer?._id ? String(t.influencer._id) : null,
@@ -1676,6 +1858,7 @@ async function getThreadsForInfluencer(req, res) {
 
     const threads = await EmailThread.find({ influencer: influencer._id })
       .populate("brand", "_id name brandName brandId proxyEmail")
+      .populate("campaign", "_id campaignTitle campaignType productOrServiceName brandName")
       .sort({ lastMessageAt: -1, updatedAt: -1, createdAt: -1 })
       .lean();
 
@@ -1691,6 +1874,7 @@ async function getThreadsForInfluencer(req, res) {
         lastMessageAt: t.lastMessageAt || null,
         lastMessageDirection: t.lastMessageDirection || null,
         lastMessageSnippet: t.lastMessageSnippet || "",
+        campaign: serializeCampaign(t.campaign, t.campaignSnapshot),
         brand: {
           _id: t.brand?._id ? String(t.brand._id) : null,
           brandId: t.brand?._id ? String(t.brand._id) : null,
@@ -1722,6 +1906,7 @@ async function getMessagesForThread(req, res) {
     const thread = await EmailThread.findById(threadId)
       .populate("brand", "_id name brandName brandId proxyEmail logoUrl email")
       .populate("influencer", "_id name influencerId proxyEmail email")
+      .populate("campaign", "_id campaignTitle campaignType productOrServiceName brandName")
       .lean();
 
     if (!thread) {
@@ -1751,6 +1936,7 @@ async function getMessagesForThread(req, res) {
         subject: thread.subject || "",
         lastMessageAt: thread.lastMessageAt || null,
         lastMessageDirection: thread.lastMessageDirection || null,
+        campaign: serializeCampaign(thread.campaign, thread.campaignSnapshot),
         brand: {
           _id: thread.brand?._id ? String(thread.brand._id) : null,
           brandId: thread.brand?._id ? String(thread.brand._id) : null,
@@ -1862,14 +2048,8 @@ async function getCampaignInvitationPreview(req, res) {
       });
 
     const brandName = getBrandLabel(brand);
-
-    const campaignTitle =
-      campaign.productOrServiceName ||
-      campaign.campaignType ||
-      campaign.brandName ||
-      "Our Campaign";
-
-    const campaignObjective = campaign.goal || "";
+    const campaignTitle = getCampaignTitle(campaign);
+    const campaignObjective = campaign.goal || campaign.description || "";
 
     const defaultDeliverables =
       Array.isArray(campaign.creativeBrief) && campaign.creativeBrief.length
@@ -2179,11 +2359,13 @@ async function getConversationsForCurrentInfluencer(req, res) {
 
     const threads = await EmailThread.find({ influencer: influencer._id })
       .populate("brand", "_id name brandName brandId proxyEmail logoUrl")
+      .populate("campaign", "_id campaignTitle campaignType productOrServiceName brandName")
       .sort({ lastMessageAt: -1, updatedAt: -1, createdAt: -1 })
       .lean();
 
     const conversations = threads.map((t) => ({
       id: String(t._id),
+      campaign: serializeCampaign(t.campaign, t.campaignSnapshot),
       brand: {
         _id: t.brand?._id ? String(t.brand._id) : null,
         brandId: t.brand?._id ? String(t.brand._id) : null,
@@ -2226,6 +2408,7 @@ async function getConversationForCurrentInfluencer(req, res) {
     const thread = await EmailThread.findById(threadId)
       .populate("brand", "_id name brandName brandId proxyEmail logoUrl")
       .populate("influencer", "_id name influencerId proxyEmail")
+      .populate("campaign", "_id campaignTitle campaignType productOrServiceName brandName")
       .lean();
 
     if (!thread) {
@@ -2260,6 +2443,7 @@ async function getConversationForCurrentInfluencer(req, res) {
       conversation: {
         id: String(thread._id),
         subject: thread.subject,
+        campaign: serializeCampaign(thread.campaign, thread.campaignSnapshot),
         brand: {
           _id: thread.brand?._id ? String(thread.brand._id) : null,
           brandId: thread.brand?._id ? String(thread.brand._id) : null,
