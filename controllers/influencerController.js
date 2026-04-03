@@ -234,18 +234,36 @@ function getInfluencerPublicId(doc) {
   return String(doc?.influencerId || doc?._id || "");
 }
 
+function hasCompletedOnboardingStep(step) {
+  if (Array.isArray(step)) {
+    return step.some((item) => {
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        return Object.keys(item).length > 0;
+      }
+      return Boolean(item);
+    });
+  }
+
+  if (step && typeof step === "object") {
+    return Object.keys(step).length > 0;
+  }
+
+  return Boolean(step);
+}
+
 function computeInfluencerNextRoute(influencer) {
-  const page1Done = Array.isArray(influencer?.page1) && influencer.page1.length > 0;
+  const page1Done = hasCompletedOnboardingStep(influencer?.page1);
 
   const page2Done =
-    (Array.isArray(influencer?.page2) && influencer.page2.length > 0) ||
+    hasCompletedOnboardingStep(influencer?.page2) ||
     influencer?.ispage2Skip === true;
 
   const page3Done =
-    (Array.isArray(influencer?.page3) && influencer.page3.length > 0) ||
+    hasCompletedOnboardingStep(influencer?.page3) ||
     influencer?.ispage3Skip === true;
 
   let route = "campaign";
+
   if (!page1Done) route = "page1";
   else if (!page2Done) route = "page2";
   else if (!page3Done) route = "page3";
@@ -1450,7 +1468,11 @@ exports.saveQuickOnboarding = async (req, res) => {
       user.influencerId,
       { $set: update },
       { new: true }
-    ).exec();
+    )
+      .select(
+        "_id influencerId email page1 page2 page3 ispage2Skip ispage3Skip primaryPlatform"
+      )
+      .exec();
 
     if (!influencer) {
       return res.status(404).json({ message: "Influencer not found" });
@@ -1546,7 +1568,11 @@ exports.signInInfluencer = async (req, res) => {
     const normalizedEmail = String(email).trim().toLowerCase();
     const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, "i");
 
-    const influencer = await InfluencerModel.findOne({ email: emailRegexCI }).exec();
+    const influencer = await InfluencerModel.findOne({ email: emailRegexCI })
+      .select(
+        "_id influencerId email password page1 page2 page3 ispage2Skip ispage3Skip primaryPlatform"
+      )
+      .exec();
 
     if (!influencer || !influencer.password) {
       return res.status(400).json({ message: "Invalid email or password" });
@@ -1573,19 +1599,23 @@ exports.signInInfluencer = async (req, res) => {
       email: influencer.email,
     });
 
-    const { route, page1Done, page2Done, page3Done } =
-      computeInfluencerNextRoute(influencer);
+    const routeInfo = computeInfluencerNextRoute(influencer);
 
     return res.status(200).json({
       message: "Influencer sign in successful",
       influencerId: influencer._id.toString(),
       token,
-      route,
+      route: routeInfo.route,
       onboarding: {
-        page1Done,
-        page2Done,
-        page3Done,
+        page1Done: routeInfo.page1Done,
+        page2Done: routeInfo.page2Done,
+        page3Done: routeInfo.page3Done,
       },
+      page1: influencer.page1 || [],
+      page2: influencer.page2 || [],
+      page3: influencer.page3 || [],
+      ispage2Skip: influencer.ispage2Skip || false,
+      ispage3Skip: influencer.ispage3Skip || false,
     });
   } catch (err) {
     console.error("signInInfluencer error:", err);
@@ -1738,11 +1768,11 @@ exports.getCampaignsByInfluencer = async (req, res) => {
 
     const influencerLookup = mongoose.Types.ObjectId.isValid(String(influencerId))
       ? {
-          $or: [
-            { _id: new mongoose.Types.ObjectId(String(influencerId)) },
-            { influencerId: String(influencerId) },
-          ],
-        }
+        $or: [
+          { _id: new mongoose.Types.ObjectId(String(influencerId)) },
+          { influencerId: String(influencerId) },
+        ],
+      }
       : { influencerId: String(influencerId) };
 
     const influencer = await InfluencerModel.findOne(
@@ -1872,23 +1902,23 @@ exports.getCampaignsByInfluencer = async (req, res) => {
     const [countries, ageRanges, campaignGoals] = await Promise.all([
       allCountryIds.length
         ? Country.find(
-            { _id: { $in: allCountryIds } },
-            "_id countryName"
-          ).lean()
+          { _id: { $in: allCountryIds } },
+          "_id countryName"
+        ).lean()
         : Promise.resolve([]),
 
       allAgeRangeIds.length
         ? AgeRange.find(
-            { _id: { $in: allAgeRangeIds } },
-            "_id range"
-          ).lean()
+          { _id: { $in: allAgeRangeIds } },
+          "_id range"
+        ).lean()
         : Promise.resolve([]),
 
       allCampaignGoalIds.length
         ? ProductServiceGoalModel.find(
-            { _id: { $in: allCampaignGoalIds } },
-            "_id goal"
-          ).lean()
+          { _id: { $in: allCampaignGoalIds } },
+          "_id goal"
+        ).lean()
         : Promise.resolve([]),
     ]);
 
@@ -2997,11 +3027,11 @@ exports.getLiteInfluencerByIdPost = async (req, res) => {
 
     const lookup = mongoose.Types.ObjectId.isValid(rawInfluencerId)
       ? {
-          $or: [
-            { _id: rawInfluencerId },
-            { influencerId: rawInfluencerId },
-          ],
-        }
+        $or: [
+          { _id: rawInfluencerId },
+          { influencerId: rawInfluencerId },
+        ],
+      }
       : { influencerId: rawInfluencerId };
 
     const influencer = await InfluencerModel.findOne(lookup)
