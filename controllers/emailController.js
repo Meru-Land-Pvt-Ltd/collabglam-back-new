@@ -342,6 +342,8 @@ function buildRawMimeEmail({
   htmlBody,
   textBody,
   replyTo,
+  inReplyTo,
+  references = [],
   attachments = [],
 }) {
   const safeSubject = encodeHeaderUtf8(subject || "(no subject)");
@@ -351,6 +353,10 @@ function buildRawMimeEmail({
 
   const normalizedCc = normalizeRecipientList(cc);
   const visibleTo = safeStr(headerTo || toRealEmail).trim() || toRealEmail;
+
+  const normalizedReferences = Array.isArray(references)
+    ? references.map((v) => safeStr(v).trim()).filter(Boolean)
+    : [];
 
   const textPart = splitBase64Lines(
     Buffer.from(safeStr(textBody || ""), "utf8").toString("base64")
@@ -366,6 +372,10 @@ function buildRawMimeEmail({
     normalizedCc.length ? `Cc: ${normalizedCc.join(", ")}` : "",
     replyTo ? `Reply-To: ${replyTo}` : "",
     `Subject: ${safeSubject}`,
+    inReplyTo ? `In-Reply-To: <${inReplyTo}>` : "",
+    normalizedReferences.length
+      ? `References: ${normalizedReferences.map((v) => `<${v}>`).join(" ")}`
+      : "",
     "MIME-Version: 1.0",
   ].filter(Boolean);
 
@@ -455,6 +465,8 @@ async function sendViaSES({
   htmlBody,
   textBody,
   replyTo,
+  inReplyTo,
+  references,
   attachments,
 }) {
   const ccList = normalizeRecipientList(cc);
@@ -470,6 +482,8 @@ async function sendViaSES({
     htmlBody,
     textBody,
     replyTo,
+    inReplyTo,
+    references,
     attachments: attachments || [],
   });
 
@@ -837,6 +851,25 @@ async function createAndSendMessage({
   const replyTo = fromProxyEmail;
   const headerTo = toProxyEmail || toRealEmail;
 
+    const previousExternalMessages = await EmailMessage.find({
+    thread: thread._id,
+    forwardedSesMessageId: { $exists: true, $ne: null },
+  })
+    .sort({ createdAt: 1 })
+    .select({ forwardedSesMessageId: 1 })
+    .lean();
+
+  const previousForwardedIds = previousExternalMessages
+    .map((m) => safeStr(m.forwardedSesMessageId).trim())
+    .filter(Boolean);
+
+  const threadInReplyTo =
+    previousForwardedIds.length > 0
+      ? previousForwardedIds[previousForwardedIds.length - 1]
+      : undefined;
+
+  const threadReferences = previousForwardedIds;
+
   const sesResult = await sendViaSES({
     fromAlias,
     fromName,
@@ -846,6 +879,8 @@ async function createAndSendMessage({
     htmlBody,
     textBody,
     replyTo,
+    inReplyTo: threadInReplyTo,
+    references: threadReferences,
     attachments: safeAttachments,
   });
 
