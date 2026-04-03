@@ -15,27 +15,63 @@ function slugifyName(name) {
 // ---------------- Email Thread Schema ----------------
 const emailThreadSchema = new mongoose.Schema(
   {
-    brand: { type: mongoose.Schema.Types.ObjectId, ref: "Brand", index: true },
+    brand: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Brand",
+      index: true,
+    },
+
     influencer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Influencer",
       index: true,
     },
 
+    campaign: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Campaign",
+      default: null,
+      index: true,
+    },
+
+    campaignSnapshot: {
+      _id: {
+        type: mongoose.Schema.Types.ObjectId,
+        default: null,
+      },
+      title: { type: String, default: "" },
+      campaignType: { type: String, default: "" },
+    },
+
     subject: { type: String },
 
     lastMessageAt: { type: Date, index: true },
+
     lastMessageDirection: {
       type: String,
       enum: ["brand_to_influencer", "influencer_to_brand", null],
       default: null,
     },
+
     lastMessageSnippet: { type: String },
 
-    hasInfluencerReplied: { type: Boolean, default: false, index: true },
+    hasInfluencerReplied: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
 
-    brandAliasEmail: { type: String, lowercase: true, index: true },
-    influencerAliasEmail: { type: String, lowercase: true, index: true },
+    brandAliasEmail: {
+      type: String,
+      lowercase: true,
+      index: true,
+    },
+
+    influencerAliasEmail: {
+      type: String,
+      lowercase: true,
+      index: true,
+    },
 
     brandDisplayAlias: { type: String },
     influencerDisplayAlias: { type: String },
@@ -44,6 +80,7 @@ const emailThreadSchema = new mongoose.Schema(
       name: String,
       email: String,
     },
+
     influencerSnapshot: {
       name: String,
       email: String,
@@ -60,7 +97,11 @@ const emailThreadSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-emailThreadSchema.index({ brand: 1, influencer: 1 }, { unique: true });
+// one thread per brand + influencer + campaign
+emailThreadSchema.index(
+  { brand: 1, influencer: 1, campaign: 1 },
+  { unique: true }
+);
 
 emailThreadSchema.statics.generateAliasEmail = function (displayName) {
   const slug = slugifyName(displayName);
@@ -91,14 +132,32 @@ const emailMessageSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       refPath: "fromUserModel",
     },
-    fromUserModel: { type: String, enum: ["Brand", "Influencer", "System"] },
+
+    fromUserModel: {
+      type: String,
+      enum: ["Brand", "Influencer", "System"],
+    },
 
     fromAliasEmail: { type: String },
     toRealEmail: { type: String },
 
-    fromProxyEmail: { type: String, lowercase: true, index: true },
-    toProxyEmail: { type: String, lowercase: true, index: true },
-    fromRealEmail: { type: String, lowercase: true, index: true },
+    fromProxyEmail: {
+      type: String,
+      lowercase: true,
+      index: true,
+    },
+
+    toProxyEmail: {
+      type: String,
+      lowercase: true,
+      index: true,
+    },
+
+    fromRealEmail: {
+      type: String,
+      lowercase: true,
+      index: true,
+    },
 
     subject: String,
     htmlBody: String,
@@ -127,15 +186,17 @@ const emailMessageSchema = new mongoose.Schema(
 );
 
 emailMessageSchema.index({ thread: 1, direction: 1, createdAt: -1 });
+
 emailMessageSchema.index(
   { thread: 1, messageId: 1 },
   {
     unique: true,
     partialFilterExpression: {
-      messageId: { $exists: true, $ne: null }
-    }
+      messageId: { $exists: true, $ne: null },
+    },
   }
 );
+
 emailMessageSchema.index({ forwardedSesMessageId: 1 }, { sparse: true });
 
 // ---------------- Email Template Schema ----------------
@@ -143,7 +204,11 @@ const emailTemplateSchema = new Schema(
   {
     key: { type: String, required: true, unique: true },
     name: { type: String, required: true },
-    role: { type: String, enum: ["Brand", "Influencer", "Both"], default: "Both" },
+    role: {
+      type: String,
+      enum: ["Brand", "Influencer", "Both"],
+      default: "Both",
+    },
     type: { type: String, default: "generic" },
 
     subject: { type: String, required: true },
@@ -156,13 +221,16 @@ const emailTemplateSchema = new Schema(
 );
 
 const EmailThread =
-  mongoose.models.EmailThread || mongoose.model("EmailThread", emailThreadSchema);
+  mongoose.models.EmailThread ||
+  mongoose.model("EmailThread", emailThreadSchema);
 
 const EmailMessage =
-  mongoose.models.EmailMessage || mongoose.model("EmailMessage", emailMessageSchema);
+  mongoose.models.EmailMessage ||
+  mongoose.model("EmailMessage", emailMessageSchema);
 
 const EmailTemplate =
-  mongoose.models.EmailTemplate || mongoose.model("EmailTemplate", emailTemplateSchema);
+  mongoose.models.EmailTemplate ||
+  mongoose.model("EmailTemplate", emailTemplateSchema);
 
 module.exports = {
   EmailThread,
