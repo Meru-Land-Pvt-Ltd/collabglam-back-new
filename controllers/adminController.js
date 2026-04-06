@@ -147,6 +147,42 @@ async function enrichLiteCampaignCreatedBy(rows = []) {
   });
 }
 
+function normalizePlanName(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isFreePlan(planLike = {}) {
+  const planId = normalizePlanName(planLike?.planId);
+  const planName = normalizePlanName(planLike?.name || planLike?.planName);
+  const label = normalizePlanName(planLike?.label);
+  const displayName = normalizePlanName(planLike?.displayName);
+
+  return (
+    planId.includes("free") ||
+    planName === "free" ||
+    planName.includes("free") ||
+    label === "free" ||
+    displayName === "free"
+  );
+}
+
+function shouldSendUpgradeEmail({ oldPlan, newPlan }) {
+  if (!newPlan) return false;
+
+  const oldPlanId = String(oldPlan?.planId || "").trim();
+  const newPlanId = String(newPlan?.planId || "").trim();
+
+  if (oldPlanId && newPlanId && oldPlanId === newPlanId) {
+    return false;
+  }
+
+  if (isFreePlan(newPlan)) {
+    return false;
+  }
+
+  return true;
+}
+
 function buildSubscriptionFromPlan(plan, options = {}) {
   const now = new Date();
 
@@ -598,9 +634,16 @@ exports.adminAssignBrandPlan = async (req, res) => {
       });
     }
 
-    const oldPlanName =
-      existingBrand?.subscription?.planName ||
-      (existingBrand?.subscriptionExpired ? "expired" : "free");
+    const previousPlan = {
+      planId: existingBrand?.subscription?.planId || null,
+      planName:
+        existingBrand?.subscription?.planName ||
+        (existingBrand?.subscriptionExpired ? "expired" : "free"),
+    };
+
+    const isSamePlan =
+      previousPlan.planId &&
+      String(previousPlan.planId) === String(plan.planId);
 
     const subscription = buildSubscriptionFromPlan(plan, {
       billingCycle,
@@ -610,8 +653,15 @@ exports.adminAssignBrandPlan = async (req, res) => {
       expiresAt,
     });
 
-    subscription.lastExpiringSoonEmailSentAt = null;
-    subscription.lastExpiredEmailSentAt = null;
+    if (!isSamePlan) {
+      subscription.lastExpiringSoonEmailSentAt = null;
+      subscription.lastExpiredEmailSentAt = null;
+    } else {
+      subscription.lastExpiringSoonEmailSentAt =
+        existingBrand?.subscription?.lastExpiringSoonEmailSentAt || null;
+      subscription.lastExpiredEmailSentAt =
+        existingBrand?.subscription?.lastExpiredEmailSentAt || null;
+    }
 
     const updated = await Brand.findByIdAndUpdate(
       brandId,
@@ -635,17 +685,24 @@ exports.adminAssignBrandPlan = async (req, res) => {
       });
     }
 
-    await sendSubscriptionLifecycleEmail({
-      userType: "Brand",
-      user: updated,
-      plan,
-      oldPlanName,
-      eventType: "upgraded",
-    });
+    if (
+      shouldSendUpgradeEmail({
+        oldPlan: previousPlan,
+        newPlan: plan,
+      })
+    ) {
+      await sendSubscriptionLifecycleEmail({
+        userType: "Brand",
+        user: updated,
+        plan,
+        oldPlanName: previousPlan.planName || "free",
+        eventType: "upgraded",
+      });
+    }
 
     return res.json({
       status: "success",
-      message: `Brand plan assigned successfully. Email notification sent to ${updated.email || updated.proxyEmail || "brand user"}.`,
+      message: "Brand plan assigned successfully.",
       brand: {
         ...updated,
         brandId: String(updated._id),
@@ -695,9 +752,16 @@ exports.adminAssignInfluencerPlan = async (req, res) => {
       return res.status(404).json({ message: "Influencer plan not found/archived" });
     }
 
-    const oldPlanName =
-      existingInfluencer?.subscription?.planName ||
-      (existingInfluencer?.subscriptionExpired ? "expired" : "free");
+    const previousPlan = {
+      planId: existingInfluencer?.subscription?.planId || null,
+      planName:
+        existingInfluencer?.subscription?.planName ||
+        (existingInfluencer?.subscriptionExpired ? "expired" : "free"),
+    };
+
+    const isSamePlan =
+      previousPlan.planId &&
+      String(previousPlan.planId) === String(plan.planId);
 
     const subscription = buildSubscriptionFromPlan(plan, {
       billingCycle: "monthly",
@@ -707,8 +771,15 @@ exports.adminAssignInfluencerPlan = async (req, res) => {
       expiresAt,
     });
 
-    subscription.lastExpiringSoonEmailSentAt = null;
-    subscription.lastExpiredEmailSentAt = null;
+    if (!isSamePlan) {
+      subscription.lastExpiringSoonEmailSentAt = null;
+      subscription.lastExpiredEmailSentAt = null;
+    } else {
+      subscription.lastExpiringSoonEmailSentAt =
+        existingInfluencer?.subscription?.lastExpiringSoonEmailSentAt || null;
+      subscription.lastExpiredEmailSentAt =
+        existingInfluencer?.subscription?.lastExpiredEmailSentAt || null;
+    }
 
     const updated = await Influencer.findByIdAndUpdate(
       influencerId,
@@ -727,17 +798,24 @@ exports.adminAssignInfluencerPlan = async (req, res) => {
       return res.status(404).json({ message: "Influencer not found" });
     }
 
-    await sendSubscriptionLifecycleEmail({
-      userType: "Influencer",
-      user: updated,
-      plan,
-      oldPlanName,
-      eventType: "upgraded",
-    });
+    if (
+      shouldSendUpgradeEmail({
+        oldPlan: previousPlan,
+        newPlan: plan,
+      })
+    ) {
+      await sendSubscriptionLifecycleEmail({
+        userType: "Influencer",
+        user: updated,
+        plan,
+        oldPlanName: previousPlan.planName || "free",
+        eventType: "upgraded",
+      });
+    }
 
     return res.json({
       status: "success",
-      message: `Influencer plan assigned successfully. Email notification sent to ${updated.email || updated.proxyEmail || "influencer"}.`,
+      message: "Influencer plan assigned successfully.",
       influencer: updated,
     });
   } catch (error) {

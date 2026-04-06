@@ -36,9 +36,9 @@ function featureValueToLimit(value) {
 function getUserEmail(user) {
   return String(
     user?.email ||
-      user?.proxyEmail ||
-      user?.contactEmail ||
-      ""
+    user?.proxyEmail ||
+    user?.contactEmail ||
+    ""
   )
     .trim()
     .toLowerCase();
@@ -237,6 +237,58 @@ function normalizedMonthlyCost(plan) {
   if (typeof plan.monthlyCost === "number") return plan.monthlyCost;
   if (typeof plan.annualCost === "number") return plan.annualCost / 12;
   return 0;
+}
+
+function normalizePlanName(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isFreePlan(planLike = {}) {
+  const planId = normalizePlanName(planLike?.planId);
+  const planName = normalizePlanName(planLike?.name || planLike?.planName);
+  const label = normalizePlanName(planLike?.label);
+  const displayName = normalizePlanName(planLike?.displayName);
+
+  return (
+    planId.includes("free") ||
+    planName === "free" ||
+    planName.includes("free") ||
+    label === "free" ||
+    displayName === "free"
+  );
+}
+
+function shouldSendUpgradeEmail({ oldPlan, newPlan }) {
+  if (!newPlan) return false;
+
+  const oldPlanId = String(oldPlan?.planId || "").trim();
+  const newPlanId = String(newPlan?.planId || "").trim();
+
+  // same plan reassigned again -> no email
+  if (oldPlanId && newPlanId && oldPlanId === newPlanId) {
+    return false;
+  }
+
+  // free -> paid can send
+  // paid -> paid different can send
+  // free -> free should not send
+  if (isFreePlan(newPlan)) {
+    return false;
+  }
+
+  return true;
+}
+
+function shouldSendRenewalEmail(plan) {
+  // If you do not want renewal mail at all, keep false
+  // change to !isFreePlan(plan) if later you want paid renewal mails
+  return false;
+}
+
+function shouldSendExpiryReminder(plan) {
+  // never send expiry / expiring soon for free plans
+  if (!plan || isFreePlan(plan)) return false;
+  return true;
 }
 
 // POST /subscription-plans/create
@@ -466,7 +518,14 @@ exports.assignPlan = async (req, res) => {
         .json({ message: `${userType} with ID ${userId} not found` });
     }
 
-    const oldPlanName = existingUser?.subscription?.planName || "free";
+    const previousPlan = {
+      planId: existingUser?.subscription?.planId || null,
+      planName: existingUser?.subscription?.planName || null,
+    };
+
+    const isSamePlan =
+      previousPlan.planId &&
+      String(previousPlan.planId) === String(plan.planId);
 
     existingUser.subscription = existingUser.subscription || {};
     existingUser.subscription.planId = plan.planId;
@@ -474,19 +533,31 @@ exports.assignPlan = async (req, res) => {
     existingUser.subscription.startedAt = now;
     existingUser.subscription.expiresAt = expire;
     existingUser.subscription.features = featureSnapshot;
-    existingUser.subscription.lastExpiringSoonEmailSentAt = null;
-    existingUser.subscription.lastExpiredEmailSentAt = null;
+
+    // reset reminder flags only if plan changed
+    if (!isSamePlan) {
+      existingUser.subscription.lastExpiringSoonEmailSentAt = null;
+      existingUser.subscription.lastExpiredEmailSentAt = null;
+    }
+
     existingUser.subscriptionExpired = false;
 
     await existingUser.save();
 
-    await sendSubscriptionLifecycleEmail({
-      userType,
-      user: existingUser,
-      plan,
-      oldPlanName,
-      eventType: "upgraded",
-    });
+    if (
+      shouldSendUpgradeEmail({
+        oldPlan: previousPlan,
+        newPlan: plan,
+      })
+    ) {
+      await sendSubscriptionLifecycleEmail({
+        userType,
+        user: existingUser,
+        plan,
+        oldPlanName: previousPlan.planName || "free",
+        eventType: "upgraded",
+      });
+    }
 
     return res.json({
       message: `${userType} subscribed to "${plan.name}". It will expire at ${expire.toISOString()}`,
@@ -549,12 +620,14 @@ exports.renewPlan = async (req, res) => {
 
     await user.save();
 
-    await sendSubscriptionLifecycleEmail({
-      userType,
-      user,
-      plan,
-      eventType: "renewed",
-    });
+    if (shouldSendRenewalEmail(plan)) {
+      await sendSubscriptionLifecycleEmail({
+        userType,
+        user,
+        plan,
+        eventType: "renewed",
+      });
+    }
 
     return res.json({
       message: `${userType} subscription renewed until ${newExpires.toISOString()}`,
@@ -790,6 +863,15 @@ exports.sendExpiringSoonEmails = async (req, res) => {
           planId: user?.subscription?.planId,
         }).lean();
 
+        user.subscription = user.subscription || {};
+
+        // mark free/invalid plans as handled so cron does not keep reprocessing them
+        if (!shouldSendExpiryReminder(plan)) {
+          user.subscription.lastExpiringSoonEmailSentAt = new Date();
+          await user.save();
+          continue;
+        }
+
         await sendSubscriptionLifecycleEmail({
           userType,
           user,
@@ -797,7 +879,6 @@ exports.sendExpiringSoonEmails = async (req, res) => {
           eventType: "expiring_soon",
         });
 
-        user.subscription = user.subscription || {};
         user.subscription.lastExpiringSoonEmailSentAt = new Date();
         await user.save();
 
@@ -846,6 +927,16 @@ exports.sendExpiredSubscriptionEmails = async (req, res) => {
           planId: user?.subscription?.planId,
         }).lean();
 
+        user.subscriptionExpired = true;
+        user.subscription = user.subscription || {};
+
+        // mark free/invalid plans as handled so cron does not keep reprocessing them
+        if (!shouldSendExpiryReminder(plan)) {
+          user.subscription.lastExpiredEmailSentAt = new Date();
+          await user.save();
+          continue;
+        }
+
         await sendSubscriptionLifecycleEmail({
           userType,
           user,
@@ -853,8 +944,6 @@ exports.sendExpiredSubscriptionEmails = async (req, res) => {
           eventType: "expired",
         });
 
-        user.subscriptionExpired = true;
-        user.subscription = user.subscription || {};
         user.subscription.lastExpiredEmailSentAt = new Date();
         await user.save();
 
