@@ -1,4 +1,3 @@
-// routes/index.js (or wherever you mount routes)
 const express = require('express');
 const router = express.Router();
 const ModashController = require('../controllers/modashController');
@@ -6,6 +5,7 @@ const ModashController = require('../controllers/modashController');
 router.get('/users', ModashController.frontendUsers);
 
 router.post('/search', ModashController.frontendSearch);
+router.post('/search-unified', ModashController.frontendUnifiedSearch);
 
 router.get('/report', ModashController.frontendReport);
 
