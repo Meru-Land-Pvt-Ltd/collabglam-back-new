@@ -1844,9 +1844,9 @@ async function frontendReport(req, res) {
     }
 
     const platform = normalizePlatform(req.query.platform || '');
-    const userId = cleanStr(req.query.userId || '');
+    const requestedUserId = cleanStr(req.query.userId || '');
     const calculationMethod = toCalcMethod(req.query.calculationMethod);
-    const influencerId = cleanStr(req.query.influencerId || req.query.influencer_id || '') || null;
+    let influencerId = cleanStr(req.query.influencerId || req.query.influencer_id || '') || null;
 
     const forceFresh =
       req.query.force === '1' ||
@@ -1857,8 +1857,36 @@ async function frontendReport(req, res) {
     if (!platform) {
       return res.status(400).json({ error: 'platform must be instagram|tiktok|youtube' });
     }
-    if (!userId) {
+
+    if (!requestedUserId) {
       return res.status(400).json({ error: 'userId is required' });
+    }
+
+    // Resolve `/mediakit/[id]` style Mongo _id into actual Modash/platform userId.
+    // If the incoming value is already a real provider userId, this safely falls through.
+    let resolvedUserId = requestedUserId;
+
+    if (mongoose.Types.ObjectId.isValid(requestedUserId)) {
+      try {
+        const localDoc = await ModashProfile.findOne({
+          _id: requestedUserId,
+          provider: platform,
+        })
+          .select({
+            userId: 1,
+            influencerId: 1,
+          })
+          .lean();
+
+        if (localDoc?.userId) {
+          resolvedUserId = cleanStr(localDoc.userId);
+          if (!influencerId && localDoc.influencerId) {
+            influencerId = cleanStr(localDoc.influencerId);
+          }
+        }
+      } catch (resolveErr) {
+        console.error('[frontendReport] Failed to resolve local Modash _id:', resolveErr);
+      }
     }
 
     const now = new Date();
@@ -1870,9 +1898,10 @@ async function frontendReport(req, res) {
         const existingView = await BrandProfileView.findOne({
           brandId,
           platform,
-          userId,
+          userId: resolvedUserId,
           periodKey,
         }).lean();
+
         alreadyViewedThisPeriod = !!existingView;
       } catch (e) {
         console.error('[frontendReport] Failed to check BrandProfileView:', e.message);
@@ -1895,19 +1924,27 @@ async function frontendReport(req, res) {
 
     if (!forceFresh) {
       try {
-        const cached = await findCachedReport({ platform, userId, influencerId });
+        const cached = await findCachedReport({
+          platform,
+          userId: resolvedUserId,
+          influencerId,
+        });
+
         if (cached && cached.providerRaw) {
           const out = Object.assign({}, cached.providerRaw);
+
           if (cached.lastFetchedAt) {
             const d = new Date(cached.lastFetchedAt);
-            if (!isNaN(d.getTime())) out._lastFetchedAt = d.toISOString();
+            if (!isNaN(d.getTime())) {
+              out._lastFetchedAt = d.toISOString();
+            }
           }
 
           if (!isAdmin && brandId) {
             await recordBrandProfileView({
               brandId,
               platform,
-              userId,
+              userId: resolvedUserId,
               influencerId,
               periodKey,
               at: now,
@@ -1923,9 +1960,10 @@ async function frontendReport(req, res) {
 
     let reportJSON;
     try {
-      reportJSON = await modashGET(`/${platform}/profile/${encodeURIComponent(userId)}/report`, {
-        calculationMethod,
-      });
+      reportJSON = await modashGET(
+        `/${platform}/profile/${encodeURIComponent(resolvedUserId)}/report`,
+        { calculationMethod }
+      );
     } catch (apiErr) {
       const raw = (apiErr && apiErr.message) || '';
       let safeMsg = 'Report unavailable';
@@ -1937,6 +1975,7 @@ async function frontendReport(req, res) {
           /api token|developer section|modash|authorization|bearer|modash_api_key|marketer\.modash\.io/i.test(
             String(rawMsg)
           );
+
         safeMsg = isSensitive ? 'Report unavailable' : rawMsg || safeMsg;
       } catch {
         // ignore parsing errors
@@ -1947,23 +1986,27 @@ async function frontendReport(req, res) {
     }
 
     const fetchedAt = new Date();
+
     try {
       const normalized = normalizeReportData(reportJSON);
+
       await upsertModashProfileFromReport(normalized, platform, {
-        userIdFromRequest: userId,
+        userIdFromRequest: resolvedUserId,
         influencerId,
       });
     } catch (saveErr) {
       console.error('[frontendReport] Failed to save Modash profile to database:', saveErr);
     }
 
-    const out = Object.assign({}, reportJSON, { _lastFetchedAt: fetchedAt.toISOString() });
+    const out = Object.assign({}, reportJSON, {
+      _lastFetchedAt: fetchedAt.toISOString(),
+    });
 
     if (!isAdmin && brandId) {
       await recordBrandProfileView({
         brandId,
         platform,
-        userId,
+        userId: resolvedUserId,
         influencerId,
         periodKey,
         at: fetchedAt,
@@ -2595,7 +2638,6 @@ async function getMediaKitLink(req, res) {
     const usernameRx = exactCI(username);
     const handleRx = exactCI(`@${username}`);
 
-    // 1) First try local DB
     let saved = await ModashProfile.findOne({
       provider: platform,
       $or: [
@@ -2607,7 +2649,6 @@ async function getMediaKitLink(req, res) {
       .select('_id provider userId username handle fullname')
       .lean();
 
-    // 2) If not found locally, call Modash API and save it
     if (!saved) {
       const hit = await searchForUsername(platform, username);
 
@@ -2639,12 +2680,18 @@ async function getMediaKitLink(req, res) {
     }
 
     const baseUrl = cleanStr(process.env.CAMPAIGN_BASE_URL || 'http://localhost:3000');
-    const link = `${baseUrl}/mediakit/${saved._id}`;
+
+    // Use provider userId in the public link, not Mongo _id.
+    // Also append platform so the frontend does not silently default to youtube.
+    const publicProfileId = encodeURIComponent(cleanStr(saved.userId) || String(saved._id));
+    const publicPlatform = encodeURIComponent(cleanStr(saved.provider));
+    const link = `${baseUrl}/mediakit/${publicProfileId}?platform=${publicPlatform}`;
 
     return res.json({
       success: true,
       data: {
         modashId: String(saved._id),
+        userId: cleanStr(saved.userId) || null,
         platform: saved.provider,
         username: saved.username || saved.handle || username,
         link,
