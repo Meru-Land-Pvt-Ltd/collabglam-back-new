@@ -12,11 +12,11 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1011.0",
+    "@aws-sdk/client-s3": "^3.1028.0",
     "@aws-sdk/client-ses": "^3.1011.0",
     "@aws-sdk/client-sts": "^3.1013.0",
     "@aws-sdk/credential-providers": "^3.1011.0",
-    "@aws-sdk/s3-request-presigner": "^3.1020.0",
+    "@aws-sdk/s3-request-presigner": "^3.1028.0",
     "@stripe/stripe-js": "^9.0.0",
     "aws-sdk": "^2.1693.0",
     "bcrypt": "^6.0.0",
