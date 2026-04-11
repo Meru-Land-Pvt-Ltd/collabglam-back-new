@@ -1158,21 +1158,21 @@ function cloneFolderItemForTransfer(item, actorId = null) {
 
     rateCardHistory: Array.isArray(source.rateCardHistory)
       ? source.rateCardHistory.map((entry) => ({
-          field: cleanStr(entry.field),
-          previousValue: cleanStr(entry.previousValue),
-          newValue: cleanStr(entry.newValue),
-          changedAt: entry?.changedAt ? new Date(entry.changedAt) : new Date(),
-          changedByAdminId:
-            entry?.changedByAdminId &&
+        field: cleanStr(entry.field),
+        previousValue: cleanStr(entry.previousValue),
+        newValue: cleanStr(entry.newValue),
+        changedAt: entry?.changedAt ? new Date(entry.changedAt) : new Date(),
+        changedByAdminId:
+          entry?.changedByAdminId &&
             mongoose.Types.ObjectId.isValid(String(entry.changedByAdminId))
-              ? new mongoose.Types.ObjectId(String(entry.changedByAdminId))
-              : null,
-        }))
+            ? new mongoose.Types.ObjectId(String(entry.changedByAdminId))
+            : null,
+      }))
       : [],
 
     sourcePipelineId:
       source?.sourcePipelineId &&
-      mongoose.Types.ObjectId.isValid(String(source.sourcePipelineId))
+        mongoose.Types.ObjectId.isValid(String(source.sourcePipelineId))
         ? new mongoose.Types.ObjectId(String(source.sourcePipelineId))
         : null,
 
@@ -1463,13 +1463,8 @@ exports.duplicateFolder = async (req, res) => {
       slug: duplicateSlug,
       description: cleanStr(sourceDoc.description),
 
-      // keep folder-level visibility settings
-      brandVisibleItemCount:
-        sourceDoc.brandVisibleItemCount === null || sourceDoc.brandVisibleItemCount === undefined
-          ? null
-          : toNullableInteger(sourceDoc.brandVisibleItemCount),
-
-      showFullListToBrand: !!sourceDoc.showFullListToBrand,
+      brandVisibleItemCount: null,
+      showFullListToBrand: true,
 
       // deep duplicate items
       items: duplicatedItems,
@@ -2356,8 +2351,8 @@ exports.moveFolderItems = async (req, res) => {
 
     const itemIds = Array.isArray(req.body?.itemIds)
       ? uniqStrings(req.body.itemIds).filter((id) =>
-          mongoose.Types.ObjectId.isValid(String(id))
-        )
+        mongoose.Types.ObjectId.isValid(String(id))
+      )
       : [];
 
     if (!isCopyOnly && !isDirectMove) {
@@ -2496,9 +2491,8 @@ exports.moveFolderItems = async (req, res) => {
 
     return res.json({
       success: true,
-      message: `Selected influencers ${
-        isCopyOnly ? 'copied' : 'moved'
-      } successfully`,
+      message: `Selected influencers ${isCopyOnly ? 'copied' : 'moved'
+        } successfully`,
       data: {
         action: isCopyOnly ? 'copy' : 'move',
         copiedCount,
