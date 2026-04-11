@@ -1839,7 +1839,14 @@ async function frontendReport(req, res) {
     const adminId = cleanStr(req.query.adminId || req.query.admin_id || '');
     const isAdmin = !!adminId;
 
-    if (!brandId && !adminId) {
+    // ✅ np=1 => do not consume brand profile-view credit
+    const skipProfileCredit =
+      req.query.np === '1' ||
+      req.query.np === 'true' ||
+      req.query.noProfileCredit === '1' ||
+      req.query.noProfileCredit === 'true';
+
+    if (!skipProfileCredit && !brandId && !adminId) {
       return res.status(400).json({ error: 'brandId or adminId is required for profile views' });
     }
 
@@ -1862,8 +1869,6 @@ async function frontendReport(req, res) {
       return res.status(400).json({ error: 'userId is required' });
     }
 
-    // Resolve `/mediakit/[id]` style Mongo _id into actual Modash/platform userId.
-    // If the incoming value is already a real provider userId, this safely falls through.
     let resolvedUserId = requestedUserId;
 
     if (mongoose.Types.ObjectId.isValid(requestedUserId)) {
@@ -1891,9 +1896,11 @@ async function frontendReport(req, res) {
 
     const now = new Date();
     const periodKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+    const shouldChargeProfileView = !skipProfileCredit && !isAdmin && !!brandId;
+
     let alreadyViewedThisPeriod = false;
 
-    if (!isAdmin && brandId) {
+    if (shouldChargeProfileView) {
       try {
         const existingView = await BrandProfileView.findOne({
           brandId,
@@ -1908,7 +1915,7 @@ async function frontendReport(req, res) {
       }
     }
 
-    if (!isAdmin && brandId && !alreadyViewedThisPeriod) {
+    if (shouldChargeProfileView && !alreadyViewedThisPeriod) {
       try {
         await ensureProfileQuota(brandId);
       } catch (e) {
@@ -1940,7 +1947,7 @@ async function frontendReport(req, res) {
             }
           }
 
-          if (!isAdmin && brandId) {
+          if (shouldChargeProfileView) {
             await recordBrandProfileView({
               brandId,
               platform,
@@ -2002,7 +2009,7 @@ async function frontendReport(req, res) {
       _lastFetchedAt: fetchedAt.toISOString(),
     });
 
-    if (!isAdmin && brandId) {
+    if (shouldChargeProfileView) {
       await recordBrandProfileView({
         brandId,
         platform,
@@ -2685,7 +2692,7 @@ async function getMediaKitLink(req, res) {
     // Also append platform so the frontend does not silently default to youtube.
     const publicProfileId = encodeURIComponent(cleanStr(saved.userId) || String(saved._id));
     const publicPlatform = encodeURIComponent(cleanStr(saved.provider));
-    const link = `${baseUrl}/mediakit/${publicProfileId}?platform=${publicPlatform}`;
+    const link = `${baseUrl}/mediakit/${publicProfileId}?platform=${publicPlatform}&np=1`;
 
     return res.json({
       success: true,
