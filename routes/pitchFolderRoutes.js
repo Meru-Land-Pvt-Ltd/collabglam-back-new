@@ -21,11 +21,14 @@ router.get('/list', adminAuth, controller.listFolders);
 router.post('/create', adminAuth, controller.createFolder);
 router.get('/:id', adminAuth, controller.getFolderById);
 router.post('/update', adminAuth, controller.updateFolder);
+router.post('/duplicate', adminAuth, controller.duplicateFolder);
+router.post('/:id/duplicate', adminAuth, controller.duplicateFolder);
 router.post('/archive', adminAuth, controller.archiveFolder);
 
 router.post('/:id/item', adminAuth, controller.addFolderItem);
 router.post('/item/update', adminAuth, controller.updateFolderItem);
 router.post('/item/delete', adminAuth, controller.deleteFolderItem);
+router.post('/items/move', adminAuth, controller.moveFolderItems);
 
 router.post('/item/media-kit/presign', adminAuth, controller.getFolderItemMediaKitUploadUrl);
 router.post('/item/media-kit/visibility', adminAuth, controller.updateFolderItemMediaKitVisibility);

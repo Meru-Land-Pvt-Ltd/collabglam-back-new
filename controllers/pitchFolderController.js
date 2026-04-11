@@ -7,6 +7,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const PitchFolder = require('../models/pitchFolder');
 const { AdminModel, ROLES } = require('../models/master');
+const InfluencerProfile = require('../models/youtube');
 
 const ALLOWED_PROVIDERS = ['instagram', 'youtube', 'tiktok'];
 const MEDIA_KIT_REQUEST_STATUSES = ['none', 'requested', 'approved', 'rejected'];
@@ -620,7 +621,7 @@ function normalizeItem(body = {}, actorId = null) {
     rateCardCurrency: cleanStr(body.rateCardCurrency || 'USD').toUpperCase(),
     rateCardHistory: [],
     ourFeePct: toNullableNumber(body.ourFeePct),
-    comments: cleanStr(body.comments),
+    shippingAddress: cleanStr(body.shippingAddress || body.comments),
     mediaKit: normalizeMediaKit(body.mediaKit, actorId),
     mediaKitLink: normalizeMediaKitLink(body.mediaKitLink, actorId),
     sourcePipelineId:
@@ -680,7 +681,12 @@ function applyItemMutations(item, body = {}, actorId = null) {
   }
 
   if (hasOwn(body, 'ourFeePct')) item.ourFeePct = toNullableNumber(body.ourFeePct);
-  if (hasOwn(body, 'comments')) item.comments = cleanStr(body.comments);
+
+  if (hasOwn(body, 'shippingAddress') || hasOwn(body, 'comments')) {
+    item.shippingAddress = cleanStr(
+      hasOwn(body, 'shippingAddress') ? body.shippingAddress : body.comments
+    );
+  }
 
   if (hasOwn(body, 'sourcePipelineId')) {
     item.sourcePipelineId =
@@ -709,8 +715,8 @@ function applyItemMutations(item, body = {}, actorId = null) {
     hasOwn(body, 'mediaKitLink') && body?.mediaKitLink?.showToBrand
       ? 'link'
       : hasOwn(body, 'mediaKit') && body?.mediaKit?.showToBrand
-      ? 'pdf'
-      : '';
+        ? 'pdf'
+        : '';
 
   ensureSingleSharedMediaKit(item, preferredSource);
   ensureGenericRequestConsistency(item);
@@ -882,7 +888,7 @@ function serializeFolderItemForAdmin(item) {
     platformRateCard: item.platformRateCard || '',
     rateCardCurrency: item.rateCardCurrency || 'USD',
     ourFeePct: item.ourFeePct,
-    comments: item.comments,
+    shippingAddress: item.shippingAddress || item.comments || '',
 
     mediaKitAccess: {
       hasAdded: hasStoredMediaKit(item.mediaKit) || hasMediaKitLink(item.mediaKitLink),
@@ -894,41 +900,41 @@ function serializeFolderItemForAdmin(item) {
 
     mediaKitLink: item.mediaKitLink
       ? {
-          url: item.mediaKitLink.url || '',
-          generatedAt: item.mediaKitLink.generatedAt || null,
-          showToBrand: !!item.mediaKitLink.showToBrand,
-          requestStatus: item.mediaKitLink.requestStatus || 'none',
-          requestedAt: item.mediaKitLink.requestedAt || null,
-          reviewedAt: item.mediaKitLink.reviewedAt || null,
-        }
+        url: item.mediaKitLink.url || '',
+        generatedAt: item.mediaKitLink.generatedAt || null,
+        showToBrand: !!item.mediaKitLink.showToBrand,
+        requestStatus: item.mediaKitLink.requestStatus || 'none',
+        requestedAt: item.mediaKitLink.requestedAt || null,
+        reviewedAt: item.mediaKitLink.reviewedAt || null,
+      }
       : null,
 
     mediaKit: item.mediaKit
       ? {
-          s3Key: item.mediaKit.s3Key || '',
-          fileName: item.mediaKit.fileName || '',
-          mimeType: item.mediaKit.mimeType || 'application/pdf',
-          size: item.mediaKit.size,
-          uploadedAt: item.mediaKit.uploadedAt || null,
-          showToBrand: !!item.mediaKit.showToBrand,
-          requestStatus: item.mediaKit.requestStatus || 'none',
-          requestedAt: item.mediaKit.requestedAt || null,
-          reviewedAt: item.mediaKit.reviewedAt || null,
-        }
+        s3Key: item.mediaKit.s3Key || '',
+        fileName: item.mediaKit.fileName || '',
+        mimeType: item.mediaKit.mimeType || 'application/pdf',
+        size: item.mediaKit.size,
+        uploadedAt: item.mediaKit.uploadedAt || null,
+        showToBrand: !!item.mediaKit.showToBrand,
+        requestStatus: item.mediaKit.requestStatus || 'none',
+        requestedAt: item.mediaKit.requestedAt || null,
+        reviewedAt: item.mediaKit.reviewedAt || null,
+      }
       : null,
 
     rateCardHistory: Array.isArray(item.rateCardHistory)
       ? item.rateCardHistory
-          .slice()
-          .sort((a, b) => new Date(b.changedAt).getTime() - new Date(a.changedAt).getTime())
-          .map((entry) => ({
-            _id: entry._id,
-            field: entry.field,
-            previousValue: entry.previousValue || '',
-            newValue: entry.newValue || '',
-            changedAt: entry.changedAt || null,
-            changedByAdminId: entry.changedByAdminId ? String(entry.changedByAdminId) : null,
-          }))
+        .slice()
+        .sort((a, b) => new Date(b.changedAt).getTime() - new Date(a.changedAt).getTime())
+        .map((entry) => ({
+          _id: entry._id,
+          field: entry.field,
+          previousValue: entry.previousValue || '',
+          newValue: entry.newValue || '',
+          changedAt: entry.changedAt || null,
+          changedByAdminId: entry.changedByAdminId ? String(entry.changedByAdminId) : null,
+        }))
       : [],
     sourcePipelineId: item.sourcePipelineId || null,
     createdAt: item.createdAt || null,
@@ -977,11 +983,11 @@ function serializeFolderListItem(doc) {
     showFullListToBrand: !!doc.showFullListToBrand,
     share: doc.share
       ? {
-          token: doc.share.token || '',
-          url: doc.share.url || '',
-          generatedAt: doc.share.generatedAt || null,
-          sharedBy: serializeMiniAdmin(doc.share.sharedByAdminId),
-        }
+        token: doc.share.token || '',
+        url: doc.share.url || '',
+        generatedAt: doc.share.generatedAt || null,
+        sharedBy: serializeMiniAdmin(doc.share.sharedByAdminId),
+      }
       : {},
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
@@ -1010,11 +1016,11 @@ function serializeFolderDetail(doc) {
     showFullListToBrand: !!doc.showFullListToBrand,
     share: doc.share
       ? {
-          token: doc.share.token || '',
-          url: doc.share.url || '',
-          generatedAt: doc.share.generatedAt || null,
-          sharedBy: serializeMiniAdmin(doc.share.sharedByAdminId),
-        }
+        token: doc.share.token || '',
+        url: doc.share.url || '',
+        generatedAt: doc.share.generatedAt || null,
+        sharedBy: serializeMiniAdmin(doc.share.sharedByAdminId),
+      }
       : {},
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
@@ -1066,6 +1072,191 @@ exports.listFolders = async (req, res) => {
   }
 };
 
+async function buildUniqueFolderSlug(title, excludeFolderId = null) {
+  const baseSlug = slugify(title) || `pitch-folder-${Date.now()}`;
+  let slug = baseSlug;
+  let counter = 1;
+
+  while (
+    await PitchFolder.exists({
+      ...(excludeFolderId ? { _id: { $ne: excludeFolderId } } : {}),
+      slug,
+      archivedAt: null,
+    })
+  ) {
+    counter += 1;
+    slug = `${baseSlug}-${counter}`;
+  }
+
+  return slug;
+}
+
+function resetDuplicatedMediaKitState(mediaKit) {
+  const next = normalizeMediaKit(mediaKit || null, null, mediaKit || null);
+
+  if (!hasStoredMediaKit(next)) {
+    return normalizeMediaKit(null, null);
+  }
+
+  next.showToBrand = false;
+  next.requestStatus = 'none';
+  next.requestedAt = null;
+  next.reviewedAt = null;
+  next.reviewedByAdminId = null;
+
+  return next;
+}
+
+function resetDuplicatedMediaKitLinkState(mediaKitLink) {
+  const next = normalizeMediaKitLink(mediaKitLink || null, null, mediaKitLink || null);
+
+  if (!hasMediaKitLink(next)) {
+    return normalizeMediaKitLink(null, null);
+  }
+
+  next.showToBrand = false;
+  next.requestStatus = 'none';
+  next.requestedAt = null;
+  next.reviewedAt = null;
+  next.reviewedByAdminId = null;
+
+  return next;
+}
+
+function cloneFolderItemForTransfer(item, actorId = null) {
+  const source = typeof item?.toObject === 'function' ? item.toObject() : item || {};
+
+  const clonedItem = {
+    provider: normalizeProvider(source.provider),
+    name: cleanStr(source.name),
+    handle: cleanStr(source.handle).replace(/^@+/, '@'),
+    followers: toNullableNumber(source.followers),
+
+    primaryLink: cleanStr(source.primaryLink),
+    links: Array.isArray(source.links) ? uniqStrings(source.links) : [],
+
+    niche: Array.isArray(source.niche) ? uniqStrings(source.niche) : [],
+    email: cleanStr(source.email).toLowerCase(),
+    country: cleanStr(source.country),
+
+    selectionReason: cleanStr(source.selectionReason),
+    goodFit: !!source.goodFit,
+
+    influencerRateCard: cleanStr(source.influencerRateCard),
+    platformRateCard: cleanStr(source.platformRateCard),
+    rateCardCurrency: cleanStr(source.rateCardCurrency || 'USD').toUpperCase(),
+
+    ourFeePct: toNullableNumber(source.ourFeePct),
+    shippingAddress: cleanStr(source.shippingAddress || source.comments),
+
+    mediaKit: normalizeMediaKit(source.mediaKit || null, actorId, source.mediaKit || null),
+    mediaKitLink: normalizeMediaKitLink(
+      source.mediaKitLink || null,
+      actorId,
+      source.mediaKitLink || null
+    ),
+
+    rateCardHistory: Array.isArray(source.rateCardHistory)
+      ? source.rateCardHistory.map((entry) => ({
+          field: cleanStr(entry.field),
+          previousValue: cleanStr(entry.previousValue),
+          newValue: cleanStr(entry.newValue),
+          changedAt: entry?.changedAt ? new Date(entry.changedAt) : new Date(),
+          changedByAdminId:
+            entry?.changedByAdminId &&
+            mongoose.Types.ObjectId.isValid(String(entry.changedByAdminId))
+              ? new mongoose.Types.ObjectId(String(entry.changedByAdminId))
+              : null,
+        }))
+      : [],
+
+    sourcePipelineId:
+      source?.sourcePipelineId &&
+      mongoose.Types.ObjectId.isValid(String(source.sourcePipelineId))
+        ? new mongoose.Types.ObjectId(String(source.sourcePipelineId))
+        : null,
+
+    createdByAdmin:
+      actorId && mongoose.Types.ObjectId.isValid(String(actorId))
+        ? new mongoose.Types.ObjectId(String(actorId))
+        : null,
+    updatedByAdmin:
+      actorId && mongoose.Types.ObjectId.isValid(String(actorId))
+        ? new mongoose.Types.ObjectId(String(actorId))
+        : null,
+  };
+
+  ensureSingleSharedMediaKit(clonedItem);
+  ensureGenericRequestConsistency(clonedItem);
+
+  return clonedItem;
+}
+
+function cloneFolderItemForDuplicate(item, actorId = null) {
+  const source = typeof item?.toObject === 'function' ? item.toObject() : item || {};
+
+  const clonedItem = {
+    provider: normalizeProvider(source.provider),
+    name: cleanStr(source.name),
+    handle: cleanStr(source.handle).replace(/^@+/, '@'),
+    followers: toNullableNumber(source.followers),
+
+    primaryLink: cleanStr(source.primaryLink),
+    links: Array.isArray(source.links) ? uniqStrings(source.links) : [],
+
+    niche: Array.isArray(source.niche) ? uniqStrings(source.niche) : [],
+    email: cleanStr(source.email).toLowerCase(),
+    country: cleanStr(source.country),
+
+    selectionReason: cleanStr(source.selectionReason),
+    goodFit: false,
+
+    influencerRateCard: cleanStr(source.influencerRateCard),
+    platformRateCard: cleanStr(source.platformRateCard),
+    rateCardCurrency: cleanStr(source.rateCardCurrency || 'USD').toUpperCase(),
+
+    ourFeePct: toNullableNumber(source.ourFeePct),
+    shippingAddress: cleanStr(source.shippingAddress || source.comments),
+
+    mediaKit: resetDuplicatedMediaKitState(source.mediaKit),
+    mediaKitLink: resetDuplicatedMediaKitLinkState(source.mediaKitLink),
+
+    rateCardHistory: Array.isArray(source.rateCardHistory)
+      ? source.rateCardHistory.map((entry) => ({
+        field: cleanStr(entry.field),
+        previousValue: cleanStr(entry.previousValue),
+        newValue: cleanStr(entry.newValue),
+        changedAt: entry?.changedAt ? new Date(entry.changedAt) : new Date(),
+        changedByAdminId:
+          entry?.changedByAdminId &&
+            mongoose.Types.ObjectId.isValid(String(entry.changedByAdminId))
+            ? new mongoose.Types.ObjectId(String(entry.changedByAdminId))
+            : null,
+      }))
+      : [],
+
+    sourcePipelineId:
+      source?.sourcePipelineId &&
+        mongoose.Types.ObjectId.isValid(String(source.sourcePipelineId))
+        ? new mongoose.Types.ObjectId(String(source.sourcePipelineId))
+        : null,
+
+    createdByAdmin:
+      actorId && mongoose.Types.ObjectId.isValid(String(actorId))
+        ? new mongoose.Types.ObjectId(String(actorId))
+        : null,
+    updatedByAdmin:
+      actorId && mongoose.Types.ObjectId.isValid(String(actorId))
+        ? new mongoose.Types.ObjectId(String(actorId))
+        : null,
+  };
+
+  ensureSingleSharedMediaKit(clonedItem);
+  ensureGenericRequestConsistency(clonedItem);
+
+  return clonedItem;
+}
+
 exports.createFolder = async (req, res) => {
   try {
     if (!canCreateOrManagePitchFolders(req.admin)) {
@@ -1091,9 +1282,9 @@ exports.createFolder = async (req, res) => {
 
     const initialItems = Array.isArray(body.items)
       ? body.items.map((item) => ({
-          ...normalizeItem(item, actorId),
-          createdByAdmin: actorId || null,
-        }))
+        ...normalizeItem(item, actorId),
+        createdByAdmin: actorId || null,
+      }))
       : [];
 
     const doc = await PitchFolder.create({
@@ -1161,12 +1352,22 @@ exports.updateFolder = async (req, res) => {
     }
 
     const actorId = getActorAdminId(req.admin);
-    const id = cleanStr(req.body?.id);
-    const title = cleanStr(req.body?.title);
-    const description = cleanStr(req.body?.description);
+    const body = req.body || {};
+    const id = cleanStr(body.id || body.folderId || req.params?.id);
+
+    const hasTitle = hasOwn(body, 'title');
+    const hasDescription = hasOwn(body, 'description');
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ error: 'Valid folder id is required' });
+    }
+
+    if (!hasTitle && !hasDescription) {
+      return res.status(400).json({ error: 'Only title or description can be updated' });
+    }
+
+    if (hasTitle && !cleanStr(body.title)) {
+      return res.status(400).json({ error: 'Folder name is required' });
     }
 
     const doc = await findAccessibleFolder(id, req.admin);
@@ -1174,36 +1375,14 @@ exports.updateFolder = async (req, res) => {
       return res.status(404).json({ error: 'Pitch folder not found' });
     }
 
-    if (title) {
-      const baseSlug = slugify(title) || `pitch-folder-${Date.now()}`;
-      let slug = baseSlug;
-      let counter = 1;
-
-      while (
-        await PitchFolder.exists({
-          _id: { $ne: doc._id },
-          slug,
-          archivedAt: null,
-        })
-      ) {
-        counter += 1;
-        slug = `${baseSlug}-${counter}`;
-      }
-
-      doc.title = title;
-      doc.slug = slug;
+    if (hasTitle) {
+      const nextTitle = cleanStr(body.title);
+      doc.title = nextTitle;
+      doc.slug = await buildUniqueFolderSlug(nextTitle, doc._id);
     }
 
-    if (req.body?.description !== undefined) {
-      doc.description = description;
-    }
-
-    if (hasOwn(req.body, 'brandVisibleItemCount')) {
-      doc.brandVisibleItemCount = toNullableInteger(req.body.brandVisibleItemCount);
-    }
-
-    if (hasOwn(req.body, 'showFullListToBrand')) {
-      doc.showFullListToBrand = !!req.body.showFullListToBrand;
+    if (hasDescription) {
+      doc.description = cleanStr(body.description);
     }
 
     doc.updatedByAdmin = actorId || null;
@@ -1217,6 +1396,77 @@ exports.updateFolder = async (req, res) => {
     });
   } catch (err) {
     console.error('[updateFolder] Error:', err);
+    return res.status(500).json({ error: err?.message || 'Internal error' });
+  }
+};
+
+exports.duplicateFolder = async (req, res) => {
+  try {
+    if (!canCreateOrManagePitchFolders(req.admin)) {
+      return res.status(403).json({ error: 'You are not allowed to duplicate pitch folders' });
+    }
+
+    const actorId = getActorAdminId(req.admin);
+    const body = req.body || {};
+    const sourceFolderId = cleanStr(body.folderId || body.id || req.params?.id);
+
+    if (!mongoose.Types.ObjectId.isValid(sourceFolderId)) {
+      return res.status(400).json({ error: 'Valid folder id is required' });
+    }
+
+    const sourceDoc = await findAccessibleFolder(sourceFolderId, req.admin);
+    if (!sourceDoc) {
+      return res.status(404).json({ error: 'Pitch folder not found' });
+    }
+
+    const duplicateTitle = cleanStr(body.title) || `${cleanStr(sourceDoc.title)} Copy`;
+    const duplicateSlug = await buildUniqueFolderSlug(duplicateTitle);
+
+    const duplicatedItems = Array.isArray(sourceDoc.items)
+      ? sourceDoc.items.map((item) => cloneFolderItemForDuplicate(item, actorId))
+      : [];
+
+    const duplicatedFolder = await PitchFolder.create({
+      title: duplicateTitle,
+      slug: duplicateSlug,
+      description: cleanStr(sourceDoc.description),
+
+      // keep folder-level visibility settings
+      brandVisibleItemCount:
+        sourceDoc.brandVisibleItemCount === null || sourceDoc.brandVisibleItemCount === undefined
+          ? null
+          : toNullableInteger(sourceDoc.brandVisibleItemCount),
+
+      showFullListToBrand: !!sourceDoc.showFullListToBrand,
+
+      // deep duplicate items
+      items: duplicatedItems,
+
+      // never duplicate share token / URL
+      share: {
+        token: '',
+        url: '',
+        generatedAt: null,
+        sharedByAdminId: null,
+      },
+
+      createdByAdmin: actorId || null,
+      updatedByAdmin: actorId || null,
+    });
+
+    const hydrated = await PitchFolder.findById(duplicatedFolder._id)
+      .populate(buildCreatorPopulate())
+      .populate(buildUpdatedByPopulate())
+      .populate(buildSharedByPopulate())
+      .lean();
+
+    return res.json({
+      success: true,
+      message: 'Pitch folder duplicated successfully',
+      data: serializeFolderDetail(hydrated),
+    });
+  } catch (err) {
+    console.error('[duplicateFolder] Error:', err);
     return res.status(500).json({ error: err?.message || 'Internal error' });
   }
 };
@@ -1801,19 +2051,64 @@ exports.bulkImportYoutubeToFolder = async (req, res) => {
       })
     );
 
+    // collect youtube handles / channelIds from incoming raw users
+    const importHandles = [];
+    const importChannelIds = [];
+
+    for (const user of rawUsers) {
+      const handle = cleanStr(user.handle || user.username).replace(/^@/, '');
+      const normalizedHandle = handle ? `@${handle}`.toLowerCase() : '';
+      const channelId = cleanStr(user.channelId);
+
+      if (normalizedHandle) importHandles.push(normalizedHandle);
+      if (channelId) importChannelIds.push(channelId);
+    }
+
+    const savedProfiles = await InfluencerProfile.find({
+      platform: 'youtube',
+      $or: [
+        ...(importHandles.length ? [{ handle: { $in: uniqStrings(importHandles) } }] : []),
+        ...(importChannelIds.length ? [{ channelId: { $in: uniqStrings(importChannelIds) } }] : []),
+      ],
+    })
+      .select('handle channelId email')
+      .lean();
+
+    const savedByHandle = new Map();
+    const savedByChannelId = new Map();
+
+    for (const profile of savedProfiles) {
+      const handleKey = cleanStr(profile.handle).toLowerCase();
+      const channelKey = cleanStr(profile.channelId);
+
+      if (handleKey) savedByHandle.set(handleKey, profile);
+      if (channelKey) savedByChannelId.set(channelKey, profile);
+    }
+
     let added = 0;
 
     for (const user of rawUsers) {
       const handle = cleanStr(user.handle || user.username).replace(/^@/, '');
+      const normalizedHandle = handle ? `@${handle}` : '';
+      const handleLookupKey = normalizedHandle.toLowerCase();
+      const channelId = cleanStr(user.channelId);
+
+      const savedProfile =
+        (handleLookupKey && savedByHandle.get(handleLookupKey)) ||
+        (channelId && savedByChannelId.get(channelId)) ||
+        null;
+
+      const resolvedEmail = cleanStr(user.email || savedProfile?.email).toLowerCase();
+
       const item = {
         provider: normalizeProvider(user.platform || 'youtube'),
         name: cleanStr(user.fullname || user.name),
-        handle: handle ? `@${handle}` : '',
+        handle: normalizedHandle,
         followers: toNullableNumber(user.followers),
         primaryLink: cleanStr(user.url),
         links: uniqStrings([user.url]),
         niche: Array.isArray(user.categories) ? uniqStrings(user.categories) : [],
-        email: cleanStr(user.email).toLowerCase(),
+        email: resolvedEmail,
         country: cleanStr(user.country),
         selectionReason: '',
         goodFit: false,
@@ -1821,7 +2116,7 @@ exports.bulkImportYoutubeToFolder = async (req, res) => {
         platformRateCard: '',
         rateCardCurrency: 'USD',
         ourFeePct: null,
-        comments: '',
+        shippingAddress: '',
         mediaKit: normalizeMediaKit(null, actorId),
         mediaKitLink: normalizeMediaKitLink(null, actorId),
         createdByAdmin: actorId || null,
@@ -2003,3 +2298,187 @@ function sortFolderItemsByMediaKitPriority(items = []) {
     return 0;
   });
 }
+
+exports.moveFolderItems = async (req, res) => {
+  try {
+    if (!canCreateOrManagePitchFolders(req.admin)) {
+      return res.status(403).json({
+        error: 'You are not allowed to move influencers between pitch folders',
+      });
+    }
+
+    const actorId = getActorAdminId(req.admin);
+    const sourceFolderId = cleanStr(req.body?.sourceFolderId || req.body?.folderId);
+    const destinationFolderId = cleanStr(req.body?.destinationFolderId);
+
+    const transferType = cleanStr(
+      req.body?.transferType || req.body?.mode || 'move'
+    ).toLowerCase();
+
+    const isCopyOnly = ['copy', 'copy_move', 'copy-move', 'copyandmove'].includes(
+      transferType
+    );
+    const isDirectMove = ['move', 'direct_move', 'direct-move'].includes(
+      transferType
+    );
+
+    const itemIds = Array.isArray(req.body?.itemIds)
+      ? uniqStrings(req.body.itemIds).filter((id) =>
+          mongoose.Types.ObjectId.isValid(String(id))
+        )
+      : [];
+
+    if (!isCopyOnly && !isDirectMove) {
+      return res.status(400).json({
+        error:
+          'transferType must be one of: copy, move, direct_move, copy_move',
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(sourceFolderId)) {
+      return res.status(400).json({ error: 'Valid sourceFolderId is required' });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(destinationFolderId)) {
+      return res.status(400).json({
+        error: 'Valid destinationFolderId is required',
+      });
+    }
+
+    if (String(sourceFolderId) === String(destinationFolderId)) {
+      return res.status(400).json({
+        error: 'Source and destination folder cannot be the same',
+      });
+    }
+
+    if (!itemIds.length) {
+      return res.status(400).json({
+        error: 'At least one valid itemId is required',
+      });
+    }
+
+    const sourceFolder = await findAccessibleFolder(sourceFolderId, req.admin);
+    if (!sourceFolder) {
+      return res.status(404).json({ error: 'Source pitch folder not found' });
+    }
+
+    const destinationFolder = await findAccessibleFolder(
+      destinationFolderId,
+      req.admin
+    );
+    if (!destinationFolder) {
+      return res
+        .status(404)
+        .json({ error: 'Destination pitch folder not found' });
+    }
+
+    const destinationExistingKeys = new Set(
+      (destinationFolder.items || []).map((item) => {
+        const provider = normalizeProvider(item.provider);
+        const handle = cleanStr(item.handle).replace(/^@/, '').toLowerCase();
+        return `${provider}:${handle}`;
+      })
+    );
+
+    const skippedMissingItemIds = [];
+    const skippedDuplicateItemIds = [];
+    let copiedCount = 0;
+    let movedCount = 0;
+
+    for (const itemId of itemIds) {
+      const sourceItem = sourceFolder.items.id(itemId);
+
+      if (!sourceItem) {
+        skippedMissingItemIds.push(itemId);
+        continue;
+      }
+
+      const itemKey = `${normalizeProvider(sourceItem.provider)}:${cleanStr(
+        sourceItem.handle
+      )
+        .replace(/^@/, '')
+        .toLowerCase()}`;
+
+      if (itemKey && destinationExistingKeys.has(itemKey)) {
+        skippedDuplicateItemIds.push(itemId);
+        continue;
+      }
+
+      if (isCopyOnly) {
+        const copiedItem = cloneFolderItemForTransfer(sourceItem, actorId);
+        destinationFolder.items.push(copiedItem);
+        copiedCount += 1;
+      } else {
+        const movedItem =
+          typeof sourceItem.toObject === 'function'
+            ? sourceItem.toObject()
+            : { ...sourceItem };
+
+        movedItem.updatedByAdmin = actorId || null;
+
+        destinationFolder.items.push(movedItem);
+        sourceItem.deleteOne();
+        movedCount += 1;
+      }
+
+      if (itemKey) {
+        destinationExistingKeys.add(itemKey);
+      }
+    }
+
+    const processedCount = isCopyOnly ? copiedCount : movedCount;
+
+    if (!processedCount) {
+      return res.status(400).json({
+        error: `No influencers were ${isCopyOnly ? 'copied' : 'moved'}`,
+        data: {
+          action: isCopyOnly ? 'copy' : 'move',
+          copiedCount,
+          movedCount,
+          skippedMissingItemIds,
+          skippedDuplicateItemIds,
+        },
+      });
+    }
+
+    destinationFolder.updatedByAdmin = actorId || null;
+    await destinationFolder.save();
+
+    if (!isCopyOnly) {
+      sourceFolder.updatedByAdmin = actorId || null;
+      await sourceFolder.save();
+    }
+
+    const [sourceHydrated, destinationHydrated] = await Promise.all([
+      PitchFolder.findById(sourceFolder._id)
+        .populate(buildCreatorPopulate())
+        .populate(buildUpdatedByPopulate())
+        .populate(buildSharedByPopulate())
+        .lean(),
+      PitchFolder.findById(destinationFolder._id)
+        .populate(buildCreatorPopulate())
+        .populate(buildUpdatedByPopulate())
+        .populate(buildSharedByPopulate())
+        .lean(),
+    ]);
+
+    return res.json({
+      success: true,
+      message: `Selected influencers ${
+        isCopyOnly ? 'copied' : 'moved'
+      } successfully`,
+      data: {
+        action: isCopyOnly ? 'copy' : 'move',
+        copiedCount,
+        movedCount,
+        skippedMissingItemIds,
+        skippedDuplicateItemIds,
+        sourceFolder: serializeFolderDetail(sourceHydrated),
+        destinationFolder: serializeFolderListItem(destinationHydrated),
+      },
+    });
+  } catch (err) {
+    console.error('[moveFolderItems] Error:', err);
+    return res.status(500).json({ error: err?.message || 'Internal error' });
+  }
+};
