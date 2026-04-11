@@ -1357,13 +1357,23 @@ exports.updateFolder = async (req, res) => {
 
     const hasTitle = hasOwn(body, 'title');
     const hasDescription = hasOwn(body, 'description');
+    const hasBrandVisibleItemCount = hasOwn(body, 'brandVisibleItemCount');
+    const hasShowFullListToBrand = hasOwn(body, 'showFullListToBrand');
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ error: 'Valid folder id is required' });
     }
 
-    if (!hasTitle && !hasDescription) {
-      return res.status(400).json({ error: 'Only title or description can be updated' });
+    if (
+      !hasTitle &&
+      !hasDescription &&
+      !hasBrandVisibleItemCount &&
+      !hasShowFullListToBrand
+    ) {
+      return res.status(400).json({
+        error:
+          'At least one of title, description, brandVisibleItemCount, or showFullListToBrand must be provided',
+      });
     }
 
     if (hasTitle && !cleanStr(body.title)) {
@@ -1383,6 +1393,28 @@ exports.updateFolder = async (req, res) => {
 
     if (hasDescription) {
       doc.description = cleanStr(body.description);
+    }
+
+    if (hasBrandVisibleItemCount) {
+      const rawCount = body.brandVisibleItemCount;
+
+      if (rawCount === '' || rawCount === null || rawCount === undefined) {
+        doc.brandVisibleItemCount = null;
+      } else {
+        const parsedCount = toNullableInteger(rawCount);
+
+        if (parsedCount === null) {
+          return res.status(400).json({
+            error: 'brandVisibleItemCount must be a non-negative integer or null',
+          });
+        }
+
+        doc.brandVisibleItemCount = parsedCount;
+      }
+    }
+
+    if (hasShowFullListToBrand) {
+      doc.showFullListToBrand = !!body.showFullListToBrand;
     }
 
     doc.updatedByAdmin = actorId || null;
