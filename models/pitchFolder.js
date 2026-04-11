@@ -105,7 +105,7 @@ const FolderItemSchema = new mongoose.Schema(
     rateCardCurrency: { type: String, trim: true, default: 'USD' },
 
     ourFeePct: { type: Number, default: null },
-shippingAddress: { type: String, trim: true, default: '' },
+    shippingAddress: { type: String, trim: true, default: '' },
 
     mediaKit: {
       type: MediaKitSchema,

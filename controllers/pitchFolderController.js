@@ -2071,35 +2071,43 @@ exports.bulkImportYoutubeToFolder = async (req, res) => {
     }
 
     const existingKeys = new Set(
-      (folder.items || []).map((item) => {
-        const provider = normalizeProvider(item.provider);
-        const handle = cleanStr(item.handle).replace(/^@/, '').toLowerCase();
-        return `${provider}:${handle}`;
-      })
+      (folder.items || [])
+        .map((item) => {
+          const provider = normalizeProvider(item.provider);
+          const handle = cleanStr(item.handle).replace(/^@/, '').toLowerCase();
+          return handle ? `${provider}:${handle}` : '';
+        })
+        .filter(Boolean)
     );
 
-    // collect youtube handles / channelIds from incoming raw users
     const importHandles = [];
     const importChannelIds = [];
 
     for (const user of rawUsers) {
       const handle = cleanStr(user.handle || user.username).replace(/^@/, '');
       const normalizedHandle = handle ? `@${handle}`.toLowerCase() : '';
-      const channelId = cleanStr(user.channelId);
+      const channelId = cleanStr(user.channelId || user.userId);
 
       if (normalizedHandle) importHandles.push(normalizedHandle);
       if (channelId) importChannelIds.push(channelId);
     }
 
-    const savedProfiles = await InfluencerProfile.find({
-      platform: 'youtube',
-      $or: [
-        ...(importHandles.length ? [{ handle: { $in: uniqStrings(importHandles) } }] : []),
-        ...(importChannelIds.length ? [{ channelId: { $in: uniqStrings(importChannelIds) } }] : []),
-      ],
-    })
-      .select('handle channelId email')
-      .lean();
+    const profileOr = [];
+    if (importHandles.length) {
+      profileOr.push({ handle: { $in: uniqStrings(importHandles) } });
+    }
+    if (importChannelIds.length) {
+      profileOr.push({ channelId: { $in: uniqStrings(importChannelIds) } });
+    }
+
+    const savedProfiles = profileOr.length
+      ? await InfluencerProfile.find({
+          platform: 'youtube',
+          $or: profileOr,
+        })
+          .select('handle channelId email')
+          .lean()
+      : [];
 
     const savedByHandle = new Map();
     const savedByChannelId = new Map();
@@ -2113,12 +2121,14 @@ exports.bulkImportYoutubeToFolder = async (req, res) => {
     }
 
     let added = 0;
+    let skipped = 0;
+    const alreadyAdded = [];
 
     for (const user of rawUsers) {
       const handle = cleanStr(user.handle || user.username).replace(/^@/, '');
       const normalizedHandle = handle ? `@${handle}` : '';
       const handleLookupKey = normalizedHandle.toLowerCase();
-      const channelId = cleanStr(user.channelId);
+      const channelId = cleanStr(user.channelId || user.userId);
 
       const savedProfile =
         (handleLookupKey && savedByHandle.get(handleLookupKey)) ||
@@ -2154,7 +2164,13 @@ exports.bulkImportYoutubeToFolder = async (req, res) => {
 
       const dedupeKey = `${item.provider}:${cleanStr(item.handle).replace(/^@/, '').toLowerCase()}`;
 
-      if (!dedupeKey || existingKeys.has(dedupeKey)) continue;
+      if (!dedupeKey) continue;
+
+      if (existingKeys.has(dedupeKey)) {
+        skipped += 1;
+        alreadyAdded.push(item.handle || item.name);
+        continue;
+      }
 
       folder.items.push(item);
       existingKeys.add(dedupeKey);
@@ -2167,8 +2183,13 @@ exports.bulkImportYoutubeToFolder = async (req, res) => {
 
     return res.json({
       success: true,
-      message: 'Youtube creators imported successfully',
+      message:
+        added > 0
+          ? 'Youtube creators imported successfully'
+          : 'All selected Youtube creators are already added in this folder',
       added,
+      skipped,
+      alreadyAdded: uniqStrings(alreadyAdded),
       total: hydrated?.items?.length || 0,
       data: serializeFolderDetail(hydrated),
     });
