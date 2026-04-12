@@ -621,7 +621,7 @@ function normalizeItem(body = {}, actorId = null) {
     rateCardCurrency: cleanStr(body.rateCardCurrency || 'USD').toUpperCase(),
     rateCardHistory: [],
     ourFeePct: toNullableNumber(body.ourFeePct),
-    shippingAddress: cleanStr(body.shippingAddress || body.comments),
+    shippingAddress: getPreferredShippingAddress(body),
     mediaKit: normalizeMediaKit(body.mediaKit, actorId),
     mediaKitLink: normalizeMediaKitLink(body.mediaKitLink, actorId),
     sourcePipelineId:
@@ -683,9 +683,14 @@ function applyItemMutations(item, body = {}, actorId = null) {
   if (hasOwn(body, 'ourFeePct')) item.ourFeePct = toNullableNumber(body.ourFeePct);
 
   if (hasOwn(body, 'shippingAddress') || hasOwn(body, 'comments')) {
-    item.shippingAddress = cleanStr(
-      hasOwn(body, 'shippingAddress') ? body.shippingAddress : body.comments
-    );
+    item.shippingAddress = getPreferredShippingAddress({
+      shippingAddress: hasOwn(body, 'shippingAddress')
+        ? body.shippingAddress
+        : item.shippingAddress,
+      comments: hasOwn(body, 'comments')
+        ? body.comments
+        : item.comments,
+    });
   }
 
   if (hasOwn(body, 'sourcePipelineId')) {
@@ -792,6 +797,42 @@ function serializeAdmin(admin) {
   };
 }
 
+function getPreferredShippingAddress(source = {}) {
+  const shippingAddress = cleanStr(source?.shippingAddress);
+  const comments = cleanStr(source?.comments);
+  return shippingAddress || comments || '';
+}
+
+function buildFolderItemDedupeKey(source = {}) {
+  const provider = normalizeProvider(source?.provider);
+
+  const handle = cleanStr(source?.handle).replace(/^@+/, '').toLowerCase();
+  if (handle) return `${provider}:handle:${handle}`;
+
+  const primaryLink = cleanStr(
+    source?.primaryLink ||
+      (Array.isArray(source?.links) && source.links.length ? source.links[0] : '')
+  ).toLowerCase();
+  if (primaryLink) return `${provider}:link:${primaryLink}`;
+
+  const email = cleanStr(source?.email).toLowerCase();
+  if (email) return `${provider}:email:${email}`;
+
+  return '';
+}
+
+function folderHasDuplicateItem(folder, candidate, excludeItemId = null) {
+  const candidateKey = buildFolderItemDedupeKey(candidate);
+  if (!candidateKey || !Array.isArray(folder?.items)) return false;
+
+  return folder.items.some((item) => {
+    if (excludeItemId && String(item?._id) === String(excludeItemId)) {
+      return false;
+    }
+    return buildFolderItemDedupeKey(item) === candidateKey;
+  });
+}
+
 function applyFolderSearch(filter, q) {
   if (!q) return filter;
 
@@ -871,6 +912,8 @@ async function findAccessibleFolder(folderId, actor) {
 }
 
 function serializeFolderItemForAdmin(item) {
+  const resolvedShippingAddress = getPreferredShippingAddress(item);
+
   return {
     _id: item._id,
     provider: item.provider,
@@ -888,7 +931,8 @@ function serializeFolderItemForAdmin(item) {
     platformRateCard: item.platformRateCard || '',
     rateCardCurrency: item.rateCardCurrency || 'USD',
     ourFeePct: item.ourFeePct,
-    shippingAddress: item.shippingAddress || item.comments || '',
+    shippingAddress: resolvedShippingAddress,
+    comments: resolvedShippingAddress,
 
     mediaKitAccess: {
       hasAdded: hasStoredMediaKit(item.mediaKit) || hasMediaKitLink(item.mediaKitLink),
@@ -1147,7 +1191,7 @@ function cloneFolderItemForTransfer(item, actorId = null) {
     rateCardCurrency: cleanStr(source.rateCardCurrency || 'USD').toUpperCase(),
 
     ourFeePct: toNullableNumber(source.ourFeePct),
-    shippingAddress: cleanStr(source.shippingAddress || source.comments),
+    shippingAddress: getPreferredShippingAddress(source),
 
     mediaKit: normalizeMediaKit(source.mediaKit || null, actorId, source.mediaKit || null),
     mediaKitLink: normalizeMediaKitLink(
@@ -1216,7 +1260,7 @@ function cloneFolderItemForDuplicate(item, actorId = null) {
     rateCardCurrency: cleanStr(source.rateCardCurrency || 'USD').toUpperCase(),
 
     ourFeePct: toNullableNumber(source.ourFeePct),
-    shippingAddress: cleanStr(source.shippingAddress || source.comments),
+    shippingAddress: getPreferredShippingAddress(source),
 
     mediaKit: resetDuplicatedMediaKitState(source.mediaKit),
     mediaKitLink: resetDuplicatedMediaKitLinkState(source.mediaKitLink),
@@ -1280,12 +1324,28 @@ exports.createFolder = async (req, res) => {
       slug = `${baseSlug}-${counter}`;
     }
 
-    const initialItems = Array.isArray(body.items)
-      ? body.items.map((item) => ({
-        ...normalizeItem(item, actorId),
+        const rawItems = Array.isArray(body.items) ? body.items : [];
+    const initialItems = [];
+    const seenInitialKeys = new Set();
+
+    for (const rawItem of rawItems) {
+      const normalizedItem = {
+        ...normalizeItem(rawItem, actorId),
         createdByAdmin: actorId || null,
-      }))
-      : [];
+      };
+
+      const itemKey = buildFolderItemDedupeKey(normalizedItem);
+
+      if (itemKey && seenInitialKeys.has(itemKey)) {
+        continue;
+      }
+
+      if (itemKey) {
+        seenInitialKeys.add(itemKey);
+      }
+
+      initialItems.push(normalizedItem);
+    }
 
     const doc = await PitchFolder.create({
       title,
@@ -1557,6 +1617,12 @@ exports.addFolderItem = async (req, res) => {
       return res.status(400).json({ error: 'Influencer name is required' });
     }
 
+    if (folderHasDuplicateItem(doc, item)) {
+      return res.status(409).json({
+        error: 'This influencer already exists in the pitch folder',
+      });
+    }
+
     doc.items.push(item);
     doc.updatedByAdmin = actorId || null;
 
@@ -1601,6 +1667,12 @@ exports.updateFolderItem = async (req, res) => {
 
     if (!cleanStr(item.name)) {
       return res.status(400).json({ error: 'Influencer name is required' });
+    }
+
+    if (folderHasDuplicateItem(doc, item, itemId)) {
+      return res.status(409).json({
+        error: 'Another influencer with the same handle/link/email already exists in this pitch folder',
+      });
     }
 
     doc.updatedByAdmin = actorId || null;
@@ -2071,13 +2143,7 @@ exports.bulkImportYoutubeToFolder = async (req, res) => {
     }
 
     const existingKeys = new Set(
-      (folder.items || [])
-        .map((item) => {
-          const provider = normalizeProvider(item.provider);
-          const handle = cleanStr(item.handle).replace(/^@/, '').toLowerCase();
-          return handle ? `${provider}:${handle}` : '';
-        })
-        .filter(Boolean)
+      (folder.items || []).map((item) => buildFolderItemDedupeKey(item)).filter(Boolean)
     );
 
     const importHandles = [];
@@ -2102,11 +2168,11 @@ exports.bulkImportYoutubeToFolder = async (req, res) => {
 
     const savedProfiles = profileOr.length
       ? await InfluencerProfile.find({
-          platform: 'youtube',
-          $or: profileOr,
-        })
-          .select('handle channelId email')
-          .lean()
+        platform: 'youtube',
+        $or: profileOr,
+      })
+        .select('handle channelId email')
+        .lean()
       : [];
 
     const savedByHandle = new Map();
@@ -2162,7 +2228,7 @@ exports.bulkImportYoutubeToFolder = async (req, res) => {
 
       if (!item.name) continue;
 
-      const dedupeKey = `${item.provider}:${cleanStr(item.handle).replace(/^@/, '').toLowerCase()}`;
+      const dedupeKey = buildFolderItemDedupeKey(item);
 
       if (!dedupeKey) continue;
 
@@ -2421,11 +2487,7 @@ exports.moveFolderItems = async (req, res) => {
     }
 
     const destinationExistingKeys = new Set(
-      (destinationFolder.items || []).map((item) => {
-        const provider = normalizeProvider(item.provider);
-        const handle = cleanStr(item.handle).replace(/^@/, '').toLowerCase();
-        return `${provider}:${handle}`;
-      })
+      (destinationFolder.items || []).map((item) => buildFolderItemDedupeKey(item)).filter(Boolean)
     );
 
     const skippedMissingItemIds = [];
@@ -2441,11 +2503,7 @@ exports.moveFolderItems = async (req, res) => {
         continue;
       }
 
-      const itemKey = `${normalizeProvider(sourceItem.provider)}:${cleanStr(
-        sourceItem.handle
-      )
-        .replace(/^@/, '')
-        .toLowerCase()}`;
+      const itemKey = buildFolderItemDedupeKey(sourceItem);
 
       if (itemKey && destinationExistingKeys.has(itemKey)) {
         skippedDuplicateItemIds.push(itemId);
