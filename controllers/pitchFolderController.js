@@ -797,10 +797,42 @@ function serializeAdmin(admin) {
   };
 }
 
+function getLegacyComments(source = {}) {
+  if (!source) return '';
+
+  const directComments = cleanStr(source.comments);
+  if (directComments) return directComments;
+
+  const docComments = cleanStr(source?._doc?.comments);
+  if (docComments) return docComments;
+
+  if (typeof source.get === 'function') {
+    try {
+      const getterComments = cleanStr(source.get('comments'));
+      if (getterComments) return getterComments;
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  if (typeof source.toObject === 'function') {
+    try {
+      const obj = source.toObject({ virtuals: false, getters: false });
+      const objectComments = cleanStr(obj?.comments);
+      if (objectComments) return objectComments;
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  return '';
+}
+
 function getPreferredShippingAddress(source = {}) {
   const shippingAddress = cleanStr(source?.shippingAddress);
-  const comments = cleanStr(source?.comments);
-  return shippingAddress || comments || '';
+  if (shippingAddress) return shippingAddress;
+
+  return getLegacyComments(source);
 }
 
 function buildFolderItemDedupeKey(source = {}) {
@@ -811,7 +843,7 @@ function buildFolderItemDedupeKey(source = {}) {
 
   const primaryLink = cleanStr(
     source?.primaryLink ||
-      (Array.isArray(source?.links) && source.links.length ? source.links[0] : '')
+    (Array.isArray(source?.links) && source.links.length ? source.links[0] : '')
   ).toLowerCase();
   if (primaryLink) return `${provider}:link:${primaryLink}`;
 
@@ -931,7 +963,11 @@ function serializeFolderItemForAdmin(item) {
     platformRateCard: item.platformRateCard || '',
     rateCardCurrency: item.rateCardCurrency || 'USD',
     ourFeePct: item.ourFeePct,
+
+    // main new field
     shippingAddress: resolvedShippingAddress,
+
+    // keep legacy frontend compatibility
     comments: resolvedShippingAddress,
 
     mediaKitAccess: {
@@ -944,41 +980,41 @@ function serializeFolderItemForAdmin(item) {
 
     mediaKitLink: item.mediaKitLink
       ? {
-        url: item.mediaKitLink.url || '',
-        generatedAt: item.mediaKitLink.generatedAt || null,
-        showToBrand: !!item.mediaKitLink.showToBrand,
-        requestStatus: item.mediaKitLink.requestStatus || 'none',
-        requestedAt: item.mediaKitLink.requestedAt || null,
-        reviewedAt: item.mediaKitLink.reviewedAt || null,
-      }
+          url: item.mediaKitLink.url || '',
+          generatedAt: item.mediaKitLink.generatedAt || null,
+          showToBrand: !!item.mediaKitLink.showToBrand,
+          requestStatus: item.mediaKitLink.requestStatus || 'none',
+          requestedAt: item.mediaKitLink.requestedAt || null,
+          reviewedAt: item.mediaKitLink.reviewedAt || null,
+        }
       : null,
 
     mediaKit: item.mediaKit
       ? {
-        s3Key: item.mediaKit.s3Key || '',
-        fileName: item.mediaKit.fileName || '',
-        mimeType: item.mediaKit.mimeType || 'application/pdf',
-        size: item.mediaKit.size,
-        uploadedAt: item.mediaKit.uploadedAt || null,
-        showToBrand: !!item.mediaKit.showToBrand,
-        requestStatus: item.mediaKit.requestStatus || 'none',
-        requestedAt: item.mediaKit.requestedAt || null,
-        reviewedAt: item.mediaKit.reviewedAt || null,
-      }
+          s3Key: item.mediaKit.s3Key || '',
+          fileName: item.mediaKit.fileName || '',
+          mimeType: item.mediaKit.mimeType || 'application/pdf',
+          size: item.mediaKit.size,
+          uploadedAt: item.mediaKit.uploadedAt || null,
+          showToBrand: !!item.mediaKit.showToBrand,
+          requestStatus: item.mediaKit.requestStatus || 'none',
+          requestedAt: item.mediaKit.requestedAt || null,
+          reviewedAt: item.mediaKit.reviewedAt || null,
+        }
       : null,
 
     rateCardHistory: Array.isArray(item.rateCardHistory)
       ? item.rateCardHistory
-        .slice()
-        .sort((a, b) => new Date(b.changedAt).getTime() - new Date(a.changedAt).getTime())
-        .map((entry) => ({
-          _id: entry._id,
-          field: entry.field,
-          previousValue: entry.previousValue || '',
-          newValue: entry.newValue || '',
-          changedAt: entry.changedAt || null,
-          changedByAdminId: entry.changedByAdminId ? String(entry.changedByAdminId) : null,
-        }))
+          .slice()
+          .sort((a, b) => new Date(b.changedAt).getTime() - new Date(a.changedAt).getTime())
+          .map((entry) => ({
+            _id: entry._id,
+            field: entry.field,
+            previousValue: entry.previousValue || '',
+            newValue: entry.newValue || '',
+            changedAt: entry.changedAt || null,
+            changedByAdminId: entry.changedByAdminId ? String(entry.changedByAdminId) : null,
+          }))
       : [],
     sourcePipelineId: item.sourcePipelineId || null,
     createdAt: item.createdAt || null,
@@ -991,6 +1027,7 @@ async function serializeFolderItemForShared(item) {
   ensureGenericRequestConsistency(item);
 
   const mediaKitAccess = await buildSharedMediaKitAccess(item);
+  const resolvedShippingAddress = getPreferredShippingAddress(item);
 
   return {
     _id: item._id,
@@ -1008,6 +1045,8 @@ async function serializeFolderItemForShared(item) {
     influencerRateCard: item.influencerRateCard || '',
     platformRateCard: item.platformRateCard || '',
     rateCardCurrency: item.rateCardCurrency || 'USD',
+    shippingAddress: resolvedShippingAddress,
+    comments: resolvedShippingAddress,
     mediaKitAccess,
   };
 }
@@ -1324,7 +1363,7 @@ exports.createFolder = async (req, res) => {
       slug = `${baseSlug}-${counter}`;
     }
 
-        const rawItems = Array.isArray(body.items) ? body.items : [];
+    const rawItems = Array.isArray(body.items) ? body.items : [];
     const initialItems = [];
     const seenInitialKeys = new Set();
 
