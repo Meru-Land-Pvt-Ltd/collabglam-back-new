@@ -3,7 +3,11 @@
 require('dotenv').config();
 const { fetch } = require('undici');
 const mongoose = require('mongoose');
-
+const {
+  canShowSensitiveFromRequest,
+  sanitizeModashReportForViewer,
+  sanitizeModashDocForViewer,
+} = require('../utils/emailRedactor');
 const ModashProfile = require('../models/modash');
 const Influencer = require('../models/influencer'); // kept for future compatibility
 const BrandProfileView = require('../models/brandProfileView');
@@ -379,12 +383,6 @@ function mapDocToListFields(doc) {
 function normalizePlatform(platform) {
   const p = cleanStr(platform).toLowerCase();
   return ALLOWED_PLATFORMS.has(p) ? p : '';
-}
-
-function ensureValidPlatform(platform) {
-  const p = normalizePlatform(platform);
-  if (!p) return null;
-  return p;
 }
 
 function normalizePlatforms(inputSingle, inputMulti) {
@@ -787,76 +785,168 @@ async function enrichResultsFromCache(items) {
 /*                              Report helpers                                */
 /* -------------------------------------------------------------------------- */
 
+function pickArray() {
+  for (const value of arguments) {
+    if (Array.isArray(value) && value.length > 0) return value;
+  }
+  for (const value of arguments) {
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
 function normalizeReportData(reportJSON) {
   const rootProfile = (reportJSON && reportJSON.profile) || {};
-  const prof = rootProfile.profile || rootProfile || {};
+  const nestedProfile = rootProfile.profile || {};
+  const prof =
+    nestedProfile && Object.keys(nestedProfile).length ? nestedProfile : rootProfile;
 
   const rawUserId =
-    prof.userId || rootProfile.userId || prof.id || prof.channelId || prof.profileId || prof.secUid || null;
+    prof.userId ||
+    rootProfile.userId ||
+    prof.id ||
+    rootProfile.id ||
+    prof.channelId ||
+    rootProfile.channelId ||
+    prof.profileId ||
+    rootProfile.profileId ||
+    prof.secUid ||
+    rootProfile.secUid ||
+    null;
 
   const profileUserId = rawUserId ? cleanStr(rawUserId) : null;
-  const categories = extractCategories(rootProfile);
+
+  const rootCategories = extractCategories(rootProfile);
+  const nestedCategories = extractCategories(prof);
+  const categories = rootCategories.length ? rootCategories : nestedCategories;
+
+  const cleanUsername = cleanStr(prof.username || prof.handle).replace(/^@/, '') || null;
+  const cleanHandle =
+    cleanStr(prof.handle) ||
+    (cleanUsername ? `@${cleanUsername}` : null);
 
   return {
     profile: {
       userId: profileUserId,
-      username: prof.username || prof.handle || null,
-      fullname: prof.fullname || prof.fullName || prof.title || null,
-      handle: prof.handle || (prof.username ? `@${prof.username}` : undefined),
-      url: prof.url || null,
+      username: cleanUsername,
+      fullname: prof.fullname || prof.fullName || prof.title || rootProfile.fullname || null,
+      handle: cleanHandle,
+      url: prof.url || rootProfile.url || null,
       picture: pickPicture(prof) || pickPicture(rootProfile) || null,
-      followers: toNum(prof.followers),
-      engagements: toNum(prof.engagements),
-      engagementRate: toNum(prof.engagementRate),
-      averageViews: toNum(prof.averageViews || prof.avgViews),
+      followers: toNum(prof.followers ?? rootProfile.followers),
+      engagements: toNum(prof.engagements ?? rootProfile.engagements),
+      engagementRate: toNum(prof.engagementRate ?? rootProfile.engagementRate),
+      averageViews: toNum(
+        prof.averageViews ??
+          prof.avgViews ??
+          rootProfile.averageViews ??
+          rootProfile.avgViews
+      ),
     },
 
-    isPrivate: !!rootProfile.isPrivate,
-    isVerified: !!rootProfile.isVerified,
-    accountType: rootProfile.accountType || null,
-    secUid: rootProfile.secUid || null,
+    isPrivate:
+      typeof rootProfile.isPrivate === 'boolean'
+        ? rootProfile.isPrivate
+        : typeof prof.isPrivate === 'boolean'
+          ? prof.isPrivate
+          : null,
 
-    city: extractCity(rootProfile) || null,
-    state: extractState(rootProfile) || null,
-    country: extractCountry(rootProfile) || null,
-    ageGroup: rootProfile.ageGroup || null,
-    gender: rootProfile.gender || null,
-    language: extractLanguage(rootProfile) || null,
+    isVerified:
+      typeof rootProfile.isVerified === 'boolean'
+        ? rootProfile.isVerified
+        : typeof prof.isVerified === 'boolean'
+          ? prof.isVerified
+          : null,
 
-    statsByContentType: rootProfile.statsByContentType || null,
-    stats: rootProfile.stats || null,
+    accountType: rootProfile.accountType || prof.accountType || null,
+    secUid: rootProfile.secUid || prof.secUid || null,
 
-    recentPosts: Array.isArray(rootProfile.recentPosts) ? rootProfile.recentPosts : [],
-    popularPosts: Array.isArray(rootProfile.popularPosts) ? rootProfile.popularPosts : [],
+    city: extractCity(rootProfile) || extractCity(prof) || null,
+    state: extractState(rootProfile) || extractState(prof) || null,
+    subdivision:
+      firstNonEmpty(rootProfile.subdivision, prof.subdivision) || null,
+    country: extractCountry(rootProfile) || extractCountry(prof) || null,
+    ageGroup: rootProfile.ageGroup || prof.ageGroup || null,
+    gender: rootProfile.gender || prof.gender || null,
+    language: rootProfile.language ?? prof.language ?? null,
 
-    postsCount: toNum(rootProfile.postsCount || rootProfile.postsCounts),
-    avgLikes: toNum(rootProfile.avgLikes),
-    avgComments: toNum(rootProfile.avgComments),
-    avgViews: toNum(rootProfile.avgViews),
-    avgReelsPlays: toNum(rootProfile.avgReelsPlays),
-    totalLikes: toNum(rootProfile.totalLikes),
-    totalViews: toNum(rootProfile.totalViews),
+    contacts: pickArray(rootProfile.contacts, prof.contacts),
 
-    bio: extractBio(rootProfile) || '',
+    statsByContentType:
+      rootProfile.statsByContentType || prof.statsByContentType || null,
+    stats: rootProfile.stats || prof.stats || null,
+
+    recentPosts: pickArray(rootProfile.recentPosts, prof.recentPosts),
+    popularPosts: pickArray(rootProfile.popularPosts, prof.popularPosts),
+
+    postsCount: toNum(
+      rootProfile.postsCount ??
+        prof.postsCount ??
+        rootProfile.postsCounts ??
+        prof.postsCounts
+    ),
+    postsCounts: toNum(
+      rootProfile.postsCounts ??
+        prof.postsCounts ??
+        rootProfile.postsCount ??
+        prof.postsCount
+    ),
+
+    avgLikes: toNum(rootProfile.avgLikes ?? prof.avgLikes),
+    avgComments: toNum(rootProfile.avgComments ?? prof.avgComments),
+    avgViews: toNum(rootProfile.avgViews ?? prof.avgViews),
+    avgReelsPlays: toNum(rootProfile.avgReelsPlays ?? prof.avgReelsPlays),
+    totalLikes: toNum(rootProfile.totalLikes ?? prof.totalLikes),
+    totalViews: toNum(rootProfile.totalViews ?? prof.totalViews),
+
+    bio: extractBio(rootProfile) || extractBio(prof) || '',
 
     categories,
-    hashtags: rootProfile.hashtags || [],
-    mentions: rootProfile.mentions || [],
-    brandAffinity: rootProfile.brandAffinity || [],
+    hashtags: pickArray(rootProfile.hashtags, prof.hashtags),
+    mentions: pickArray(rootProfile.mentions, prof.mentions),
+    brandAffinity: pickArray(rootProfile.brandAffinity, prof.brandAffinity),
+    interests: pickArray(rootProfile.interests, prof.interests),
 
-    audience: rootProfile.audience || null,
-    audienceCommenters: rootProfile.audienceCommenters || null,
-    lookalikes: rootProfile.lookalikes || rootProfile.audienceLookalikes || [],
+    audience: rootProfile.audience || prof.audience || null,
+    audienceCommenters:
+      rootProfile.audienceCommenters ||
+      rootProfile.audienceLikers ||
+      prof.audienceCommenters ||
+      prof.audienceLikers ||
+      null,
 
-    sponsoredPosts: rootProfile.sponsoredPosts || [],
-    paidPostPerformance: toNum(rootProfile.paidPostPerformance),
-    paidPostPerformanceViews: toNum(rootProfile.paidPostPerformanceViews),
-    sponsoredPostsMedianViews: toNum(rootProfile.sponsoredPostsMedianViews),
-    sponsoredPostsMedianLikes: toNum(rootProfile.sponsoredPostsMedianLikes),
-    nonSponsoredPostsMedianViews: toNum(rootProfile.nonSponsoredPostsMedianViews),
-    nonSponsoredPostsMedianLikes: toNum(rootProfile.nonSponsoredPostsMedianLikes),
+    lookalikes: pickArray(
+      rootProfile.lookalikes,
+      rootProfile.audienceLookalikes,
+      prof.lookalikes,
+      prof.audienceLookalikes
+    ),
 
-    audienceExtra: rootProfile.audienceExtra || null,
+    sponsoredPosts: pickArray(rootProfile.sponsoredPosts, prof.sponsoredPosts),
+    paidPostPerformance: toNum(
+      rootProfile.paidPostPerformance ?? prof.paidPostPerformance
+    ),
+    paidPostPerformanceViews: toNum(
+      rootProfile.paidPostPerformanceViews ?? prof.paidPostPerformanceViews
+    ),
+    sponsoredPostsMedianViews: toNum(
+      rootProfile.sponsoredPostsMedianViews ?? prof.sponsoredPostsMedianViews
+    ),
+    sponsoredPostsMedianLikes: toNum(
+      rootProfile.sponsoredPostsMedianLikes ?? prof.sponsoredPostsMedianLikes
+    ),
+    nonSponsoredPostsMedianViews: toNum(
+      rootProfile.nonSponsoredPostsMedianViews ??
+        prof.nonSponsoredPostsMedianViews
+    ),
+    nonSponsoredPostsMedianLikes: toNum(
+      rootProfile.nonSponsoredPostsMedianLikes ??
+        prof.nonSponsoredPostsMedianLikes
+    ),
+
+    statHistory: pickArray(rootProfile.statHistory, prof.statHistory),
+    audienceExtra: rootProfile.audienceExtra || prof.audienceExtra || null,
+
     providerRaw: reportJSON,
   };
 }
@@ -877,69 +967,231 @@ function trimProviderRaw(providerRaw) {
 
 function mapReportToModashDoc(normalized, platform, opts = {}) {
   const prof = normalized.profile || {};
+  const rawRoot = (normalized.providerRaw && normalized.providerRaw.profile) || {};
+  const rawNested = rawRoot.profile || {};
   const { influencerId, userId } = opts;
-  const canonicalUserId = userId || prof.userId;
+
+  const canonicalUserId =
+    userId ||
+    cleanStr(prof.userId) ||
+    cleanStr(rawRoot.userId) ||
+    cleanStr(rawNested.userId) ||
+    null;
 
   const doc = {
     provider: platform,
     userId: canonicalUserId,
 
-    username: prof.username,
-    fullname: prof.fullname,
-    handle: prof.handle,
-    url: prof.url,
-    picture: prof.picture,
+    username:
+      prof.username ||
+      cleanStr(rawNested.username || rawRoot.username).replace(/^@/, '') ||
+      null,
 
-    followers: prof.followers,
-    engagements: prof.engagements,
-    engagementRate: prof.engagementRate,
-    averageViews: prof.averageViews,
+    fullname:
+      prof.fullname ||
+      rawNested.fullname ||
+      rawNested.fullName ||
+      rawRoot.fullname ||
+      rawRoot.fullName ||
+      null,
 
-    isPrivate: normalized.isPrivate,
-    isVerified: normalized.isVerified,
-    accountType: normalized.accountType,
-    secUid: normalized.secUid,
+    handle:
+      prof.handle ||
+      rawNested.handle ||
+      rawRoot.handle ||
+      (prof.username ? `@${cleanStr(prof.username).replace(/^@/, '')}` : null),
 
-    city: normalized.city,
-    state: normalized.state,
-    country: normalized.country,
-    ageGroup: normalized.ageGroup,
-    gender: normalized.gender,
-    language: normalized.language,
+    url: prof.url || rawNested.url || rawRoot.url || null,
+    picture: prof.picture || pickPicture(rawNested) || pickPicture(rawRoot) || null,
 
-    statsByContentType: normalized.statsByContentType,
-    stats: normalized.stats,
-    recentPosts: normalized.recentPosts,
-    popularPosts: normalized.popularPosts,
+    followers: prof.followers ?? toNum(rawNested.followers ?? rawRoot.followers),
+    engagements: prof.engagements ?? toNum(rawNested.engagements ?? rawRoot.engagements),
+    engagementRate:
+      prof.engagementRate ?? toNum(rawNested.engagementRate ?? rawRoot.engagementRate),
+    averageViews:
+      prof.averageViews ??
+      toNum(
+        rawNested.averageViews ??
+          rawNested.avgViews ??
+          rawRoot.averageViews ??
+          rawRoot.avgViews
+      ),
 
-    postsCount: normalized.postsCount,
-    avgLikes: normalized.avgLikes,
-    avgComments: normalized.avgComments,
-    avgViews: normalized.avgViews,
-    avgReelsPlays: normalized.avgReelsPlays,
-    totalLikes: normalized.totalLikes,
-    totalViews: normalized.totalViews,
+    isPrivate:
+      normalized.isPrivate ??
+      rawRoot.isPrivate ??
+      rawNested.isPrivate ??
+      null,
 
-    bio: normalized.bio,
+    isVerified:
+      normalized.isVerified ??
+      rawRoot.isVerified ??
+      rawNested.isVerified ??
+      null,
 
-    categories: normalized.categories || [],
-    hashtags: normalized.hashtags || [],
-    mentions: normalized.mentions || [],
-    brandAffinity: normalized.brandAffinity || [],
+    accountType: normalized.accountType ?? rawRoot.accountType ?? rawNested.accountType,
+    secUid: normalized.secUid ?? rawRoot.secUid ?? rawNested.secUid,
 
-    audience: normalized.audience,
-    audienceCommenters: normalized.audienceCommenters,
-    lookalikes: normalized.lookalikes || [],
+    city: normalized.city ?? extractCity(rawRoot) ?? extractCity(rawNested),
+    state: normalized.state ?? extractState(rawRoot) ?? extractState(rawNested),
+    subdivision:
+      normalized.subdivision ??
+      firstNonEmpty(rawRoot.subdivision, rawNested.subdivision) ??
+      null,
+    country:
+      normalized.country ?? extractCountry(rawRoot) ?? extractCountry(rawNested),
+    ageGroup: normalized.ageGroup ?? rawRoot.ageGroup ?? rawNested.ageGroup,
+    gender: normalized.gender ?? rawRoot.gender ?? rawNested.gender,
+    language: normalized.language ?? rawRoot.language ?? rawNested.language,
 
-    sponsoredPosts: normalized.sponsoredPosts || [],
-    paidPostPerformance: normalized.paidPostPerformance,
-    paidPostPerformanceViews: normalized.paidPostPerformanceViews,
-    sponsoredPostsMedianViews: normalized.sponsoredPostsMedianViews,
-    sponsoredPostsMedianLikes: normalized.sponsoredPostsMedianLikes,
-    nonSponsoredPostsMedianViews: normalized.nonSponsoredPostsMedianViews,
-    nonSponsoredPostsMedianLikes: normalized.nonSponsoredPostsMedianLikes,
+    contacts: pickArray(normalized.contacts, rawRoot.contacts, rawNested.contacts),
 
-    audienceExtra: normalized.audienceExtra,
+    statsByContentType:
+      normalized.statsByContentType ??
+      rawRoot.statsByContentType ??
+      rawNested.statsByContentType,
+
+    stats: normalized.stats ?? rawRoot.stats ?? rawNested.stats,
+
+    recentPosts: pickArray(
+      normalized.recentPosts,
+      rawRoot.recentPosts,
+      rawNested.recentPosts
+    ),
+    popularPosts: pickArray(
+      normalized.popularPosts,
+      rawRoot.popularPosts,
+      rawNested.popularPosts
+    ),
+
+    postsCount:
+      normalized.postsCount ??
+      toNum(
+        rawRoot.postsCount ??
+          rawNested.postsCount ??
+          rawRoot.postsCounts ??
+          rawNested.postsCounts
+      ),
+
+    postsCounts:
+      normalized.postsCounts ??
+      toNum(
+        rawRoot.postsCounts ??
+          rawNested.postsCounts ??
+          rawRoot.postsCount ??
+          rawNested.postsCount
+      ),
+
+    avgLikes:
+      normalized.avgLikes ?? toNum(rawRoot.avgLikes ?? rawNested.avgLikes),
+    avgComments:
+      normalized.avgComments ??
+      toNum(rawRoot.avgComments ?? rawNested.avgComments),
+    avgViews:
+      normalized.avgViews ?? toNum(rawRoot.avgViews ?? rawNested.avgViews),
+    avgReelsPlays:
+      normalized.avgReelsPlays ??
+      toNum(rawRoot.avgReelsPlays ?? rawNested.avgReelsPlays),
+    totalLikes:
+      normalized.totalLikes ?? toNum(rawRoot.totalLikes ?? rawNested.totalLikes),
+    totalViews:
+      normalized.totalViews ?? toNum(rawRoot.totalViews ?? rawNested.totalViews),
+
+    bio: normalized.bio || extractBio(rawRoot) || extractBio(rawNested) || '',
+
+    categories:
+      Array.isArray(normalized.categories) && normalized.categories.length
+        ? normalized.categories
+        : extractCategories(rawRoot).length
+          ? extractCategories(rawRoot)
+          : extractCategories(rawNested),
+
+    hashtags: pickArray(normalized.hashtags, rawRoot.hashtags, rawNested.hashtags),
+    mentions: pickArray(normalized.mentions, rawRoot.mentions, rawNested.mentions),
+    brandAffinity: pickArray(
+      normalized.brandAffinity,
+      rawRoot.brandAffinity,
+      rawNested.brandAffinity
+    ),
+    interests: pickArray(
+      normalized.interests,
+      rawRoot.interests,
+      rawNested.interests
+    ),
+
+    audience: normalized.audience ?? rawRoot.audience ?? rawNested.audience,
+    audienceCommenters:
+      normalized.audienceCommenters ??
+      rawRoot.audienceCommenters ??
+      rawRoot.audienceLikers ??
+      rawNested.audienceCommenters ??
+      rawNested.audienceLikers ??
+      null,
+
+    lookalikes: pickArray(
+      normalized.lookalikes,
+      rawRoot.lookalikes,
+      rawRoot.audienceLookalikes,
+      rawNested.lookalikes,
+      rawNested.audienceLookalikes
+    ),
+
+    sponsoredPosts: pickArray(
+      normalized.sponsoredPosts,
+      rawRoot.sponsoredPosts,
+      rawNested.sponsoredPosts
+    ),
+
+    paidPostPerformance:
+      normalized.paidPostPerformance ??
+      toNum(rawRoot.paidPostPerformance ?? rawNested.paidPostPerformance),
+
+    paidPostPerformanceViews:
+      normalized.paidPostPerformanceViews ??
+      toNum(
+        rawRoot.paidPostPerformanceViews ??
+          rawNested.paidPostPerformanceViews
+      ),
+
+    sponsoredPostsMedianViews:
+      normalized.sponsoredPostsMedianViews ??
+      toNum(
+        rawRoot.sponsoredPostsMedianViews ??
+          rawNested.sponsoredPostsMedianViews
+      ),
+
+    sponsoredPostsMedianLikes:
+      normalized.sponsoredPostsMedianLikes ??
+      toNum(
+        rawRoot.sponsoredPostsMedianLikes ??
+          rawNested.sponsoredPostsMedianLikes
+      ),
+
+    nonSponsoredPostsMedianViews:
+      normalized.nonSponsoredPostsMedianViews ??
+      toNum(
+        rawRoot.nonSponsoredPostsMedianViews ??
+          rawNested.nonSponsoredPostsMedianViews
+      ),
+
+    nonSponsoredPostsMedianLikes:
+      normalized.nonSponsoredPostsMedianLikes ??
+      toNum(
+        rawRoot.nonSponsoredPostsMedianLikes ??
+          rawNested.nonSponsoredPostsMedianLikes
+      ),
+
+    statHistory: pickArray(
+      normalized.statHistory,
+      rawRoot.statHistory,
+      rawNested.statHistory
+    ),
+
+    audienceExtra:
+      normalized.audienceExtra ??
+      rawRoot.audienceExtra ??
+      rawNested.audienceExtra,
+
     providerRaw: trimProviderRaw(normalized.providerRaw),
   };
 
@@ -949,18 +1201,30 @@ function mapReportToModashDoc(normalized, platform, opts = {}) {
 
 async function upsertModashProfileFromReport(normalized, platform, opts = {}) {
   const prof = normalized.profile || {};
+  const rawRoot = (normalized.providerRaw && normalized.providerRaw.profile) || {};
+  const rawNested = rawRoot.profile || {};
   const influencerId = opts.influencerId || null;
   const userIdFromRequest = cleanStr(opts.userIdFromRequest || '');
 
   const rawCanonicalId =
-    cleanStr(prof.userId) || userIdFromRequest || cleanStr(prof.secUid) || cleanStr(prof.username) || null;
+    cleanStr(prof.userId) ||
+    cleanStr(rawRoot.userId) ||
+    cleanStr(rawNested.userId) ||
+    userIdFromRequest ||
+    cleanStr(normalized.secUid) ||
+    cleanStr(rawRoot.secUid) ||
+    cleanStr(rawNested.secUid) ||
+    cleanStr(prof.username) ||
+    cleanStr(rawNested.username) ||
+    cleanStr(rawRoot.username) ||
+    null;
 
   if (!rawCanonicalId) {
     console.warn('[upsertModashProfile] No usable userId; skipping save', {
       platform,
-      profUserId: prof.userId,
+      profUserId: prof.userId || rawRoot.userId || rawNested.userId,
       userIdFromRequest,
-      username: prof.username,
+      username: prof.username || rawNested.username || rawRoot.username,
     });
     return null;
   }
@@ -980,7 +1244,9 @@ async function upsertModashProfileFromReport(normalized, platform, opts = {}) {
 
   try {
     const saved = await ModashProfile.findOneAndUpdate(filter, update, options);
-    console.log(`[upsertModashProfile] Upserted ${platform} profile for userId: ${canonicalUserId}`);
+    console.log(
+      `[upsertModashProfile] Upserted ${platform} profile for userId: ${canonicalUserId}`
+    );
     return saved;
   } catch (err) {
     if (err && err.code === 11000) {
@@ -1571,20 +1837,26 @@ function buildSavedSort(sortKey, dirParam) {
   return { updatedAt: dir };
 }
 
-function mapSavedDoc(doc) {
-  const categoryNames = categoryNamesFromObjects(doc.categories);
+function mapSavedDoc(doc, canShowSensitive = false) {
+  const safe = sanitizeModashDocForViewer(doc, canShowSensitive);
+  const categoryNames = categoryNamesFromObjects(safe.categories);
 
   return {
-    ...doc,
-    platform: doc.provider,
+    ...safe,
+    platform: safe.provider,
     category: categoryNames,
-    categories: doc.categories || [],
-    location: buildLocationLabel(doc.city, doc.state, doc.country) || undefined,
+    categories: safe.categories || [],
+    location: buildLocationLabel(safe.city, safe.state, safe.country) || undefined,
   };
 }
 
 function getCategoryStringsFromSearchItem(item) {
-  return uniqStrings([].concat(asArray(item.categories)).concat(asArray(item.category)).concat(asArray(item.primaryCategory)));
+  return uniqStrings(
+    []
+      .concat(asArray(item.categories))
+      .concat(asArray(item.category))
+      .concat(asArray(item.primaryCategory))
+  );
 }
 
 function applyLocalSearchFilters(items = [], input = {}) {
@@ -1838,22 +2110,31 @@ async function frontendReport(req, res) {
     const brandId = cleanStr(req.query.brandId || req.query.brand_id || '');
     const adminId = cleanStr(req.query.adminId || req.query.admin_id || '');
     const isAdmin = !!adminId;
+    const canShowSensitive = !!cleanStr(adminId);
 
-    // ✅ np=1 => do not consume brand profile-view credit
+    const isProfile =
+      req.query.isProfile === '1' ||
+      req.query.isProfile === 'true' ||
+      req.query.isProfile === true;
+
     const skipProfileCredit =
+      isProfile ||
       req.query.np === '1' ||
       req.query.np === 'true' ||
       req.query.noProfileCredit === '1' ||
       req.query.noProfileCredit === 'true';
 
     if (!skipProfileCredit && !brandId && !adminId) {
-      return res.status(400).json({ error: 'brandId or adminId is required for profile views' });
+      return res
+        .status(400)
+        .json({ error: 'brandId or adminId is required for profile views' });
     }
 
     const platform = normalizePlatform(req.query.platform || '');
     const requestedUserId = cleanStr(req.query.userId || '');
     const calculationMethod = toCalcMethod(req.query.calculationMethod);
-    let influencerId = cleanStr(req.query.influencerId || req.query.influencer_id || '') || null;
+    let influencerId =
+      cleanStr(req.query.influencerId || req.query.influencer_id || '') || null;
 
     const forceFresh =
       req.query.force === '1' ||
@@ -1862,7 +2143,9 @@ async function frontendReport(req, res) {
       req.query.refresh === 'true';
 
     if (!platform) {
-      return res.status(400).json({ error: 'platform must be instagram|tiktok|youtube' });
+      return res
+        .status(400)
+        .json({ error: 'platform must be instagram|tiktok|youtube' });
     }
 
     if (!requestedUserId) {
@@ -1890,13 +2173,20 @@ async function frontendReport(req, res) {
           }
         }
       } catch (resolveErr) {
-        console.error('[frontendReport] Failed to resolve local Modash _id:', resolveErr);
+        console.error(
+          '[frontendReport] Failed to resolve local Modash _id:',
+          resolveErr
+        );
       }
     }
 
     const now = new Date();
-    const periodKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-    const shouldChargeProfileView = !skipProfileCredit && !isAdmin && !!brandId;
+    const periodKey = `${now.getUTCFullYear()}-${String(
+      now.getUTCMonth() + 1
+    ).padStart(2, '0')}`;
+
+    const shouldChargeProfileView =
+      !skipProfileCredit && !isAdmin && !!brandId;
 
     let alreadyViewedThisPeriod = false;
 
@@ -1911,7 +2201,10 @@ async function frontendReport(req, res) {
 
         alreadyViewedThisPeriod = !!existingView;
       } catch (e) {
-        console.error('[frontendReport] Failed to check BrandProfileView:', e.message);
+        console.error(
+          '[frontendReport] Failed to check BrandProfileView:',
+          e.message
+        );
       }
     }
 
@@ -1938,7 +2231,10 @@ async function frontendReport(req, res) {
         });
 
         if (cached && cached.providerRaw) {
-          const out = Object.assign({}, cached.providerRaw);
+          const out = sanitizeModashReportForViewer(
+            Object.assign({}, cached.providerRaw),
+            canShowSensitive
+          );
 
           if (cached.lastFetchedAt) {
             const d = new Date(cached.lastFetchedAt);
@@ -1961,7 +2257,10 @@ async function frontendReport(req, res) {
           return res.json(out);
         }
       } catch (cacheErr) {
-        console.error('[frontendReport] Cache lookup failed:', cacheErr.message);
+        console.error(
+          '[frontendReport] Cache lookup failed:',
+          cacheErr.message
+        );
       }
     }
 
@@ -2002,12 +2301,18 @@ async function frontendReport(req, res) {
         influencerId,
       });
     } catch (saveErr) {
-      console.error('[frontendReport] Failed to save Modash profile to database:', saveErr);
+      console.error(
+        '[frontendReport] Failed to save Modash profile to database:',
+        saveErr
+      );
     }
 
-    const out = Object.assign({}, reportJSON, {
-      _lastFetchedAt: fetchedAt.toISOString(),
-    });
+    const out = sanitizeModashReportForViewer(
+      Object.assign({}, reportJSON, {
+        _lastFetchedAt: fetchedAt.toISOString(),
+      }),
+      canShowSensitive
+    );
 
     if (shouldChargeProfileView) {
       await recordBrandProfileView({
@@ -2023,7 +2328,9 @@ async function frontendReport(req, res) {
     return res.json(out);
   } catch (err) {
     console.error('[frontendReport] Unexpected error:', err);
-    return res.status(500).json({ error: (err && err.message) || 'Internal error' });
+    return res
+      .status(500)
+      .json({ error: (err && err.message) || 'Internal error' });
   }
 }
 
@@ -2264,6 +2571,9 @@ async function getSavedInfluencers(req, res) {
       maxLimit: MAX_LIST_LIMIT,
     });
 
+    const adminId = cleanStr(req.query.adminId || req.query.admin_id || '');
+    const canShowSensitive = canShowSensitiveFromRequest(req, { adminId });
+
     const filter = buildSavedInfluencerMongoFilter(req.query);
     const sort = buildSavedSort(req.query.sort, req.query.dir);
 
@@ -2281,14 +2591,56 @@ async function getSavedInfluencers(req, res) {
       averageViews: 1,
       isVerified: 1,
       isPrivate: 1,
-      country: 1,
-      state: 1,
+      accountType: 1,
+      secUid: 1,
+
       city: 1,
+      state: 1,
+      subdivision: 1,
+      country: 1,
       gender: 1,
       ageGroup: 1,
       language: 1,
       bio: 1,
+      description: 1,
+
+      postsCount: 1,
+      postsCounts: 1,
+      avgLikes: 1,
+      avgComments: 1,
+      avgViews: 1,
+      avgReelsPlays: 1,
+      totalLikes: 1,
+      totalViews: 1,
+
+      stats: 1,
+      statsByContentType: 1,
+
       categories: 1,
+      hashtags: 1,
+      mentions: 1,
+      brandAffinity: 1,
+      interests: 1,
+      contacts: 1,
+
+      audience: 1,
+      audienceCommenters: 1,
+      audienceExtra: 1,
+      lookalikes: 1,
+
+      recentPosts: 1,
+      popularPosts: 1,
+      sponsoredPosts: 1,
+      statHistory: 1,
+
+      paidPostPerformance: 1,
+      paidPostPerformanceViews: 1,
+      sponsoredPostsMedianViews: 1,
+      sponsoredPostsMedianLikes: 1,
+      nonSponsoredPostsMedianViews: 1,
+      nonSponsoredPostsMedianLikes: 1,
+
+      providerRaw: 1,
       influencerId: 1,
       influencer: 1,
       createdAt: 1,
@@ -2309,7 +2661,7 @@ async function getSavedInfluencers(req, res) {
       page,
       limit,
       total,
-      results: docs.map(mapSavedDoc),
+      results: docs.map((doc) => mapSavedDoc(doc, canShowSensitive)),
     });
   } catch (err) {
     console.error('[getSavedInfluencers] Error:', err);
@@ -2526,7 +2878,11 @@ async function exportSavedInfluencersCsv(req, res) {
       const yt =
         prov === 'youtube'
           ? rawUrl ||
-          (doc.userId ? `https://www.youtube.com/channel/${doc.userId}` : u ? `https://www.youtube.com/@${u}` : dash)
+            (doc.userId
+              ? `https://www.youtube.com/channel/${doc.userId}`
+              : u
+                ? `https://www.youtube.com/@${u}`
+                : dash)
           : dash;
 
       const ig = prov === 'instagram' ? rawUrl || (u ? `https://www.instagram.com/${u}` : dash) : dash;
@@ -2647,11 +3003,7 @@ async function getMediaKitLink(req, res) {
 
     let saved = await ModashProfile.findOne({
       provider: platform,
-      $or: [
-        { username: usernameRx },
-        { handle: usernameRx },
-        { handle: handleRx },
-      ],
+      $or: [{ username: usernameRx }, { handle: usernameRx }, { handle: handleRx }],
     })
       .select('_id provider userId username handle fullname')
       .lean();
@@ -2687,9 +3039,6 @@ async function getMediaKitLink(req, res) {
     }
 
     const baseUrl = cleanStr(process.env.CAMPAIGN_BASE_URL || 'http://localhost:3000');
-
-    // Use provider userId in the public link, not Mongo _id.
-    // Also append platform so the frontend does not silently default to youtube.
     const publicProfileId = encodeURIComponent(cleanStr(saved.userId) || String(saved._id));
     const publicPlatform = encodeURIComponent(cleanStr(saved.provider));
     const link = `${baseUrl}/mediakit/${publicProfileId}?platform=${publicPlatform}&np=1`;
@@ -2729,5 +3078,5 @@ module.exports = {
   getSavedInfluencers,
   getRandomInfluencers,
   exportSavedInfluencersCsv,
-  getMediaKitLink
+  getMediaKitLink,
 };

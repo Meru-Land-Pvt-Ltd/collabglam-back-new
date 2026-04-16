@@ -74,18 +74,104 @@ const postSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const genderPerAgeSchema = new mongoose.Schema(
+  {
+    code: String,
+    male: Number,
+    female: Number,
+  },
+  { _id: false }
+);
+
+const geoNameWeightSchema = new mongoose.Schema(
+  {
+    name: String,
+    weight: Number,
+  },
+  { _id: false }
+);
+
+const geoSubdivisionItemSchema = new mongoose.Schema(
+  {
+    name: String,
+    weight: Number,
+  },
+  { _id: false }
+);
+
+const geoSubdivisionSchema = new mongoose.Schema(
+  {
+    name: String,
+    code: String,
+    items: [geoSubdivisionItemSchema],
+  },
+  { _id: false }
+);
+
+const contactSchema = new mongoose.Schema(
+  {
+    type: String,
+    value: String,
+  },
+  { _id: false }
+);
+
+const interestSchema = new mongoose.Schema(
+  {
+    id: Number,
+    name: String,
+  },
+  { _id: false }
+);
+
+const statHistorySchema = new mongoose.Schema(
+  {
+    month: String,
+    followers: Number,
+    following: Number,
+    avgLikes: Number,
+    avgViews: Number,
+    avgComments: Number,
+    avgShares: Number,
+  },
+  { _id: false }
+);
+
+const audienceDistributionSchema = new mongoose.Schema(
+  {
+    min: Number,
+    max: Number,
+    total: Number,
+    median: Boolean,
+  },
+  { _id: false }
+);
+
+const audienceExtraSchema = new mongoose.Schema(
+  {
+    followersRange: {
+      leftNumber: Number,
+      rightNumber: Number,
+    },
+    engagementRateDistribution: [audienceDistributionSchema],
+    credibilityDistribution: [audienceDistributionSchema],
+  },
+  { _id: false }
+);
+
 const audienceSchema = new mongoose.Schema(
   {
     notable: Number,
     genders: [weightItemSchema],
     geoCountries: [weightItemSchema],
     ages: [weightItemSchema],
-    gendersPerAge: [{ code: String, male: Number, female: Number }],
+    gendersPerAge: [genderPerAgeSchema],
     languages: [weightItemSchema],
     notableUsers: [userLiteSchema],
     audienceLookalikes: [userLiteSchema],
-    geoCities: [{ name: String, weight: Number }],
-    geoStates: [{ name: String, weight: Number }],
+    geoCities: [geoNameWeightSchema],
+    geoStates: [geoNameWeightSchema],
+    geoSubdivisions: [geoSubdivisionSchema],
     credibility: Number,
     interests: [{ name: String, weight: Number }],
     brandAffinity: [{ name: String, weight: Number }],
@@ -100,7 +186,6 @@ const audienceSchema = new mongoose.Schema(
 
 const modashSchema = new mongoose.Schema(
   {
-    // Optional link to your main Influencer document
     influencer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Influencer',
@@ -108,14 +193,12 @@ const modashSchema = new mongoose.Schema(
       index: true,
     },
 
-    // String version of influencer ID (for display/reference)
     influencerId: {
       type: String,
       required: false,
       index: true,
     },
 
-    // Provider info
     provider: {
       type: String,
       enum: ['youtube', 'tiktok', 'instagram'],
@@ -123,51 +206,46 @@ const modashSchema = new mongoose.Schema(
       index: true,
     },
 
-    // PRIMARY identity (together with provider)
     userId: {
       type: String,
       required: true,
       index: true,
     },
 
-    // Profile basics
     username: String,
     fullname: String,
     handle: String,
     url: String,
     picture: String,
 
-    // Metrics
     followers: Number,
     engagements: Number,
     engagementRate: Number,
     averageViews: Number,
 
-    // State/meta
     isPrivate: Boolean,
     isVerified: Boolean,
     accountType: String,
     secUid: String,
 
-    // Localization
     city: String,
     state: String,
+    subdivision: String,
     country: String,
     ageGroup: String,
     gender: String,
 
-    // language can be string or object
     language: mongoose.Schema.Types.Mixed,
+    contacts: [contactSchema],
 
-    // Content stats & posts
     statsByContentType: mongoose.Schema.Types.Mixed,
     stats: mongoose.Schema.Types.Mixed,
 
     recentPosts: [postSchema],
     popularPosts: [postSchema],
 
-    // Counts (normalized)
     postsCount: Number,
+    postsCounts: Number,
     avgLikes: Number,
     avgComments: Number,
     avgViews: Number,
@@ -175,23 +253,19 @@ const modashSchema = new mongoose.Schema(
     totalLikes: Number,
     totalViews: Number,
 
-    // Bio
     bio: String,
 
-    // Categories (your own classification)
     categories: { type: [categoryLinkSchema], default: [] },
 
-    // Tags / brand affinity
     hashtags: [mongoose.Schema.Types.Mixed],
     mentions: [mongoose.Schema.Types.Mixed],
     brandAffinity: [mongoose.Schema.Types.Mixed],
+    interests: [interestSchema],
 
-    // Audience (typed but flexible)
     audience: audienceSchema,
     audienceCommenters: audienceSchema,
     lookalikes: [userLiteSchema],
 
-    // Paid/sponsored
     sponsoredPosts: [postSchema],
     paidPostPerformance: Number,
     paidPostPerformanceViews: Number,
@@ -200,10 +274,9 @@ const modashSchema = new mongoose.Schema(
     nonSponsoredPostsMedianViews: Number,
     nonSponsoredPostsMedianLikes: Number,
 
-    // Misc extras
-    audienceExtra: mongoose.Schema.Types.Mixed,
+    statHistory: [statHistorySchema],
+    audienceExtra: audienceExtraSchema,
 
-    // Full raw payload (may be trimmed)
     providerRaw: mongoose.Schema.Types.Mixed,
   },
   {
@@ -213,7 +286,6 @@ const modashSchema = new mongoose.Schema(
 
 /* ------------------------------ Indexes ---------------------------------- */
 
-// PRIMARY unique constraint: userId + provider
 modashSchema.index(
   { userId: 1, provider: 1 },
   {
@@ -222,7 +294,6 @@ modashSchema.index(
   }
 );
 
-// Index for influencer string id (non-unique)
 modashSchema.index(
   { influencerId: 1 },
   {
@@ -231,7 +302,6 @@ modashSchema.index(
   }
 );
 
-// Common query helper
 modashSchema.index(
   { provider: 1, username: 1 },
   {
@@ -248,6 +318,15 @@ modashSchema.pre('save', function (next) {
   if (!this.provider) {
     return next(new Error('provider is required for ModashProfile'));
   }
+
+  if (
+    (this.postsCount === undefined || this.postsCount === null) &&
+    this.postsCounts !== undefined &&
+    this.postsCounts !== null
+  ) {
+    this.postsCount = this.postsCounts;
+  }
+
   return next();
 });
 

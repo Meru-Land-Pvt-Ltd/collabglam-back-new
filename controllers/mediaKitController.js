@@ -122,11 +122,30 @@ function cleanModashDoc(docOrObj) {
   return obj;
 }
 
-function mapModashToSocialProfiles(modashDocs = []) {
+function mapModashToSocialProfiles(modashDocs = [], opts = {}) {
   if (!Array.isArray(modashDocs)) return [];
+
+  const viewerRole = String(opts.viewerRole || '').toLowerCase();
+  const hideContacts = opts.hideContacts === true || viewerRole === 'brand';
+
+  function sanitizeProviderRaw(providerRaw) {
+    if (!providerRaw || typeof providerRaw !== 'object') return providerRaw;
+
+    const out = JSON.parse(JSON.stringify(providerRaw));
+
+    if (hideContacts) {
+      delete out.contacts;
+      if (out.profile && typeof out.profile === 'object') {
+        delete out.profile.contacts;
+      }
+    }
+
+    return out;
+  }
 
   return modashDocs.map((doc) => {
     const raw = cleanModashDoc(doc);
+    const safeProviderRaw = sanitizeProviderRaw(raw.providerRaw);
 
     return {
       modashId: raw._id ? String(raw._id) : null,
@@ -155,6 +174,7 @@ function mapModashToSocialProfiles(modashDocs = []) {
 
       city: raw.city || null,
       state: raw.state || null,
+      subdivision: raw.subdivision || null,
       country: raw.country || null,
       ageGroup: raw.ageGroup || null,
       gender: raw.gender || null,
@@ -165,6 +185,7 @@ function mapModashToSocialProfiles(modashDocs = []) {
       statsByContentType: raw.statsByContentType || null,
 
       postsCount: raw.postsCount ?? null,
+      postsCounts: raw.postsCounts ?? null,
       avgLikes: raw.avgLikes ?? null,
       avgComments: raw.avgComments ?? null,
       avgViews: raw.avgViews ?? null,
@@ -176,6 +197,8 @@ function mapModashToSocialProfiles(modashDocs = []) {
       hashtags: normalizeArray(raw.hashtags),
       mentions: normalizeArray(raw.mentions),
       brandAffinity: normalizeArray(raw.brandAffinity),
+      interests: normalizeArray(raw.interests),
+      contacts: hideContacts ? [] : normalizeArray(raw.contacts),
 
       audience: raw.audience || null,
       audienceCommenters: raw.audienceCommenters || null,
@@ -185,6 +208,7 @@ function mapModashToSocialProfiles(modashDocs = []) {
       recentPosts: normalizeArray(raw.recentPosts),
       popularPosts: normalizeArray(raw.popularPosts),
       sponsoredPosts: normalizeArray(raw.sponsoredPosts),
+      statHistory: normalizeArray(raw.statHistory),
 
       paidPostPerformance: raw.paidPostPerformance ?? null,
       paidPostPerformanceViews: raw.paidPostPerformanceViews ?? null,
@@ -193,8 +217,8 @@ function mapModashToSocialProfiles(modashDocs = []) {
       nonSponsoredPostsMedianViews: raw.nonSponsoredPostsMedianViews ?? null,
       nonSponsoredPostsMedianLikes: raw.nonSponsoredPostsMedianLikes ?? null,
 
-      // this is the most important one if you want "everything"
-      providerRaw: raw.providerRaw || null,
+      // sanitized for brand role
+      providerRaw: safeProviderRaw || null,
 
       createdAt: raw.createdAt || null,
       updatedAt: raw.updatedAt || null,
