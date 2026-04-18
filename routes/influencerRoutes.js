@@ -43,9 +43,9 @@ router.post('/get-campaign', influencerAuth, getCampaignsByInfluencer);
 router.post('/getlist', influencerAuth, getList);
 router.get('/getById', influencerAuth, getById);
 router.post("/getBulkByIds", influencerAuth, getBulkByIds);
-router.post('/sendOtp', influencerAuth, requestPasswordResetOtpInfluencer);
-router.post('/verifyOtp', influencerAuth, verifyPasswordResetOtpInfluencer);
-router.post('/updatePassword', influencerAuth, resetPasswordInfluencer);
+router.post('/sendOtp', requestPasswordResetOtpInfluencer);
+router.post('/verifyOtp', verifyPasswordResetOtpInfluencer);
+router.post('/updatePassword', resetPasswordInfluencer);
 
 router.post('/viewPaymentByType', influencerAuth, viewPaymentByType);
 

@@ -1261,7 +1261,120 @@ async function upsertModashProfileFromReport(normalized, platform, opts = {}) {
     throw err;
   }
 }
+async function upsertModashProfileFromReport2(normalized, platform, opts = {}) {
+  const prof = normalized.profile || {};
+  const rawRoot = (normalized.providerRaw && normalized.providerRaw.profile) || {};
+  const rawNested = rawRoot.profile || {};
+  const influencerId = opts.influencerId || null;
+  const userIdFromRequest = cleanStr(opts.userIdFromRequest || '');
+  const requestedHandle = cleanStr(opts.handle || prof.handle || prof.username || '');
 
+  const rawCanonicalId =
+    cleanStr(prof.userId) ||
+    cleanStr(rawRoot.userId) ||
+    cleanStr(rawNested.userId) ||
+    userIdFromRequest ||
+    cleanStr(normalized.secUid) ||
+    cleanStr(rawRoot.secUid) ||
+    cleanStr(rawNested.secUid) ||
+    cleanStr(prof.username) ||
+    cleanStr(rawNested.username) ||
+    cleanStr(rawRoot.username) ||
+    null;
+
+  if (!rawCanonicalId) {
+    console.warn('[upsertModashProfile] No usable userId; skipping save', {
+      platform,
+      profUserId: prof.userId || rawRoot.userId || rawNested.userId,
+      userIdFromRequest,
+      username: prof.username || rawNested.username || rawRoot.username,
+    });
+    return null;
+  }
+
+  const canonicalUserId = rawCanonicalId;
+  normalized.profile = normalized.profile || {};
+  normalized.profile.userId = canonicalUserId;
+
+  if (requestedHandle) {
+    normalized.profile.handle = requestedHandle;
+    normalized.profile.username = normalized.profile.username || requestedHandle;
+  }
+
+  const doc = mapReportToModashDoc(normalized, platform, {
+    influencerId,
+    userId: canonicalUserId,
+  });
+
+  const finalHandle =
+    cleanStr(doc.handle) ||
+    cleanStr(requestedHandle) ||
+    cleanStr(prof.handle) ||
+    cleanStr(prof.username) ||
+    cleanStr(rawNested.username) ||
+    cleanStr(rawRoot.username) ||
+    null;
+
+  if (finalHandle) {
+    doc.handle = finalHandle;
+  }
+
+  // BLOCK if another record already has same provider + handle
+  if (finalHandle) {
+    const duplicateProfile = await ModashProfile.findOne({
+      provider: platform,
+      $or: [{ handle: finalHandle }, { username: finalHandle }, { 'profile.username': finalHandle }],
+      userId: { $ne: canonicalUserId },
+    }).select('_id provider userId handle username');
+
+    if (duplicateProfile) {
+      const err = new Error(
+        `Profile already exists. We cannot update an existing profile with the same handle and provider.`
+      );
+      err.status = 409;
+      err.details = {
+        provider: platform,
+        handle: finalHandle,
+        existingUserId: duplicateProfile.userId || null,
+      };
+      throw err;
+    }
+  }
+
+  const filter = { provider: platform, userId: canonicalUserId };
+  const update = { $set: doc };
+  const options = { upsert: true, new: true, setDefaultsOnInsert: true };
+
+  try {
+    const saved = await ModashProfile.findOneAndUpdate(filter, update, options);
+    console.log(
+      `[upsertModashProfile] Upserted ${platform} profile for userId: ${canonicalUserId}`
+    );
+    return saved;
+  } catch (err) {
+    if (err && err.code === 11000) {
+      console.error(
+        '[upsertModashProfile] Duplicate key on { userId, provider }. Check conflicting legacy unique indexes.',
+        err.keyPattern,
+        err.keyValue
+      );
+
+      const duplicateErr = new Error(
+        'Profile already exists. We cannot update an existing profile with the same handle and provider.'
+      );
+      duplicateErr.status = 409;
+      duplicateErr.details = {
+        provider: platform,
+        handle: finalHandle,
+        userId: canonicalUserId,
+      };
+      throw duplicateErr;
+    } else {
+      console.error('[upsertModashProfile] Error saving to database:', err);
+    }
+    throw err;
+  }
+}
 async function findCachedReport({ platform, userId, influencerId }) {
   let doc = null;
 
@@ -2404,13 +2517,35 @@ async function resolveProfile(req, res) {
   try {
     const platform = normalizePlatform((req.body && req.body.platform) || '');
     let username = cleanStr((req.body && req.body.username) || '');
+    let handle = cleanStr((req.body && req.body.handle) || username || '');
+
     if (username.startsWith('@')) username = username.slice(1);
+    if (handle.startsWith('@')) handle = handle.slice(1);
+
+    if (!username && handle) username = handle;
+    if (!handle && username) handle = username;
 
     if (!platform) {
       return res.status(400).json({ message: 'platform must be instagram | youtube | tiktok' });
     }
+
     if (!username) {
       return res.status(400).json({ message: 'username (handle) is required' });
+    }
+
+    // BLOCK if same provider + handle already exists
+    const existingProfile = await ModashProfile.findOne({
+      provider: platform,
+      $or: [{ handle }, { username: handle }, { 'profile.username': handle }],
+    }).select('_id provider userId handle username');
+
+    if (existingProfile) {
+      return res.status(409).json({
+        message: 'Profile already exists. We cannot update an existing profile with the same handle and provider.',
+        provider: platform,
+        handle,
+        userId: existingProfile.userId || null,
+      });
     }
 
     let reportJSON = null;
@@ -2441,6 +2576,7 @@ async function resolveProfile(req, res) {
       }
 
       userIdResolved = hit.userId;
+
       try {
         reportJSON = await getReportLegacy(platform, userIdResolved);
       } catch (e) {
@@ -2455,27 +2591,35 @@ async function resolveProfile(req, res) {
     }
 
     const normalized = normalizeReportData(reportJSON);
+    normalized.profile = normalized.profile || {};
+    normalized.profile.handle = handle;
+    normalized.profile.username = normalized.profile.username || username;
+
     const preview = buildPreviewFromReport(reportJSON);
 
-    (async () => {
-      try {
-        await upsertModashProfileFromReport(normalized, platform, {
-          userIdFromRequest: userIdResolved || username,
-        });
-      } catch (saveErr) {
-        console.error('[resolveProfile] Failed to save profile:', saveErr.message);
-      }
-    })();
+    // SAVE directly so duplicate error can be returned properly
+    await upsertModashProfileFromReport2(normalized, platform, {
+      userIdFromRequest: userIdResolved || username,
+      handle,
+    });
 
     return res.json({
       message: 'ok',
       provider: platform,
+      handle,
       userId: userIdResolved || (normalized.profile && normalized.profile.userId) || null,
       preview,
       providerRaw: reportJSON,
       data: normalized,
     });
   } catch (e) {
+    if (e && e.status === 409) {
+      return res.status(409).json({
+        message: e.message || 'Profile already exists',
+        ...(e.details || {}),
+      });
+    }
+
     if (e && e.status === 403) {
       return res.status(403).json({
         message: 'Forbidden from Modash.',

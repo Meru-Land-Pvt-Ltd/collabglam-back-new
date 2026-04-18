@@ -60,19 +60,35 @@ const JWT_SECRET = process.env.JWT_SECRET;
 
 const MAIL_FROM_NAME = process.env.MAIL_FROM_NAME || "CollabGlam";
 const PRODUCT_NAME = process.env.PRODUCT_NAME || "CollabGlam";
-
+const RESET_TTL_MIN = Number(process.env.RESET_PASSWORD_TTL_MINUTES || 15);
+const RESET_TTL_MS = RESET_TTL_MIN * 60 * 1000;
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
   secure: SMTP_PORT === 465,
   auth: { user: SMTP_USER, pass: SMTP_PASS },
 });
+function signResetJwt(payload) {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new InternalError("JWT_SECRET is missing in env");
 
+  return jwt.sign(payload, secret, {
+    expiresIn: `${RESET_TTL_MIN}m`,
+  });
+}
 const OTP_TTL_MIN = Number(process.env.OTP_TTL_MIN || 10);
 const OTP_HASH_SECRET = process.env.OTP_HASH_SECRET || "CHANGE_ME_OTP_SECRET";
 const OTP_LIMIT_MAX = Number(process.env.OTP_LIMIT_MAX || 6);
 const OTP_LIMIT_WINDOW_MIN = Number(process.env.OTP_LIMIT_WINDOW_MIN || 60);
 const OTP_LIMIT_COOLDOWN_MIN = Number(process.env.OTP_LIMIT_COOLDOWN_MIN || 10);
+const OTP_BATCH_LIMIT = Number(process.env.OTP_BATCH_LIMIT || 3);
+const OTP_RESET_HOURS = Number(process.env.OTP_RESET_HOURS || 24);
+
+const SIGNIN_TOTAL = Number(process.env.SIGNIN_TOTAL || 9);
+const SIGNIN_BATCH = Number(process.env.SIGNIN_BATCH || 3);
+const SIGNIN_LOCK_1_MIN = Number(process.env.SIGNIN_LOCK_1_MIN || 1);
+const SIGNIN_LOCK_15_MIN = Number(process.env.SIGNIN_LOCK_15_MIN || 15);
+const SIGNIN_LOCK_24_HOURS = Number(process.env.SIGNIN_LOCK_24_HOURS || 24);
 
 /* ================================ Helpers ================================ */
 function isValidEmail(email) {
@@ -799,105 +815,402 @@ const upload = multer({
 exports.uploadProfileImage = upload.single("profileImage");
 
 /* ========================== OTP: Request & Verify ========================== */
-async function enforceOtpLimitByKey(email, role, key) {
-  const normalizedEmail = String(email).trim().toLowerCase();
-  const normalizedRole = String(role).trim().toLowerCase();
-  const now = new Date();
+async function findInfluencerByEmail(email, includePassword = false) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, "i");
 
-  let limiter = await VerifyOtpModel.findOne({
-    email: normalizedEmail,
-    role: normalizedRole,
-    docType: "limit",
-    key,
-  }).exec();
-
-  if (!limiter) {
-    limiter = await VerifyOtpModel.create({
-      email: normalizedEmail,
-      role: normalizedRole,
-      otp: "LIMIT",
-      status: 0,
-      userId: null,
-      docType: "limit",
-      key,
-      signupOtpSend: OTP_LIMIT_MAX,
-      signupOtpBatchCount: 0,
-      signupOtpCooldownUntil: null,
-      signupOtpResetAt: new Date(Date.now() + OTP_LIMIT_WINDOW_MIN * 60 * 1000),
-    });
+  let query = InfluencerModel.findOne({ email: emailRegexCI });
+  if (includePassword) {
+    query = query.select("+password");
   }
 
-  if (limiter.signupOtpResetAt && new Date(limiter.signupOtpResetAt) <= now) {
-    limiter.signupOtpBatchCount = 0;
-    limiter.signupOtpCooldownUntil = null;
-    limiter.signupOtpResetAt = new Date(Date.now() + OTP_LIMIT_WINDOW_MIN * 60 * 1000);
+  return query.exec();
+}
+
+function validateInfluencerSignupRequest(body = {}) {
+  const { email, name, password, countryId, categoryIds, confirmPassword } = body;
+
+  if (!email || !isValidEmail(email)) {
+    throw Object.assign(new Error("Valid email is required"), { statusCode: 400 });
   }
 
-  if (limiter.signupOtpCooldownUntil && new Date(limiter.signupOtpCooldownUntil) > now) {
-    const e = new Error("Too many OTP requests. Please try again later.");
-    e.statusCode = 429;
-    throw e;
+  if (!name || typeof name !== "string" || name.trim().length < 2) {
+    throw Object.assign(new Error("Valid name is required"), { statusCode: 400 });
   }
 
-  const maxSend =
-    typeof limiter.signupOtpSend === "number"
-      ? limiter.signupOtpSend
-      : OTP_LIMIT_MAX;
+  if (!password || typeof password !== "string") {
+    throw Object.assign(new Error("Password is required"), { statusCode: 400 });
+  }
 
-  const count =
-    typeof limiter.signupOtpBatchCount === "number"
-      ? limiter.signupOtpBatchCount
-      : 0;
-
-  if (count >= maxSend) {
-    limiter.signupOtpCooldownUntil = new Date(
-      Date.now() + OTP_LIMIT_COOLDOWN_MIN * 60 * 1000
+  if (!isStrongPassword(password)) {
+    throw Object.assign(
+      new Error(
+        "Password must be at least 8 characters and include uppercase, lowercase, number, and special character"
+      ),
+      { statusCode: 400 }
     );
-    await limiter.save();
+  }
 
-    const e = new Error("Too many OTP requests. Please try again later.");
+  if (confirmPassword != null && String(confirmPassword) !== String(password)) {
+    throw Object.assign(new Error("Passwords do not match"), { statusCode: 400 });
+  }
+
+  if (!countryId || !isValidObjectId(countryId)) {
+    throw Object.assign(new Error("Valid countryId is required"), { statusCode: 400 });
+  }
+
+  const catIds = uniqueValidObjectIds(categoryIds);
+  if (catIds.length === 0) {
+    throw Object.assign(new Error("Select at least 1 category"), { statusCode: 400 });
+  }
+
+  if (catIds.length > 5) {
+    throw Object.assign(new Error("Maximum 5 categories allowed"), { statusCode: 400 });
+  }
+}
+
+function buildInfluencerSignupPayload({ name, password, country, languages, categories }) {
+  return {
+    name: String(name || "").trim(),
+    password: String(password || ""),
+    country: country
+      ? {
+          _id: country._id,
+          name: String(country.countryName ?? country.name ?? "").trim(),
+        }
+      : null,
+    languages: Array.isArray(languages)
+      ? languages.map((l) => ({
+          _id: l._id,
+          name: String(l.name || "").trim(),
+        }))
+      : [],
+    categories: Array.isArray(categories)
+      ? categories.map((c) => ({
+          _id: c._id,
+          name: String(c.name || "").trim(),
+        }))
+      : [],
+  };
+}
+
+async function clearPendingOtpDocs(email, purpose) {
+  await VerifyOtpModel.deleteMany({
+    email: norm(email),
+    role: "influencer",
+    docType: "otp",
+    purpose,
+    status: 0,
+  }).exec();
+}
+
+async function clearAllOtpDocs(email, purpose) {
+  await VerifyOtpModel.deleteMany({
+    email: norm(email),
+    role: "influencer",
+    docType: "otp",
+    purpose,
+  }).exec();
+}
+
+async function createOtpDoc({
+  email,
+  purpose,
+  otpPlain,
+  userId = null,
+  signupPayload = null,
+}) {
+  return VerifyOtpModel.create({
+    email: norm(email),
+    role: "influencer",
+    otp: hashOtp(email, otpPlain),
+    status: 0,
+    userId,
+    docType: "otp",
+    purpose,
+    signupPayload,
+  });
+}
+
+async function getLatestPendingOtp(email, purpose) {
+  return VerifyOtpModel.findOne({
+    email: norm(email),
+    role: "influencer",
+    docType: "otp",
+    purpose,
+    status: 0,
+  })
+    .sort({ createdAt: -1 })
+    .exec();
+}
+
+function assertValidOtpDoc(otpDoc, email, otp) {
+  if (!otpDoc) {
+    throw Object.assign(
+      new Error("OTP not requested or expired. Please request a new OTP."),
+      { statusCode: 400 }
+    );
+  }
+
+  const ageMs = Date.now() - new Date(otpDoc.createdAt).getTime();
+  if (ageMs > OTP_TTL_MIN * 60 * 1000) {
+    throw Object.assign(
+      new Error("OTP expired. Please request a new OTP."),
+      { statusCode: 400 }
+    );
+  }
+
+  const incomingHash = hashOtp(email, String(otp).trim());
+  if (incomingHash !== otpDoc.otp) {
+    throw Object.assign(new Error("Invalid OTP"), { statusCode: 400 });
+  }
+}
+
+async function markOtpUsed(otpDoc, options = {}) {
+  const { userId = null } = options;
+
+  await VerifyOtpModel.updateOne(
+    { _id: otpDoc._id, status: 0 },
+    {
+      $set: {
+        status: 1,
+        userId: userId || otpDoc.userId || null,
+      },
+    }
+  ).exec();
+}
+
+function msToWaitString(ms) {
+  const sec = Math.ceil(ms / 1000);
+  if (sec <= 60) return `${sec} seconds`;
+
+  const min = Math.ceil(sec / 60);
+  if (min <= 60) return `${min} minutes`;
+
+  const hr = Math.ceil(min / 60);
+  return `${hr} hours`;
+}
+
+async function getSigninLimitDoc(email) {
+  return VerifyOtpModel.findOneAndUpdate(
+    {
+      email: norm(email),
+      role: "influencer",
+      docType: "limit",
+      key: "signin_limit",
+    },
+    {
+      $setOnInsert: {
+        email: norm(email),
+        role: "influencer",
+        docType: "limit",
+        key: "signin_limit",
+        otp: "__SIGNIN_LIMIT__",
+        status: 0,
+        userId: null,
+        signinFailedCount: 0,
+        signinCooldownUntil: null,
+        signinResetAt: null,
+      },
+    },
+    { new: true, upsert: true }
+  ).exec();
+}
+
+async function enforceOtpLimitByKey(email, role, key) {
+  const normalizedEmail = norm(email);
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  const nowMs = Date.now();
+
+  const limitDoc = await VerifyOtpModel.findOneAndUpdate(
+    { email: normalizedEmail, role: normalizedRole, docType: "limit", key },
+    {
+      $setOnInsert: {
+        email: normalizedEmail,
+        role: normalizedRole,
+        otp: key === "signup_limit" ? "__SIGNUP_LIMIT__" : "__FORGOT_LIMIT__",
+        status: 0,
+        userId: null,
+        docType: "limit",
+        key,
+        signupOtpSend: OTP_LIMIT_MAX,
+        signupOtpBatchCount: 0,
+        signupOtpCooldownUntil: null,
+        signupOtpResetAt: null,
+      },
+    },
+    { new: true, upsert: true }
+  ).exec();
+
+  if (
+    limitDoc.signupOtpResetAt &&
+    nowMs >= new Date(limitDoc.signupOtpResetAt).getTime()
+  ) {
+    limitDoc.signupOtpSend = OTP_LIMIT_MAX;
+    limitDoc.signupOtpBatchCount = 0;
+    limitDoc.signupOtpCooldownUntil = null;
+    limitDoc.signupOtpResetAt = null;
+    await limitDoc.save();
+  }
+
+  if ((limitDoc.signupOtpSend ?? OTP_LIMIT_MAX) <= 0) {
+    if (!limitDoc.signupOtpResetAt) {
+      limitDoc.signupOtpResetAt = new Date(
+        nowMs + OTP_RESET_HOURS * 60 * 60 * 1000
+      );
+      await limitDoc.save();
+    }
+
+    const e = new Error("Try again after 24 hours.");
     e.statusCode = 429;
     throw e;
   }
 
-  limiter.signupOtpBatchCount = count + 1;
-  await limiter.save();
+  if (
+    limitDoc.signupOtpCooldownUntil &&
+    nowMs < new Date(limitDoc.signupOtpCooldownUntil).getTime()
+  ) {
+    const waitMs =
+      new Date(limitDoc.signupOtpCooldownUntil).getTime() - nowMs;
+
+    const e = new Error(`Try again in ${msToWaitString(waitMs)}.`);
+    e.statusCode = 429;
+    throw e;
+  }
+
+  limitDoc.signupOtpSend = (limitDoc.signupOtpSend ?? OTP_LIMIT_MAX) - 1;
+  limitDoc.signupOtpBatchCount = (limitDoc.signupOtpBatchCount ?? 0) + 1;
+
+  if (limitDoc.signupOtpBatchCount >= OTP_BATCH_LIMIT) {
+    limitDoc.signupOtpCooldownUntil = new Date(
+      nowMs + OTP_LIMIT_COOLDOWN_MIN * 60 * 1000
+    );
+    limitDoc.signupOtpBatchCount = 0;
+  }
+
+  if (limitDoc.signupOtpSend <= 0) {
+    limitDoc.signupOtpSend = 0;
+    limitDoc.signupOtpResetAt = new Date(
+      nowMs + OTP_RESET_HOURS * 60 * 60 * 1000
+    );
+  }
+
+  await limitDoc.save();
+}
+
+async function enforceSigninLimit(email) {
+  const nowMs = Date.now();
+  const doc = await getSigninLimitDoc(email);
+
+  if (doc.signinResetAt && nowMs >= new Date(doc.signinResetAt).getTime()) {
+    doc.signinFailedCount = 0;
+    doc.signinCooldownUntil = null;
+    doc.signinResetAt = null;
+    await doc.save();
+  }
+
+  if (
+    doc.signinCooldownUntil &&
+    nowMs < new Date(doc.signinCooldownUntil).getTime()
+  ) {
+    const waitMs = new Date(doc.signinCooldownUntil).getTime() - nowMs;
+    const e = new Error(
+      `Too many failed login attempts. Try again in ${msToWaitString(waitMs)}.`
+    );
+    e.statusCode = 429;
+    throw e;
+  }
+
+  if ((doc.signinFailedCount ?? 0) >= SIGNIN_TOTAL) {
+    if (!doc.signinResetAt) {
+      doc.signinResetAt = new Date(
+        nowMs + SIGNIN_LOCK_24_HOURS * 60 * 60 * 1000
+      );
+      await doc.save();
+    }
+
+    const e = new Error("Too many failed login attempts. Try again after 24 hours.");
+    e.statusCode = 429;
+    throw e;
+  }
+}
+
+async function recordFailedSignin(email) {
+  const nowMs = Date.now();
+  const doc = await getSigninLimitDoc(email);
+
+  if (doc.signinResetAt && nowMs >= new Date(doc.signinResetAt).getTime()) {
+    doc.signinFailedCount = 0;
+    doc.signinCooldownUntil = null;
+    doc.signinResetAt = null;
+  }
+
+  doc.signinFailedCount = (doc.signinFailedCount ?? 0) + 1;
+
+  if (doc.signinFailedCount % SIGNIN_BATCH === 0) {
+    const batchNo = doc.signinFailedCount / SIGNIN_BATCH;
+
+    if (batchNo === 1) {
+      doc.signinCooldownUntil = new Date(nowMs + SIGNIN_LOCK_1_MIN * 60 * 1000);
+    } else if (batchNo === 2) {
+      doc.signinCooldownUntil = new Date(
+        nowMs + SIGNIN_LOCK_15_MIN * 60 * 1000
+      );
+    } else {
+      doc.signinCooldownUntil = new Date(
+        nowMs + SIGNIN_LOCK_24_HOURS * 60 * 60 * 1000
+      );
+      doc.signinResetAt = doc.signinCooldownUntil;
+      doc.signinFailedCount = SIGNIN_TOTAL;
+    }
+  }
+
+  await doc.save();
+
+  if (
+    doc.signinCooldownUntil &&
+    nowMs < new Date(doc.signinCooldownUntil).getTime()
+  ) {
+    const waitMs = new Date(doc.signinCooldownUntil).getTime() - nowMs;
+    const e = new Error(
+      (doc.signinFailedCount ?? 0) >= SIGNIN_TOTAL
+        ? "Too many failed login attempts. Try again after 24 hours."
+        : `Too many failed login attempts. Try again in ${msToWaitString(waitMs)}.`
+    );
+    e.statusCode = 429;
+    throw e;
+  }
+}
+
+async function resetSigninLimit(email) {
+  await VerifyOtpModel.updateOne(
+    {
+      email: norm(email),
+      role: "influencer",
+      docType: "limit",
+      key: "signin_limit",
+    },
+    {
+      $set: {
+        signinFailedCount: 0,
+        signinCooldownUntil: null,
+        signinResetAt: null,
+      },
+    }
+  ).exec();
 }
 
 exports.sendSignupOtpInfluencer = async (req, res) => {
+  let otpDoc = null;
+
   try {
-    const { email, name, password, countryId, languageIds, categoryIds } = req.body;
+    const { email, name, password, countryId, languageIds, categoryIds } = req.body || {};
 
-    if (!email || !isValidEmail(email)) {
-      return res.status(400).json({ message: "Valid email is required" });
-    }
+    validateInfluencerSignupRequest(req.body || {});
 
-    if (!name || typeof name !== "string" || name.trim().length < 2) {
-      return res.status(400).json({ message: "Valid name is required" });
-    }
+    const normalizedEmail = norm(email);
 
-    if (!password || typeof password !== "string") {
-      return res.status(400).json({ message: "Password is required" });
-    }
-
-    if (!isStrongPassword(password)) {
-      return res.status(400).json({
-        message:
-          "Password must be at least 8 characters and include uppercase, lowercase, number, and special character",
-      });
-    }
-
-    if (!countryId || !isValidObjectId(countryId)) {
-      return res.status(400).json({ message: "Valid countryId is required" });
-    }
-
-    const normalizedEmail = String(email).toLowerCase().trim();
-    const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, "i");
-
-    const influencerExists = await InfluencerModel.findOne({ email: emailRegexCI })
-      .select("_id")
-      .lean();
-
+    const influencerExists = await findInfluencerByEmail(normalizedEmail);
     if (influencerExists) {
       return res.status(409).json({
         message: "Email already registered as Influencer. Please Login.",
@@ -905,6 +1218,7 @@ exports.sendSignupOtpInfluencer = async (req, res) => {
     }
 
     await enforceOtpLimitByKey(normalizedEmail, "influencer", "signup_limit");
+    await clearPendingOtpDocs(normalizedEmail, "signup");
 
     const country = await Country.findById(countryId)
       .select("_id countryName countryCode callingCode")
@@ -916,24 +1230,14 @@ exports.sendSignupOtpInfluencer = async (req, res) => {
 
     const countryName = String(country.countryName ?? country.name ?? "").trim();
     if (!countryName) {
-      return res
-        .status(400)
-        .json({ message: "Country name missing for this countryId" });
+      return res.status(400).json({ message: "Country name missing for this countryId" });
     }
 
     const langIds = uniqueValidObjectIds(languageIds);
     const catIds = uniqueValidObjectIds(categoryIds);
 
-    if (catIds.length === 0) {
-      return res.status(400).json({ message: "Select at least 1 category" });
-    }
-
     if (langIds.length > 5) {
       return res.status(400).json({ message: "Maximum 5 languages allowed" });
-    }
-
-    if (catIds.length > 5) {
-      return res.status(400).json({ message: "Maximum 5 categories allowed" });
     }
 
     const [langs, cats] = await Promise.all([
@@ -952,41 +1256,19 @@ exports.sendSignupOtpInfluencer = async (req, res) => {
     }
 
     const otpPlain = genOtp();
-    const otpHashed = hashOtp(normalizedEmail, otpPlain);
     const hashedPassword = await hashPassword(password);
 
-    await VerifyOtpModel.updateMany(
-      {
-        email: normalizedEmail,
-        role: "influencer",
-        docType: "otp",
-        purpose: "signup",
-        status: 0,
-      },
-      { $set: { status: 1 } }
-    );
-
-    await VerifyOtpModel.create({
+    otpDoc = await createOtpDoc({
       email: normalizedEmail,
-      role: "influencer",
-      otp: otpHashed,
-      status: 0,
-      userId: null,
-      docType: "otp",
       purpose: "signup",
-      signupPayload: {
-        name: name.trim(),
-        country: { _id: country._id, name: countryName },
-        languages: (langs || []).map((l) => ({
-          _id: l._id,
-          name: String(l.name).trim(),
-        })),
-        categories: (cats || []).map((c) => ({
-          _id: c._id,
-          name: String(c.name).trim(),
-        })),
+      otpPlain,
+      signupPayload: buildInfluencerSignupPayload({
+        name,
         password: hashedPassword,
-      },
+        country,
+        languages: langs,
+        categories: cats,
+      }),
     });
 
     const { subject, text, html } = buildOtpEmailTemplate({
@@ -1003,31 +1285,27 @@ exports.sendSignupOtpInfluencer = async (req, res) => {
       email: normalizedEmail,
     });
   } catch (error) {
+    if (otpDoc?._id) {
+      try {
+        await VerifyOtpModel.deleteOne({ _id: otpDoc._id }).exec();
+      } catch (cleanupErr) {
+        console.error("sendSignupOtpInfluencer cleanup error:", cleanupErr);
+      }
+    }
+
     console.error("sendSignupOtpInfluencer error:", error);
-    const status = error?.statusCode || 500;
-    return res.status(status).json({
+    return res.status(error?.statusCode || 500).json({
       message:
-        status === 429 ? "Too many OTP requests. Please try again later." : "Internal Server Error",
+        error?.statusCode === 429
+          ? error.message
+          : error?.message || "Internal server error",
     });
   }
 };
 
 exports.verifyOtpSignUpInfluencer = async (req, res) => {
-  let otpDoc = null;
-  let createdInfluencer = null;
-  let otpClaimed = false;
-
   try {
     const { email, otp, location } = req.body || {};
-
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
-      return res.status(500).json({ message: "JWT_SECRET is missing in env" });
-    }
-
-    const expiresIn = process.env.JWT_EXPIRES_IN || "7d";
-    const proxyMailDomain =
-      process.env.PROXY_MAIL_DOMAIN || "mail.collabglam.com";
 
     if (!email || !isValidEmail(email)) {
       return res.status(400).json({ message: "Valid email is required" });
@@ -1037,168 +1315,75 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
       return res.status(400).json({ message: "Valid 6-digit OTP is required" });
     }
 
-    const normalizedEmail = String(email).trim().toLowerCase();
+    const normalizedEmail = norm(email);
 
-    const existing = await InfluencerModel.exists({
-      email: new RegExp(`^${escapeRegExp(normalizedEmail)}$`, "i"),
-    });
-
-    if (existing) {
-      return res
-        .status(409)
-        .json({ message: "Email already registered. Please Login." });
-    }
-
-    otpDoc = await VerifyOtpModel.findOne({
-      email: normalizedEmail,
-      role: "influencer",
-      status: 0,
-      docType: "otp",
-      purpose: "signup",
-    })
-      .sort({ createdAt: -1 })
-      .exec();
+    const otpDoc = await getLatestPendingOtp(normalizedEmail, "signup");
 
     if (!otpDoc) {
-      return res.status(400).json({ message: "OTP not requested" });
+      const existingInfluencer = await findInfluencerByEmail(normalizedEmail);
+      if (existingInfluencer) {
+        return res.status(409).json({
+          message: "Email already registered. Please Login.",
+        });
+      }
+
+      return res.status(400).json({
+        message: "OTP not requested or expired. Please request a new OTP.",
+      });
     }
 
-    const ageMs = Date.now() - new Date(otpDoc.createdAt).getTime();
-    if (ageMs > OTP_TTL_MIN * 60 * 1000) {
-      return res
-        .status(400)
-        .json({ message: "OTP expired. Please resend otp." });
-    }
-
-    const incomingHash = hashOtp(normalizedEmail, String(otp).trim());
-    if (incomingHash !== otpDoc.otp) {
-      return res.status(400).json({ message: "Invalid OTP" });
-    }
-
-    const claim = await VerifyOtpModel.updateOne(
-      { _id: otpDoc._id, status: 0 },
-      { $set: { status: 2 } }
-    );
-
-    if (!claim || claim.modifiedCount !== 1) {
-      return res
-        .status(409)
-        .json({ message: "OTP already used or being processed" });
-    }
-
-    otpClaimed = true;
+    assertValidOtpDoc(otpDoc, normalizedEmail, otp);
 
     const payload = otpDoc.signupPayload || {};
     const cleanName = String(payload?.name || "").trim();
     const countryName = String(payload?.country?.name || "").trim();
 
     if (!cleanName) {
-      await VerifyOtpModel.updateOne(
-        { _id: otpDoc._id, status: 2 },
-        { $set: { status: 0 } }
-      );
       return res.status(400).json({
         message: "Signup details missing (name). Please request OTP again.",
       });
     }
 
     if (!countryName) {
-      await VerifyOtpModel.updateOne(
-        { _id: otpDoc._id, status: 2 },
-        { $set: { status: 0 } }
-      );
       return res.status(400).json({
         message: "Signup details missing (country). Please request OTP again.",
       });
     }
 
     if (!payload?.password) {
-      await VerifyOtpModel.updateOne(
-        { _id: otpDoc._id, status: 2 },
-        { $set: { status: 0 } }
-      );
       return res.status(400).json({
         message: "Signup details missing (password). Please request OTP again.",
       });
     }
 
+    const existingInfluencer = await findInfluencerByEmail(normalizedEmail);
+    if (existingInfluencer) {
+      await clearAllOtpDocs(normalizedEmail, "signup");
+      return res.status(409).json({
+        message: "Email already registered. Please Login.",
+      });
+    }
+
     const cleanLanguages = Array.isArray(payload?.languages)
       ? payload.languages
-        .filter(
-          (l) => l && typeof l.name === "string" && l.name.trim().length > 0
-        )
-        .map((l) => ({
-          _id: l._id || undefined,
-          name: String(l.name).trim(),
-        }))
+          .filter((l) => l && typeof l.name === "string" && l.name.trim().length > 0)
+          .map((l) => ({
+            _id: l._id || undefined,
+            name: String(l.name).trim(),
+          }))
       : [];
 
     const cleanCategories = Array.isArray(payload?.categories)
       ? payload.categories
-        .filter(
-          (c) => c && typeof c.name === "string" && c.name.trim().length > 0
-        )
-        .map((c) => ({
-          _id: c._id || undefined,
-          name: String(c.name).trim(),
-        }))
+          .filter((c) => c && typeof c.name === "string" && c.name.trim().length > 0)
+          .map((c) => ({
+            _id: c._id || undefined,
+            name: String(c.name).trim(),
+          }))
       : [];
 
-    const slugifyInfluencerName = (name = "") => {
-      const base = String(name || "")
-        .trim()
-        .normalize("NFKD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "");
-
-      return base || "influencer";
-    };
-
-    const generateUniqueInfluencerProxyEmail = async (name) => {
-      const base = slugifyInfluencerName(name);
-      const escapedBase = escapeRegExp(base);
-      const escapedDomain = escapeRegExp(proxyMailDomain);
-
-      const regex = new RegExp(
-        `^${escapedBase}(\\d+)?@${escapedDomain}$`,
-        "i"
-      );
-
-      const rows = await InfluencerModel.find(
-        { proxyEmail: regex },
-        "proxyEmail"
-      ).lean();
-
-      let baseTaken = false;
-      let maxSuffix = 1;
-
-      for (const row of rows) {
-        const proxy = String(row?.proxyEmail || "").toLowerCase();
-        const localPart = proxy.split("@")[0];
-
-        if (localPart === base) {
-          baseTaken = true;
-          continue;
-        }
-
-        const match = localPart.match(
-          new RegExp(`^${escapedBase}(\\d+)$`, "i")
-        );
-
-        if (match) {
-          const suffixNum = Number(match[1]);
-          if (Number.isFinite(suffixNum) && suffixNum > maxSuffix) {
-            maxSuffix = suffixNum;
-          }
-        }
-      }
-
-      const localPart = baseTaken ? `${base}${maxSuffix + 1}` : base;
-      return `${localPart}@${proxyMailDomain}`;
-    };
-
     let proxyEmail = await generateUniqueInfluencerProxyEmail(cleanName);
+    let createdInfluencer = null;
 
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
@@ -1233,20 +1418,11 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
     }
 
     if (!createdInfluencer) {
-      throw new Error("Unable to allocate proxy email");
+      return res.status(500).json({ message: "Unable to allocate proxy email" });
     }
 
-    await VerifyOtpModel.updateOne(
-      { _id: otpDoc._id, status: 2 },
-      {
-        $set: {
-          status: 1,
-          userId: createdInfluencer._id,
-        },
-      }
-    );
-
-    otpClaimed = false;
+    await markOtpUsed(otpDoc, { userId: createdInfluencer._id });
+    await clearAllOtpDocs(normalizedEmail, "signup");
 
     const token = jwt.sign(
       {
@@ -1254,8 +1430,8 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
         role: "influencer",
         email: createdInfluencer.email,
       },
-      secret,
-      { expiresIn }
+      JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || "7d" }
     );
 
     const routeInfo = computeInfluencerNextRoute(createdInfluencer);
@@ -1275,30 +1451,9 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
   } catch (err) {
     console.error("verifyOtpSignUpInfluencer error:", err);
 
-    if (createdInfluencer?._id) {
-      try {
-        await InfluencerModel.deleteOne({ _id: createdInfluencer._id });
-      } catch (e) {
-        console.error("Rollback influencer delete failed:", e);
-      }
-    }
-
-    if (otpClaimed && otpDoc?._id) {
-      try {
-        await VerifyOtpModel.updateOne(
-          { _id: otpDoc._id, status: 2 },
-          { $set: { status: 0 } }
-        );
-      } catch (e) {
-        console.error("Rollback otp revert failed:", e);
-      }
-    }
-
     if (err?.code === 11000) {
       if (err?.keyPattern?.email) {
-        return res
-          .status(409)
-          .json({ message: "Email already registered. Please Login." });
+        return res.status(409).json({ message: "Email already registered. Please Login." });
       }
 
       if (err?.keyPattern?.proxyEmail) {
@@ -1307,12 +1462,14 @@ exports.verifyOtpSignUpInfluencer = async (req, res) => {
         });
       }
 
-      return res
-        .status(409)
-        .json({ message: "Duplicate data found. Please try again." });
+      return res.status(409).json({
+        message: "Duplicate data found. Please try again.",
+      });
     }
 
-    return res.status(500).json({ message: "Internal server error" });
+    return res.status(err?.statusCode || 500).json({
+      message: err?.message || "Internal server error",
+    });
   }
 };
 
@@ -1555,27 +1712,30 @@ exports.saveQuickOnboarding = async (req, res) => {
 /* ============================== Sign In ============================== */
 exports.signInInfluencer = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body || {};
 
     if (!email || !isValidEmail(email)) {
       return res.status(400).json({ message: "Valid email is required" });
     }
 
-    if (!password) {
+    if (!password || !String(password).trim()) {
       return res.status(400).json({ message: "Valid password is required" });
     }
 
-    const normalizedEmail = String(email).trim().toLowerCase();
-    const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, "i");
+    const normalizedEmail = norm(email);
 
-    const influencer = await InfluencerModel.findOne({ email: emailRegexCI })
-      .select(
-        "_id influencerId email password page1 page2 page3 ispage2Skip ispage3Skip primaryPlatform"
-      )
-      .exec();
+    await enforceSigninLimit(normalizedEmail);
 
-    if (!influencer || !influencer.password) {
-      return res.status(400).json({ message: "Invalid email or password" });
+    const influencer = await findInfluencerByEmail(normalizedEmail, true);
+
+    if (!influencer) {
+      return res.status(404).json({ message: "Email does not exist. Please sign up." });
+    }
+
+    if (!influencer.password) {
+      return res.status(400).json({
+        message: "Password not set. Please use forgot password.",
+      });
     }
 
     let ok = false;
@@ -1590,8 +1750,11 @@ exports.signInInfluencer = async (req, res) => {
     }
 
     if (!ok) {
-      return res.status(400).json({ message: "Invalid email or password" });
+      await recordFailedSignin(normalizedEmail);
+      return res.status(400).json({ message: "Incorrect password" });
     }
+
+    await resetSigninLimit(normalizedEmail);
 
     const token = signJwt({
       influencerId: influencer._id.toString(),
@@ -1619,7 +1782,9 @@ exports.signInInfluencer = async (req, res) => {
     });
   } catch (err) {
     console.error("signInInfluencer error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    return res.status(err?.statusCode || 500).json({
+      message: err?.message || "Internal server error",
+    });
   }
 };
 
@@ -2089,115 +2254,225 @@ exports.getCampaignsByInfluencer = async (req, res) => {
 };
 
 exports.requestPasswordResetOtpInfluencer = async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ message: 'Email is required' });
+  let otpDoc = null;
 
-  const normalizedEmail = String(email).trim().toLowerCase();
+  try {
+    const { email } = req.body || {};
 
-  const influencer = await Influencer.findOne({
-    email: new RegExp(`^${normalizedEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
-    name: { $exists: true, $ne: null },
-    password: { $exists: true, $ne: null },
-  });
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({ message: "Valid email is required" });
+    }
 
-  // ✅ Explicit response when not found
-  if (!influencer) {
-    return res.status(404).json({ message: 'Influencer does not exist with this email' });
+    const normalizedEmail = norm(email);
+
+    const influencer = await findInfluencerByEmail(normalizedEmail);
+    if (!influencer) {
+      return res.status(404).json({ message: "Influencer account not found" });
+    }
+
+    await enforceOtpLimitByKey(normalizedEmail, "influencer", "forgot_limit");
+    await clearPendingOtpDocs(normalizedEmail, "reset_password");
+
+    const otpPlain = genOtp();
+
+    otpDoc = await createOtpDoc({
+      email: normalizedEmail,
+      purpose: "reset_password",
+      otpPlain,
+      userId: influencer._id,
+    });
+
+    const subject = "Password reset code";
+    const html = otpHtmlTemplate({
+      title: "Password reset code",
+      subtitle: "Use this one-time code to reset your password.",
+      code: otpPlain,
+      minutes: OTP_TTL_MIN,
+      preheader: "Your password reset code",
+    });
+    const text = otpTextFallback({
+      code: otpPlain,
+      minutes: OTP_TTL_MIN,
+      title: "Password reset code",
+    });
+
+    await sendMail({
+      to: normalizedEmail,
+      subject,
+      html,
+      text,
+    });
+
+    return res.status(200).json({
+      message: "OTP sent for password reset",
+      email: normalizedEmail,
+    });
+  } catch (err) {
+    if (otpDoc?._id) {
+      try {
+        await VerifyOtpModel.deleteOne({ _id: otpDoc._id }).exec();
+      } catch (cleanupErr) {
+        console.error("requestPasswordResetOtpInfluencer cleanup error:", cleanupErr);
+      }
+    }
+
+    console.error("Error in requestPasswordResetOtpInfluencer:", err);
+    return res.status(err?.statusCode || 500).json({
+      message: err?.message || "Internal server error",
+    });
   }
-
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-  influencer.passwordResetCode = code;
-  influencer.passwordResetExpiresAt = expiresAt;
-  influencer.passwordResetVerified = false;
-  await influencer.save();
-
-  const subject = 'Password reset code';
-  const html = otpHtmlTemplate({
-    title: 'Password reset code',
-    subtitle: 'Use this one-time code to reset your password.',
-    code,
-    minutes: 10,
-    preheader: 'Your password reset code',
-  });
-  const text = otpTextFallback({ code, minutes: 10, title: 'Password reset code' });
-
-  await sendMail({
-    to: influencer.email,
-    subject,
-    html,
-    text,
-  });
-
-  return res.status(200).json({ message: 'OTP sent to your email' });
 };
 
 exports.verifyPasswordResetOtpInfluencer = async (req, res) => {
-  const { email, otp } = req.body;
-  if (!email || otp == null) {
-    return res.status(400).json({ message: 'Email and otp required' });
+  try {
+    const { email, otp } = req.body || {};
+
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({ message: "Valid email is required" });
+    }
+
+    if (!otp || !/^\d{6}$/.test(String(otp).trim())) {
+      return res.status(400).json({ message: "Valid 6-digit OTP is required" });
+    }
+
+    const normalizedEmail = norm(email);
+
+    const influencer = await findInfluencerByEmail(normalizedEmail);
+    if (!influencer) {
+      return res.status(404).json({ message: "Influencer account not found" });
+    }
+
+    const otpDoc = await getLatestPendingOtp(normalizedEmail, "reset_password");
+    assertValidOtpDoc(otpDoc, normalizedEmail, otp);
+
+    await markOtpUsed(otpDoc, {
+      userId: influencer._id,
+    });
+
+    const resetToken = signResetJwt({
+      tokenType: "pwd_reset",
+      role: "influencer",
+      influencerId: influencer._id.toString(),
+      email: influencer.email,
+      resetId: otpDoc._id.toString(),
+    });
+
+    return res.status(200).json({
+      message: "OTP verified",
+      resetToken,
+    });
+  } catch (err) {
+    console.error("Error in verifyPasswordResetOtpInfluencer:", err);
+    return res.status(err?.statusCode || 500).json({
+      message: err?.message || "Internal server error",
+    });
   }
-
-  const influencer = await Influencer.findOne({
-    email: { $regex: `^${email.trim()}$`, $options: 'i' },
-    passwordResetCode: otp.toString().trim(),
-    passwordResetExpiresAt: { $gt: new Date() }
-  });
-
-  if (!influencer) {
-    return res.status(400).json({ message: 'Invalid or expired OTP' });
-  }
-
-  influencer.passwordResetVerified = true;
-  influencer.passwordResetCode = undefined;
-  influencer.passwordResetExpiresAt = undefined;
-  await influencer.save();
-
-  const resetToken = jwt.sign(
-    { influencerId: influencer.influencerId, email: influencer.email, prt: true },
-    JWT_SECRET,
-    { expiresIn: '15m' }
-  );
-
-  return res.status(200).json({ message: 'OTP verified', resetToken });
 };
 
 exports.resetPasswordInfluencer = async (req, res) => {
-  const { resetToken, newPassword, confirmPassword } = req.body;
-  if (!resetToken || !newPassword) {
-    return res.status(400).json({ message: 'resetToken and newPassword required' });
-  }
-  if (confirmPassword != null && confirmPassword !== newPassword) {
-    return res.status(400).json({ message: 'Passwords do not match' });
-  }
-
   try {
+    const { resetToken, newPassword, confirmPassword } = req.body || {};
+
+    if (!resetToken || !newPassword) {
+      return res.status(400).json({ message: "resetToken and newPassword required" });
+    }
+
+    if (confirmPassword != null && String(confirmPassword) !== String(newPassword)) {
+      return res.status(400).json({ message: "Passwords do not match" });
+    }
+
+    if (!isStrongPassword(newPassword)) {
+      return res.status(400).json({
+        message:
+          "Password must be at least 8 characters and include uppercase, lowercase, number, and special character",
+      });
+    }
+
     const decoded = jwt.verify(resetToken, JWT_SECRET);
-    if (!decoded.prt) {
-      return res.status(403).json({ message: 'Invalid reset token' });
+
+    if (
+      decoded?.tokenType !== "pwd_reset" ||
+      decoded?.role !== "influencer" ||
+      !decoded?.influencerId ||
+      !decoded?.resetId ||
+      !decoded?.email
+    ) {
+      return res.status(403).json({ message: "Invalid reset token" });
     }
 
-    const influencer = await Influencer.findOne({ influencerId: decoded.influencerId });
+    const otpDoc = await VerifyOtpModel.findOne({
+      _id: decoded.resetId,
+      email: norm(decoded.email),
+      role: "influencer",
+      status: 1,
+      docType: "otp",
+      purpose: "reset_password",
+    }).exec();
+
+    if (!otpDoc) {
+      return res.status(400).json({ message: "Invalid or expired reset request" });
+    }
+
+    const verifiedAt = new Date(otpDoc.updatedAt || otpDoc.createdAt).getTime();
+    if (Date.now() - verifiedAt > RESET_TTL_MS) {
+      return res.status(400).json({
+        message: "Reset session expired. Verify OTP again.",
+      });
+    }
+
+    const influencer =
+      (mongoose.Types.ObjectId.isValid(String(decoded.influencerId))
+        ? await InfluencerModel.findById(decoded.influencerId).select("+password").exec()
+        : null) ||
+      (await InfluencerModel.findOne({ influencerId: String(decoded.influencerId) })
+        .select("+password")
+        .exec());
+
     if (!influencer) {
-      return res.status(404).json({ message: 'Influencer not found' });
+      return res.status(404).json({ message: "Influencer not found" });
     }
 
-    if (!influencer.passwordResetVerified) {
-      return res.status(400).json({ message: 'Password reset not verified' });
+    let samePassword = false;
+    if (
+      typeof influencer.password === "string" &&
+      influencer.password.startsWith("$2")
+    ) {
+      samePassword = await bcrypt.compare(String(newPassword), String(influencer.password));
+    } else {
+      samePassword = String(newPassword) === String(influencer.password || "");
     }
 
-    influencer.password = newPassword;
-    influencer.failedLoginAttempts = 0;
-    influencer.lockUntil = null;
-    influencer.passwordResetVerified = false;
+    if (samePassword) {
+      return res.status(400).json({
+        message: "New password cannot be the same as your last password",
+      });
+    }
 
+    influencer.password = await hashPassword(newPassword);
     await influencer.save();
 
-    return res.status(200).json({ message: 'Password reset successful. You can log in now.' });
+    await VerifyOtpModel.deleteMany({
+      email: norm(decoded.email),
+      role: "influencer",
+      docType: "otp",
+      purpose: "reset_password",
+    }).exec();
+
+    await resetSigninLimit(decoded.email);
+
+    return res.status(200).json({
+      message: "Password updated successfully",
+    });
   } catch (err) {
-    console.error('Error in resetPasswordInfluencer:', err);
-    return res.status(403).json({ message: 'Invalid or expired reset token' });
+    console.error("Error in resetPasswordInfluencer:", err);
+
+    if (err?.name === "TokenExpiredError" || err?.name === "JsonWebTokenError") {
+      return res.status(403).json({ message: "Invalid or expired reset token" });
+    }
+
+    return res.status(err?.statusCode || 500).json({
+      message: err?.message || "Internal server error",
+    });
   }
 };
 
