@@ -368,7 +368,7 @@ function normalizeCategories(raw, idx) {
       }
       continue;
     }
-
+//
     if (typeof item.id === "number" || typeof item.name === "string") {
       const byName = item.name
         ? idx.bySubName.get(String(item.name).toLowerCase())
@@ -826,7 +826,25 @@ async function findInfluencerByEmail(email, includePassword = false) {
 
   return query.exec();
 }
+async function findUserByEmail(email, includePassword = false) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const emailRegexCI = new RegExp(`^${escapeRegExp(normalizedEmail)}$`, "i");
 
+  let influencerQuery = InfluencerModel.findOne({ email: emailRegexCI });
+  let brandQuery = BrandModel.findOne({ email: emailRegexCI });
+
+  if (includePassword) {
+    influencerQuery = influencerQuery.select("+password");
+    brandQuery = brandQuery.select("+password");
+  }
+
+  const [influencer, brand] = await Promise.all([
+    influencerQuery.exec(),
+    brandQuery.exec(),
+  ]);
+
+  return influencer || brand || null;
+}
 function validateInfluencerSignupRequest(body = {}) {
   const { email, name, password, countryId, categoryIds, confirmPassword } = body;
 
@@ -1210,10 +1228,10 @@ exports.sendSignupOtpInfluencer = async (req, res) => {
 
     const normalizedEmail = norm(email);
 
-    const influencerExists = await findInfluencerByEmail(normalizedEmail);
+    const influencerExists = await findUserByEmail(normalizedEmail);
     if (influencerExists) {
       return res.status(409).json({
-        message: "Email already registered as Influencer. Please Login.",
+        message: "Email already registered . Please Login.",
       });
     }
 
