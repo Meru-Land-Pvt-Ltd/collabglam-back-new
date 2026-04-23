@@ -76,19 +76,34 @@ function signResetJwt(payload) {
     expiresIn: `${RESET_TTL_MIN}m`,
   });
 }
-const OTP_TTL_MIN = Number(process.env.OTP_TTL_MIN || 10);
+const OTP_TTL_MIN = Number(process.env.OTP_TTL_MIN || 15);
 const OTP_HASH_SECRET = process.env.OTP_HASH_SECRET || "CHANGE_ME_OTP_SECRET";
 const OTP_LIMIT_MAX = Number(process.env.OTP_LIMIT_MAX || 6);
 const OTP_LIMIT_WINDOW_MIN = Number(process.env.OTP_LIMIT_WINDOW_MIN || 60);
-const OTP_LIMIT_COOLDOWN_MIN = Number(process.env.OTP_LIMIT_COOLDOWN_MIN || 10);
+const OTP_LIMIT_COOLDOWN_MIN = Number(process.env.OTP_LIMIT_COOLDOWN_MIN || 15);
 const OTP_BATCH_LIMIT = Number(process.env.OTP_BATCH_LIMIT || 3);
 const OTP_RESET_HOURS = Number(process.env.OTP_RESET_HOURS || 24);
 
-const SIGNIN_TOTAL = Number(process.env.SIGNIN_TOTAL || 9);
-const SIGNIN_BATCH = Number(process.env.SIGNIN_BATCH || 3);
+const SIGNIN_FIRST_ATTEMPTS = Number(process.env.SIGNIN_FIRST_ATTEMPTS || 5);
+const SIGNIN_SECOND_ATTEMPTS = Number(process.env.SIGNIN_SECOND_ATTEMPTS || 3);
+const SIGNIN_THIRD_ATTEMPTS = Number(process.env.SIGNIN_THIRD_ATTEMPTS || 3);
+
 const SIGNIN_LOCK_1_MIN = Number(process.env.SIGNIN_LOCK_1_MIN || 1);
 const SIGNIN_LOCK_15_MIN = Number(process.env.SIGNIN_LOCK_15_MIN || 15);
 const SIGNIN_LOCK_24_HOURS = Number(process.env.SIGNIN_LOCK_24_HOURS || 24);
+
+const SIGNIN_STAGE_1_TOTAL = SIGNIN_FIRST_ATTEMPTS; // 5
+const SIGNIN_STAGE_2_TOTAL =
+  SIGNIN_FIRST_ATTEMPTS + SIGNIN_SECOND_ATTEMPTS; // 8
+const SIGNIN_STAGE_3_TOTAL =
+  SIGNIN_FIRST_ATTEMPTS + SIGNIN_SECOND_ATTEMPTS + SIGNIN_THIRD_ATTEMPTS; // 11
+
+function clearSigninLimitFields(doc) {
+  doc.signinFailedCount = 0;
+  doc.signinCooldownUntil = null;
+  doc.signinResetAt = null;
+}
+
 
 /* ================================ Helpers ================================ */
 function isValidEmail(email) {
@@ -1728,6 +1743,109 @@ exports.saveQuickOnboarding = async (req, res) => {
 };
 
 /* ============================== Sign In ============================== */
+
+async function enforceSigninLimit2(email) {
+  const nowMs = Date.now();
+  const doc = await getSigninLimitDoc(email);
+
+  if (doc.signinResetAt && nowMs >= new Date(doc.signinResetAt).getTime()) {
+    clearSigninLimitFields(doc);
+    await doc.save();
+  }
+
+  if (
+    doc.signinCooldownUntil &&
+    nowMs < new Date(doc.signinCooldownUntil).getTime()
+  ) {
+    const waitMs = new Date(doc.signinCooldownUntil).getTime() - nowMs;
+    const isFinalLock =
+      (doc.signinFailedCount ?? 0) >= SIGNIN_STAGE_3_TOTAL ||
+      !!doc.signinResetAt;
+
+    const e = new Error(
+      isFinalLock
+        ? "Too many failed login attempts. Try again after 24 hours."
+        : `Too many failed login attempts. Try again in ${msToWaitString(waitMs)}.`
+    );
+    e.statusCode = 429;
+    throw e;
+  }
+
+  if (
+    (doc.signinFailedCount ?? 0) >= SIGNIN_STAGE_3_TOTAL &&
+    doc.signinResetAt &&
+    nowMs < new Date(doc.signinResetAt).getTime()
+  ) {
+    const e = new Error("Too many failed login attempts. Try again after 24 hours.");
+    e.statusCode = 429;
+    throw e;
+  }
+}
+
+async function recordFailedSignin2(email) {
+  const nowMs = Date.now();
+  const doc = await getSigninLimitDoc(email);
+
+  if (doc.signinResetAt && nowMs >= new Date(doc.signinResetAt).getTime()) {
+    clearSigninLimitFields(doc);
+  }
+
+  let currentFailedCount = Number(doc.signinFailedCount || 0);
+
+  if (currentFailedCount >= SIGNIN_STAGE_3_TOTAL) {
+    currentFailedCount = SIGNIN_STAGE_3_TOTAL;
+  }
+
+  doc.signinFailedCount = currentFailedCount + 1;
+
+  if (doc.signinFailedCount === SIGNIN_STAGE_1_TOTAL) {
+    doc.signinCooldownUntil = new Date(nowMs + SIGNIN_LOCK_1_MIN * 60 * 1000);
+  } else if (doc.signinFailedCount === SIGNIN_STAGE_2_TOTAL) {
+    doc.signinCooldownUntil = new Date(nowMs + SIGNIN_LOCK_15_MIN * 60 * 1000);
+  } else if (doc.signinFailedCount >= SIGNIN_STAGE_3_TOTAL) {
+    doc.signinFailedCount = SIGNIN_STAGE_3_TOTAL;
+    doc.signinCooldownUntil = new Date(
+      nowMs + SIGNIN_LOCK_24_HOURS * 60 * 60 * 1000
+    );
+    doc.signinResetAt = doc.signinCooldownUntil;
+  }
+
+  await doc.save();
+
+  if (
+    doc.signinCooldownUntil &&
+    nowMs < new Date(doc.signinCooldownUntil).getTime()
+  ) {
+    const waitMs = new Date(doc.signinCooldownUntil).getTime() - nowMs;
+    const isFinalLock = (doc.signinFailedCount ?? 0) >= SIGNIN_STAGE_3_TOTAL;
+
+    const e = new Error(
+      isFinalLock
+        ? "Too many failed login attempts. Try again after 24 hours."
+        : `Too many failed login attempts. Try again in ${msToWaitString(waitMs)}.`
+    );
+    e.statusCode = 429;
+    throw e;
+  }
+}
+
+async function resetSigninLimit2(email) {
+  await VerifyOtpModel.updateOne(
+    {
+      email: norm(email),
+      role: "influencer",
+      docType: "limit",
+      key: "signin_limit",
+    },
+    {
+      $set: {
+        signinFailedCount: 0,
+        signinCooldownUntil: null,
+        signinResetAt: null,
+      },
+    }
+  ).exec();
+}
 exports.signInInfluencer = async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -1742,12 +1860,14 @@ exports.signInInfluencer = async (req, res) => {
 
     const normalizedEmail = norm(email);
 
-    await enforceSigninLimit(normalizedEmail);
+    await enforceSigninLimit2(normalizedEmail);
 
     const influencer = await findInfluencerByEmail(normalizedEmail, true);
 
     if (!influencer) {
-      return res.status(404).json({ message: "Email does not exist. Please sign up." });
+      return res
+        .status(404)
+        .json({ message: "Email does not exist. Please sign up." });
     }
 
     if (!influencer.password) {
@@ -1768,11 +1888,11 @@ exports.signInInfluencer = async (req, res) => {
     }
 
     if (!ok) {
-      await recordFailedSignin(normalizedEmail);
+      await recordFailedSignin2(normalizedEmail);
       return res.status(400).json({ message: "Incorrect password" });
     }
 
-    await resetSigninLimit(normalizedEmail);
+    await resetSigninLimit2(normalizedEmail);
 
     const token = signJwt({
       influencerId: influencer._id.toString(),

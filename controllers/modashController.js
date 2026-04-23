@@ -9,6 +9,7 @@ const {
   sanitizeModashDocForViewer,
 } = require('../utils/emailRedactor');
 const ModashProfile = require('../models/modash');
+const Creator = require('../models/creator'); // kept for future compatibility
 const Influencer = require('../models/influencer'); // kept for future compatibility
 const BrandProfileView = require('../models/brandProfileView');
 const { ensureBrandQuota } = require('../utils/quota');
@@ -1525,27 +1526,39 @@ function normalizeAiSearchItem(item, platform) {
     : undefined;
 
   const category = cleanStr(item && item.accountCategory) || undefined;
+  const itemCountry = cleanStr(item && (item.country || item.locationCountry || item.countryCode || item.location)) || undefined;
+  const itemLanguage = cleanStr(item && (item.language || item.primaryLanguage)) || undefined;
 
   return {
     userId,
     username,
     handle: username || undefined,
     fullname: cleanStr(item && item.fullName) || '',
-    followers: toNum(item && item.followersCount) || 0,
+    followers: toNum(item && (item.followersCount || item.followers)) || 0,
     engagementRate: toNum(item && item.engagementRate) || 0,
-    engagements: undefined,
+    engagements: toNum(item && (item.engagements || item.avgEngagements)),
     averageViews,
     picture: cleanStr(item && item.profilePicture) || undefined,
     url: buildPublicProfileUrl(platform, username, '', userId),
-    isVerified: false,
-    isPrivate: false,
+    isVerified:
+      typeof (item && item.isVerified) === 'boolean'
+        ? item.isVerified
+        : typeof (item && item.verified) === 'boolean'
+          ? item.verified
+          : undefined,
+    isPrivate:
+      typeof (item && item.isPrivate) === 'boolean'
+        ? item.isPrivate
+        : typeof (item && item.private) === 'boolean'
+          ? item.private
+          : undefined,
     platform,
-    bio: undefined,
-    country: undefined,
-    state: undefined,
-    city: undefined,
-    location: undefined,
-    language: undefined,
+    bio: cleanStr(item && item.bio) || undefined,
+    country: itemCountry,
+    state: cleanStr(item && item.state) || undefined,
+    city: cleanStr(item && item.city) || undefined,
+    location: itemCountry || undefined,
+    language: itemLanguage,
     categories: category ? [category] : [],
     category,
     primaryCategory: category,
@@ -1558,9 +1571,177 @@ function normalizeAiSearchItem(item, platform) {
   };
 }
 
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeNumericRange(range) {
+  if (!isPlainObject(range)) return null;
+
+  const min = toNum(range.min);
+  const max = toNum(range.max);
+  if (min === undefined && max === undefined) return null;
+
+  if (min !== undefined && max !== undefined && min > max) {
+    return { min: max, max: min };
+  }
+
+  const next = {};
+  if (min !== undefined) next.min = min;
+  if (max !== undefined) next.max = max;
+  return next;
+}
+
+function cloneFilterValue(value) {
+  if (Array.isArray(value)) return deepClone(value);
+  if (isPlainObject(value)) return deepClone(value);
+  return value;
+}
+
+function mergeFilterObjects(base = {}, override = {}) {
+  const next = deepClone(base || {});
+
+  for (const [key, value] of Object.entries(override || {})) {
+    if (value === undefined) continue;
+
+    if (isPlainObject(value) && isPlainObject(next[key])) {
+      next[key] = mergeFilterObjects(next[key], value);
+      continue;
+    }
+
+    next[key] = cloneFilterValue(value);
+  }
+
+  return next;
+}
+
+function deriveAiFiltersFromPayload(payload = {}) {
+  const standardInfluencer = deepClone(
+    (((payload.body || {}).filter || {}).influencer) || {}
+  );
+  const topLevelFilters = isPlainObject(payload.filters) ? deepClone(payload.filters) : {};
+  const explicitAiFilters = isPlainObject(payload.ai && payload.ai.filters)
+    ? deepClone(payload.ai.filters)
+    : {};
+
+  const derived = mergeFilterObjects(standardInfluencer, topLevelFilters);
+  const merged = mergeFilterObjects(derived, explicitAiFilters);
+
+  if (Array.isArray(standardInfluencer.categories) && standardInfluencer.categories.length && !Array.isArray(merged.categories)) {
+    merged.categories = deepClone(standardInfluencer.categories);
+  }
+
+  if (isPlainObject(standardInfluencer.locations)) {
+    const locations = standardInfluencer.locations;
+
+    if (Array.isArray(locations.countries) && locations.countries.length && !Array.isArray(merged.countries)) {
+      merged.countries = deepClone(locations.countries);
+    }
+    if (Array.isArray(locations.states) && locations.states.length && !Array.isArray(merged.states)) {
+      merged.states = deepClone(locations.states);
+    }
+    if (Array.isArray(locations.cities) && locations.cities.length && !Array.isArray(merged.cities)) {
+      merged.cities = deepClone(locations.cities);
+    }
+  }
+
+  for (const key of ['followers', 'engagementRate', 'engagements', 'views', 'reelsPlays', 'followersGrowthRate', 'age']) {
+    const normalized = normalizeNumericRange(merged[key]);
+    if (normalized) merged[key] = normalized;
+  }
+
+  return merged;
+}
+
+function normalizeTextFilterList(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => cleanStr(entry).toLowerCase())
+      .filter(Boolean);
+  }
+
+  const single = cleanStr(value).toLowerCase();
+  return single ? [single] : [];
+}
+
+function numberMatchesRange(value, range) {
+  if (!range) return true;
+  const num = toNum(value);
+  if (num === undefined) return false;
+  if (range.min !== undefined && num < range.min) return false;
+  if (range.max !== undefined && num > range.max) return false;
+  return true;
+}
+
+function itemMatchesTextList(itemValue, allowedValues) {
+  if (!allowedValues.length) return true;
+  const value = cleanStr(itemValue).toLowerCase();
+  return !!value && allowedValues.includes(value);
+}
+
+function itemMatchesLocationFilters(item, filters = {}) {
+  if (!isPlainObject(filters) || !Object.keys(filters).length) return true;
+
+  const countries = normalizeTextFilterList(filters.countries);
+  const states = normalizeTextFilterList(filters.states);
+  const cities = normalizeTextFilterList(filters.cities);
+
+  if (countries.length && !itemMatchesTextList(item.country, countries)) return false;
+  if (states.length && !itemMatchesTextList(item.state, states)) return false;
+  if (cities.length && !itemMatchesTextList(item.city, cities)) return false;
+
+  return true;
+}
+
+function itemMatchesCategoryFilters(item, categories) {
+  const allowed = normalizeTextFilterList(categories);
+  if (!allowed.length) return true;
+
+  const itemCategories = normalizeTextFilterList(
+    []
+      .concat(item.category || [])
+      .concat(item.primaryCategory || [])
+      .concat(Array.isArray(item.categories) ? item.categories : [])
+  );
+
+  return itemCategories.some((entry) => allowed.includes(entry));
+}
+
+function itemMatchesUnifiedAutoFilters(item, filters = {}) {
+  if (!item || !isPlainObject(filters) || !Object.keys(filters).length) return true;
+
+  if (!numberMatchesRange(item.followers, normalizeNumericRange(filters.followers))) return false;
+  if (!numberMatchesRange(item.engagementRate, normalizeNumericRange(filters.engagementRate))) return false;
+  if (!numberMatchesRange(item.engagements, normalizeNumericRange(filters.engagements))) return false;
+  if (!numberMatchesRange(item.averageViews, normalizeNumericRange(filters.views))) return false;
+
+  if (typeof filters.isVerified === 'boolean' && Boolean(item.isVerified) !== filters.isVerified) {
+    return false;
+  }
+
+  if (typeof filters.isPrivate === 'boolean' && Boolean(item.isPrivate) !== filters.isPrivate) {
+    return false;
+  }
+
+  const languageFilters = normalizeTextFilterList(filters.language || filters.languages);
+  if (languageFilters.length && !itemMatchesTextList(item.language, languageFilters)) {
+    return false;
+  }
+
+  const genderFilters = normalizeTextFilterList(filters.gender);
+  if (genderFilters.length && !itemMatchesTextList(item.gender, genderFilters)) {
+    return false;
+  }
+
+  if (!itemMatchesLocationFilters(item, filters.locations || filters)) return false;
+  if (!itemMatchesCategoryFilters(item, filters.categories)) return false;
+
+  return true;
+}
+
 function buildAiSearchBody(platform, payload = {}) {
   const ai = payload.ai || {};
-  const filters = deepClone(ai.filters || payload.filters || {});
+  const filters = deriveAiFiltersFromPayload(payload);
 
   if (Array.isArray(ai.brands) && ai.brands.length) {
     filters.brands = ai.brands;
@@ -1591,61 +1772,845 @@ function collectStandardSearchItems(platform, data) {
   });
 }
 
-async function runStandardPlatformSearch(platform, body) {
-  const firstBody = buildPlatformBody(platform, body);
-  let data = await modashPOST(`/${platform}/search`, firstBody);
+const MODASH_DISCOVERY_PAGE_SIZE = 15;
+const DEFAULT_FRONTEND_UNIFIED_LIMIT = 15;
+const MAX_FRONTEND_UNIFIED_LIMIT = 15;
+const DEFAULT_FRONTEND_SUGGESTION_LIMIT = 8;
+const MAX_FRONTEND_SUGGESTION_LIMIT = 10;
+const MIN_FRONTEND_QUERY_LENGTH = 2;
+const FRONTEND_SEARCH_POOL_BUFFER = 30;
 
-  const enableFallback = (process.env.MODASH_YT_FALLBACK || '1') !== '0';
-  if (platform === 'youtube' && enableFallback && Number((data && data.total) || 0) === 0) {
-    const retryBody = buildPlatformBody(platform, body, { relax: true });
-    try {
-      const retryData = await modashPOST(`/${platform}/search`, retryBody);
-      if (retryData && Number((retryData && retryData.total) || 0) > 0) {
-        data = retryData;
-      }
-    } catch {
-      // ignore youtube fallback retry errors
+function normalizeFreeTextSearch(value) {
+  return cleanStr(value)
+    .replace(/\s+/g, ' ')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .trim();
+}
+
+function normalizeSearchToken(value) {
+  return normalizeFreeTextSearch(value)
+    .toLowerCase()
+    .replace(/^[@#]+/, '')
+    .replace(/[^a-z0-9._\-\s]+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenizeSearchQuery(query) {
+  const tokens = normalizeSearchToken(query)
+    .split(' ')
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .filter((token) => token.length >= 2);
+
+  return uniqStrings(tokens);
+}
+
+function extractTextTagValue(textTags = []) {
+  for (const tag of asArray(textTags)) {
+    if (!tag) continue;
+    if (typeof tag === 'string') {
+      const clean = normalizeFreeTextSearch(tag);
+      if (clean) return clean;
+      continue;
     }
+
+    const value = normalizeFreeTextSearch(tag.value || tag.tag || tag.name);
+    if (!value) continue;
+
+    if (tag.type === 'mention') return `@${value.replace(/^@/, '')}`;
+    if (tag.type === 'hashtag') return `#${value.replace(/^#/, '')}`;
+    return value;
+  }
+  return '';
+}
+
+function extractUnifiedQuery(payload = {}) {
+  const body = payload.body || {};
+  const influencer = (body.filter && body.filter.influencer) || {};
+
+  return normalizeFreeTextSearch(
+    payload.query ||
+      payload.q ||
+      (payload.ai && payload.ai.query) ||
+      body.query ||
+      influencer.keywords ||
+      influencer.bio ||
+      extractTextTagValue(influencer.textTags) ||
+      (Array.isArray(influencer.relevance) && influencer.relevance[0]) ||
+      ''
+  );
+}
+
+function isExplicitCreatorQuery(query) {
+  const raw = normalizeFreeTextSearch(query);
+  if (!raw) return false;
+  if (raw.startsWith('@')) return true;
+  if (/https?:\/\//i.test(raw)) return true;
+  if (/^[a-z0-9._-]{3,40}$/i.test(raw) && /[._\d-]/.test(raw)) return true;
+  return false;
+}
+
+function isPlainSingleTopicWord(query) {
+  const tokens = tokenizeSearchQuery(query);
+  if (tokens.length !== 1) return false;
+  const raw = normalizeFreeTextSearch(query);
+  return /^[a-z]+$/i.test(tokens[0]) && !/[._\d-]/.test(raw) && !raw.startsWith('@') && !raw.startsWith('#');
+}
+
+function classifyQuery(query) {
+  const raw = normalizeFreeTextSearch(query);
+  const lower = raw.toLowerCase();
+  const tokens = tokenizeSearchQuery(raw);
+
+  if (!lower) {
+    return {
+      intent: 'topic',
+      allowLookupInSuggestions: false,
+      allowLookupInSearch: false,
+      preferTopicDiscovery: true,
+    };
+  }
+
+  if (lower.startsWith('#')) {
+    return {
+      intent: 'hashtag',
+      allowLookupInSuggestions: false,
+      allowLookupInSearch: false,
+      preferTopicDiscovery: true,
+    };
+  }
+
+  if (isExplicitCreatorQuery(raw)) {
+    return {
+      intent: 'creator',
+      allowLookupInSuggestions: true,
+      allowLookupInSearch: true,
+      preferTopicDiscovery: false,
+    };
+  }
+
+  if (isPlainSingleTopicWord(raw)) {
+    return {
+      intent: 'topic',
+      allowLookupInSuggestions: false,
+      allowLookupInSearch: false,
+      preferTopicDiscovery: true,
+    };
+  }
+
+  if (tokens.length >= 2) {
+    return {
+      intent: 'ambiguous',
+      allowLookupInSuggestions: true,
+      allowLookupInSearch: false,
+      preferTopicDiscovery: true,
+    };
   }
 
   return {
-    platform,
-    kind: 'standard',
-    data,
-    total: Number((data && data.total) || 0),
-    results: collectStandardSearchItems(platform, data),
+    intent: 'topic',
+    allowLookupInSuggestions: false,
+    allowLookupInSearch: false,
+    preferTopicDiscovery: true,
   };
 }
 
-async function runAiPlatformSearch(platform, payload) {
-  const body = buildAiSearchBody(platform, payload);
-  const data = await modashPOST(`/ai/${platform}/text-search`, body);
-  const profiles = Array.isArray(data && data.profiles) ? data.profiles : [];
+function detectSearchIntent(query) {
+  return classifyQuery(query).intent;
+}
+
+function buildUnifiedPagination(pageInput, limitInput) {
+  const rawPage = parseInt(String(pageInput ?? 1), 10);
+  const rawLimit = parseInt(String(limitInput ?? DEFAULT_FRONTEND_UNIFIED_LIMIT), 10);
+
+  const page = Math.max(1, Number.isFinite(rawPage) ? rawPage : 1);
+  const limit = Math.min(
+    MAX_FRONTEND_UNIFIED_LIMIT,
+    Math.max(1, Number.isFinite(rawLimit) ? rawLimit : DEFAULT_FRONTEND_UNIFIED_LIMIT)
+  );
 
   return {
-    platform,
-    kind: 'ai',
-    data,
-    total: Number((data && data.total) || 0),
-    results: profiles.map((item) => normalizeAiSearchItem(item, platform)),
+    page,
+    limit,
+    offset: (page - 1) * limit,
   };
 }
 
-function sortUnifiedResults(items = []) {
-  return items.slice().sort((a, b) => {
-    const aAi = a.searchType === 'ai' ? 1 : 0;
-    const bAi = b.searchType === 'ai' ? 1 : 0;
-    if (bAi !== aAi) return bAi - aAi;
-    if ((b.aiMatchedPostsCount || 0) !== (a.aiMatchedPostsCount || 0)) {
-      return (b.aiMatchedPostsCount || 0) - (a.aiMatchedPostsCount || 0);
-    }
-    if (!!b.isVerified !== !!a.isVerified) return b.isVerified ? 1 : -1;
-    if ((b.followers || 0) !== (a.followers || 0)) return (b.followers || 0) - (a.followers || 0);
-    if ((b.engagementRate || 0) !== (a.engagementRate || 0)) {
-      return (b.engagementRate || 0) - (a.engagementRate || 0);
-    }
-    return String(a.username || '').localeCompare(String(b.username || ''));
+function sourcePriority(item, queryInfo = classifyQuery('')) {
+  if (item.searchType === 'lookup') return queryInfo.intent === 'creator' ? 4 : 0;
+  if (item.searchType === 'combined') return 3;
+  if (item.searchType === 'ai') return 2;
+  return 1;
+}
+
+function hasExplicitStandardTextFilter(body = {}) {
+  const influencer = (body.filter && body.filter.influencer) || {};
+  return Boolean(
+    cleanStr(body.query) ||
+      cleanStr(influencer.keywords) ||
+      cleanStr(influencer.bio) ||
+      (Array.isArray(influencer.relevance) && influencer.relevance.length) ||
+      (Array.isArray(influencer.audienceRelevance) && influencer.audienceRelevance.length) ||
+      (Array.isArray(influencer.textTags) && influencer.textTags.length)
+  );
+}
+
+function buildStandardBodyForQuery(platform, originalBody, query, pageIndex) {
+  const body = buildPlatformBody(platform, originalBody || {});
+  body.page = pageIndex;
+  body.sort = body.sort || { field: 'followers', direction: 'desc' };
+  body.filter = body.filter || {};
+  body.filter.influencer = body.filter.influencer || {};
+
+  if (hasExplicitStandardTextFilter(body)) {
+    return body;
+  }
+
+  const queryInfo = classifyQuery(query);
+  const normalized = normalizeFreeTextSearch(query);
+  const influencer = body.filter.influencer;
+
+  if (queryInfo.intent === 'creator') {
+    influencer.bio = normalized.replace(/^@/, '');
+  } else if (queryInfo.intent === 'hashtag') {
+    influencer.textTags = [{ type: 'hashtag', value: normalized.replace(/^#/, '') }];
+  } else {
+    influencer.keywords = normalized;
+  }
+
+  return body;
+}
+
+function collectLookupSearchItems(platform, data) {
+  const bag = []
+    .concat(Array.isArray(data && data.directs) ? data.directs : [])
+    .concat(Array.isArray(data && data.results) ? data.results : [])
+    .concat(Array.isArray(data && data.users) ? data.users : [])
+    .concat(Array.isArray(data && data.channels) ? data.channels : []);
+
+  return bag.map((item) => {
+    const normalized = normalizeSearchItem(item, platform);
+    normalized.searchType = 'lookup';
+    normalized.source = 'lookup';
+    return normalized;
   });
+}
+
+function clampSuggestionLimit(limitInput) {
+  const rawLimit = parseInt(String(limitInput ?? DEFAULT_FRONTEND_SUGGESTION_LIMIT), 10);
+  return Math.min(
+    MAX_FRONTEND_SUGGESTION_LIMIT,
+    Math.max(1, Number.isFinite(rawLimit) ? rawLimit : DEFAULT_FRONTEND_SUGGESTION_LIMIT)
+  );
+}
+
+function toSuggestionItem(item, query) {
+  return {
+    type: 'creator',
+    platform: item.platform,
+    userId: item.userId,
+    username: item.username,
+    handle: item.handle,
+    fullname: item.fullname,
+    picture: item.picture,
+    url: item.url,
+    isVerified: Boolean(item.isVerified),
+    followers: Number(item.followers || 0),
+    score: Number(item.__relevanceScore || 0),
+    label: item.fullname || item.username || item.handle || query,
+    sublabel: item.username ? `@${String(item.username).replace(/^@/, '')}` : '',
+    category: item.primaryCategory || item.category || item.accountCategory || undefined,
+  };
+}
+
+function toSearchQuerySuggestion(query, queryInfo) {
+  const clean = normalizeFreeTextSearch(query);
+  if (!clean) return null;
+
+  const label =
+    queryInfo.intent === 'hashtag'
+      ? `Search creators posting ${clean}`
+      : `Search creators for "${clean}"`;
+
+  return {
+    type: 'query',
+    intent: queryInfo.intent,
+    value: clean,
+    label,
+    sublabel:
+      queryInfo.intent === 'creator'
+        ? 'Exact creator search'
+        : 'Discover influencers by niche, content and bio',
+  };
+}
+
+function toTaxonomySuggestionItem(kind, platform, raw) {
+  if (!raw) return null;
+
+  const label = cleanStr(raw.name || raw.label || raw.title || raw.value || raw.topic || raw.interest);
+  if (!label) return null;
+
+  return {
+    type: kind,
+    intent: 'topic',
+    platform,
+    id: raw.id || raw.topicId || raw.interestId || raw.brandId || null,
+    value: label,
+    label,
+    sublabel: `${platform} ${kind}`,
+  };
+}
+
+function pickTopicSuggestionRows(data) {
+  if (!data) return [];
+  if (Array.isArray(data.results)) return data.results;
+  if (Array.isArray(data.items)) return data.items;
+  if (Array.isArray(data.topics)) return data.topics;
+  if (Array.isArray(data.interests)) return data.interests;
+  if (Array.isArray(data.brands)) return data.brands;
+  return [];
+}
+
+async function fetchTopicSuggestions(query, platforms, limit) {
+  const suggestions = [];
+  const seen = new Set();
+
+  async function addFromEndpoint(platform, kind, path) {
+    try {
+      const data = await modashGET(path, {
+        query: normalizeFreeTextSearch(query).replace(/^[@#]/, ''),
+        limit,
+      });
+      for (const row of pickTopicSuggestionRows(data)) {
+        const item = toTaxonomySuggestionItem(kind, platform, row);
+        if (!item) continue;
+        const key = `${kind}:${String(item.value).toLowerCase()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        suggestions.push(item);
+        if (suggestions.length >= limit) return;
+      }
+    } catch {
+      // ignore unsupported taxonomy endpoints per platform
+    }
+  }
+
+  for (const platform of platforms) {
+    if (suggestions.length >= limit) break;
+    await addFromEndpoint(platform, 'topic', `/${platform}/topics`);
+    if (suggestions.length >= limit) break;
+    if (platform === 'instagram') {
+      await addFromEndpoint(platform, 'interest', '/instagram/interests');
+    }
+  }
+
+  return suggestions.slice(0, limit);
+}
+
+function buildSearchableText(item) {
+  return [
+    item.username,
+    item.handle,
+    item.fullname,
+    item.bio,
+    item.category,
+    item.primaryCategory,
+    item.accountCategory,
+    Array.isArray(item.categories) ? item.categories.join(' ') : '',
+    item.country,
+    item.location,
+    item.url,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
+function buildTopicText(item) {
+  const postText = []
+    .concat(asArray(item && item.matchedPosts))
+    .concat(asArray(item && item.recentPosts))
+    .map((post) =>
+      firstNonEmpty(
+        post && post.title,
+        post && post.caption,
+        post && post.description,
+        post && post.text,
+        post && post.alt,
+        post && post.name
+      )
+    )
+    .filter(Boolean)
+    .join(' ');
+
+  return [
+    item.bio,
+    item.category,
+    item.primaryCategory,
+    item.accountCategory,
+    Array.isArray(item.categories) ? item.categories.join(' ') : '',
+    postText,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
+function computeRelevanceScore(item, query) {
+  const rawQuery = normalizeFreeTextSearch(query);
+  const normalizedQuery = normalizeSearchToken(rawQuery);
+  const tokens = tokenizeSearchQuery(rawQuery);
+  const queryInfo = classifyQuery(rawQuery);
+
+  const username = normalizeSearchToken(item.username || item.handle || '');
+  const fullname = normalizeSearchToken(item.fullname || '');
+  const searchable = buildSearchableText(item);
+  const topicText = buildTopicText(item);
+
+  let score = 0;
+  let matched = false;
+  let personHits = 0;
+  let topicHits = 0;
+
+  if (!normalizedQuery) {
+    return { score: 0, matched: true, intent: queryInfo.intent };
+  }
+
+  const usernameExact = Boolean(username && username === normalizedQuery);
+  const fullnameExact = Boolean(fullname && fullname === normalizedQuery);
+  const usernameStarts = Boolean(username && username.startsWith(normalizedQuery));
+  const fullnameStarts = Boolean(fullname && fullname.startsWith(normalizedQuery));
+  const usernameContains = Boolean(username && username.includes(normalizedQuery));
+  const fullnameContains = Boolean(fullname && fullname.includes(normalizedQuery));
+
+  if (queryInfo.intent === 'creator') {
+    if (usernameExact) {
+      score += 220;
+      matched = true;
+    }
+    if (fullnameExact) {
+      score += 180;
+      matched = true;
+    }
+    if (usernameStarts) {
+      score += 150;
+      matched = true;
+    }
+    if (fullnameStarts) {
+      score += 120;
+      matched = true;
+    }
+    if (usernameContains) {
+      score += 90;
+      matched = true;
+    }
+    if (fullnameContains) {
+      score += 70;
+      matched = true;
+    }
+  } else if (queryInfo.intent === 'ambiguous') {
+    if (usernameExact) {
+      score += 160;
+      matched = true;
+    }
+    if (fullnameExact) {
+      score += 145;
+      matched = true;
+    }
+    if (usernameStarts) {
+      score += 90;
+      matched = true;
+    }
+    if (fullnameStarts) {
+      score += 75;
+      matched = true;
+    }
+    if (usernameContains) {
+      score += 36;
+      matched = true;
+    }
+    if (fullnameContains) {
+      score += 30;
+      matched = true;
+    }
+  }
+
+  for (const token of tokens) {
+    if (!token) continue;
+
+    const inUsername = username.includes(token);
+    const inFullname = fullname.includes(token);
+    const inTopicText = topicText.includes(token);
+    const inSearchable = searchable.includes(token);
+
+    if (queryInfo.intent === 'creator') {
+      if (inUsername) {
+        score += 30;
+        personHits += 1;
+        matched = true;
+      } else if (inFullname) {
+        score += 24;
+        personHits += 1;
+        matched = true;
+      } else if (inSearchable) {
+        score += 10;
+        matched = true;
+      }
+      continue;
+    }
+
+    if (queryInfo.intent === 'ambiguous') {
+      if (inTopicText) {
+        score += 24;
+        topicHits += 1;
+        matched = true;
+      } else if (inFullname) {
+        score += 16;
+        personHits += 1;
+        matched = true;
+      } else if (inUsername) {
+        score += 12;
+        personHits += 1;
+        matched = true;
+      } else if (inSearchable) {
+        score += 8;
+        matched = true;
+      }
+      continue;
+    }
+
+    if (inTopicText) {
+      score += 30;
+      topicHits += 1;
+      matched = true;
+    } else if (inFullname) {
+      score += 4;
+      personHits += 1;
+      matched = true;
+    } else if (inUsername) {
+      score += 2;
+      personHits += 1;
+      matched = true;
+    }
+  }
+
+  if (queryInfo.intent === 'topic' || queryInfo.intent === 'hashtag') {
+    if (item.searchType === 'combined') {
+      score += 60;
+      matched = true;
+    } else if (item.searchType === 'ai') {
+      score += 55;
+      matched = true;
+    } else if (item.searchType === 'standard') {
+      score += 40;
+      matched = true;
+    } else if (item.searchType === 'lookup') {
+      score -= 25;
+    }
+
+    if (tokens.length && topicHits === tokens.length) {
+      score += 42;
+      matched = true;
+    }
+
+    if (item.searchType === 'lookup' && topicHits === 0) {
+      matched = false;
+    }
+  } else if (queryInfo.intent === 'ambiguous') {
+    if (item.searchType === 'combined') {
+      score += 34;
+      matched = true;
+    } else if (item.searchType === 'ai') {
+      score += 28;
+      matched = true;
+    } else if (item.searchType === 'standard') {
+      score += 20;
+      matched = true;
+    } else if (item.searchType === 'lookup') {
+      score += 6;
+    }
+
+    if (tokens.length && (topicHits + personHits) === tokens.length) {
+      score += 30;
+      matched = true;
+    }
+  } else {
+    if (tokens.length && personHits === tokens.length) {
+      score += 45;
+      matched = true;
+    }
+    if (item.searchType === 'lookup') score += 25;
+    if (item.searchType === 'combined') score += 18;
+    if (item.searchType === 'ai') score += 12;
+  }
+
+  if (item.aiMatchedPostsCount) {
+    score += Math.min(14, Number(item.aiMatchedPostsCount) * 2);
+  }
+
+  if (item.isVerified) {
+    score += queryInfo.intent === 'topic' || queryInfo.intent === 'hashtag' ? 2 : 6;
+  }
+
+  const followersBoost = Math.min(10, Math.log10(Number(item.followers || 0) + 1) * 2);
+  score += followersBoost;
+
+  return { score, matched, intent: queryInfo.intent };
+}
+
+function minimumScoreForQuery(query, mode) {
+  const normalized = normalizeSearchToken(query);
+  const tokenCount = tokenizeSearchQuery(query).length;
+  const queryInfo = classifyQuery(query);
+
+  if (mode === 'suggestion') {
+    if (queryInfo.intent === 'topic' || queryInfo.intent === 'hashtag') return 0;
+    if (normalized.length <= 3) return 60;
+    if (normalized.length <= 5) return 48;
+    return 40;
+  }
+
+  if (queryInfo.intent === 'topic' || queryInfo.intent === 'hashtag') {
+    if (normalized.length <= 3) return 34;
+    return 26;
+  }
+
+  if (queryInfo.intent === 'ambiguous') {
+    if (tokenCount >= 3) return 24;
+    return 20;
+  }
+
+  if (tokenCount >= 3) return 28;
+  if (normalized.length <= 3) return 55;
+  if (normalized.length <= 5) return 40;
+  return 30;
+}
+
+function compareUnifiedRankedItems(a, b, queryInfo = classifyQuery('')) {
+  if ((b.__relevanceScore || 0) !== (a.__relevanceScore || 0)) {
+    return (b.__relevanceScore || 0) - (a.__relevanceScore || 0);
+  }
+
+  if (sourcePriority(b, queryInfo) !== sourcePriority(a, queryInfo)) {
+    return sourcePriority(b, queryInfo) - sourcePriority(a, queryInfo);
+  }
+
+  if (!!b.isVerified !== !!a.isVerified) return b.isVerified ? 1 : -1;
+
+  if ((b.aiMatchedPostsCount || 0) !== (a.aiMatchedPostsCount || 0)) {
+    return (b.aiMatchedPostsCount || 0) - (a.aiMatchedPostsCount || 0);
+  }
+
+  if ((b.followers || 0) !== (a.followers || 0)) {
+    return (b.followers || 0) - (a.followers || 0);
+  }
+
+  if ((b.engagementRate || 0) !== (a.engagementRate || 0)) {
+    return (b.engagementRate || 0) - (a.engagementRate || 0);
+  }
+
+  return String(a.username || '').localeCompare(String(b.username || ''));
+}
+
+function buildBalancedPlatformQuota(platforms = [], limit = DEFAULT_FRONTEND_UNIFIED_LIMIT) {
+  const orderedPlatforms = [];
+
+  for (const rawPlatform of asArray(platforms)) {
+    const platform = normalizePlatform(rawPlatform);
+    if (platform && !orderedPlatforms.includes(platform)) {
+      orderedPlatforms.push(platform);
+    }
+  }
+
+  if (!orderedPlatforms.length) return {};
+
+  const safeLimit = Math.max(
+    1,
+    parseInt(String(limit ?? DEFAULT_FRONTEND_UNIFIED_LIMIT), 10) || DEFAULT_FRONTEND_UNIFIED_LIMIT
+  );
+
+  const base = Math.floor(safeLimit / orderedPlatforms.length);
+  let remainder = safeLimit % orderedPlatforms.length;
+
+  const quota = {};
+  for (const platform of orderedPlatforms) {
+    quota[platform] = base + (remainder > 0 ? 1 : 0);
+    if (remainder > 0) remainder -= 1;
+  }
+
+  return quota;
+}
+
+function buildBalancedPlatformFetchPlan(platforms = [], limit = DEFAULT_FRONTEND_UNIFIED_LIMIT) {
+  const quota = buildBalancedPlatformQuota(platforms, limit);
+  const orderedPlatforms = [];
+
+  for (const rawPlatform of asArray(platforms)) {
+    const platform = normalizePlatform(rawPlatform);
+    if (platform && !orderedPlatforms.includes(platform)) {
+      orderedPlatforms.push(platform);
+    }
+  }
+
+  return orderedPlatforms
+    .map((platform) => ({
+      platform,
+      limit: Math.max(0, parseInt(String(quota[platform] || 0), 10) || 0),
+    }))
+    .filter((entry) => entry.limit > 0);
+}
+
+function applySearchFetchLimit(target, fetchLimit) {
+  const safeLimit = Math.max(0, parseInt(String(fetchLimit || 0), 10) || 0);
+  if (!target || !safeLimit) return target;
+
+  target.limit = safeLimit;
+  target.size = safeLimit;
+  target.pageSize = safeLimit;
+  return target;
+}
+
+function shiftBestBalancedItem(platformQueues, overflowQueue, platforms, queryInfo) {
+  let bestSource = null;
+  let bestItem = null;
+
+  for (const platform of platforms) {
+    const queue = platformQueues.get(platform) || [];
+    const item = queue[0];
+    if (!item) continue;
+
+    if (!bestItem || compareUnifiedRankedItems(item, bestItem, queryInfo) < 0) {
+      bestItem = item;
+      bestSource = platform;
+    }
+  }
+
+  const overflowItem = overflowQueue[0];
+  if (overflowItem && (!bestItem || compareUnifiedRankedItems(overflowItem, bestItem, queryInfo) < 0)) {
+    bestItem = overflowItem;
+    bestSource = '__overflow__';
+  }
+
+  if (!bestSource) return null;
+
+  if (bestSource === '__overflow__') {
+    return overflowQueue.shift() || null;
+  }
+
+  const sourceQueue = platformQueues.get(bestSource) || [];
+  return sourceQueue.shift() || null;
+}
+
+function balanceRankedResultsAcrossPlatforms(
+  items = [],
+  platforms = [],
+  limit = DEFAULT_FRONTEND_UNIFIED_LIMIT,
+  query = ''
+) {
+  if (!Array.isArray(items) || !items.length) return items;
+
+  const orderedPlatforms = [];
+  for (const rawPlatform of asArray(platforms)) {
+    const platform = normalizePlatform(rawPlatform);
+    if (platform && !orderedPlatforms.includes(platform)) {
+      orderedPlatforms.push(platform);
+    }
+  }
+
+  if (orderedPlatforms.length <= 1) return items;
+
+  const safeLimit = Math.max(
+    1,
+    parseInt(String(limit ?? DEFAULT_FRONTEND_UNIFIED_LIMIT), 10) || DEFAULT_FRONTEND_UNIFIED_LIMIT
+  );
+
+  const quota = buildBalancedPlatformQuota(orderedPlatforms, safeLimit);
+  const queryInfo = classifyQuery(query);
+
+  const platformQueues = new Map();
+  for (const platform of orderedPlatforms) {
+    platformQueues.set(platform, []);
+  }
+
+  const overflowQueue = [];
+
+  for (const item of items) {
+    const platform = normalizePlatform(item && item.platform);
+    if (platform && platformQueues.has(platform)) {
+      platformQueues.get(platform).push(item);
+    } else {
+      overflowQueue.push(item);
+    }
+  }
+
+  const balanced = [];
+
+  while (true) {
+    const pageItems = [];
+    let addedOnThisRound = false;
+
+    for (const platform of orderedPlatforms) {
+      const queue = platformQueues.get(platform) || [];
+      const takeCount = quota[platform] || 0;
+
+      let taken = 0;
+      while (taken < takeCount && queue.length) {
+        pageItems.push(queue.shift());
+        taken += 1;
+        addedOnThisRound = true;
+      }
+    }
+
+    if (!addedOnThisRound) {
+      const fallbackItem = shiftBestBalancedItem(
+        platformQueues,
+        overflowQueue,
+        orderedPlatforms,
+        queryInfo
+      );
+
+      if (!fallbackItem) break;
+
+      pageItems.push(fallbackItem);
+      addedOnThisRound = true;
+    }
+
+    while (pageItems.length < safeLimit) {
+      const nextItem = shiftBestBalancedItem(
+        platformQueues,
+        overflowQueue,
+        orderedPlatforms,
+        queryInfo
+      );
+
+      if (!nextItem) break;
+      pageItems.push(nextItem);
+    }
+
+    pageItems.sort((a, b) => compareUnifiedRankedItems(a, b, queryInfo));
+    balanced.push(...pageItems);
+  }
+
+  return balanced;
+}
+
+function sortUnifiedResults(items = [], query, mode = 'search') {
+  const threshold = minimumScoreForQuery(query, mode);
+  const queryInfo = classifyQuery(query);
+
+  return items
+    .map((item) => {
+      const relevance = computeRelevanceScore(item, query);
+      return {
+        ...item,
+        __relevanceScore: relevance.score,
+        __matched: relevance.matched,
+      };
+    })
+    .filter((item) => item.__matched && item.__relevanceScore >= threshold)
+    .sort((a, b) => compareUnifiedRankedItems(a, b, queryInfo));
 }
 
 function mergeUnifiedSearchItems(items = []) {
@@ -1670,6 +2635,17 @@ function mergeUnifiedSearchItems(items = []) {
     const secondary = primary === prev ? item : prev;
     const merged = mergeSearchItem(primary, secondary);
 
+    if ((!merged.searchType || merged.searchType === 'standard') && (primary.searchType || secondary.searchType)) {
+      if (primary.searchType === 'lookup' || secondary.searchType === 'lookup') {
+        merged.searchType = 'lookup';
+      } else if (primary.searchType === 'ai' || secondary.searchType === 'ai') {
+        merged.searchType =
+          primary.searchType === 'standard' || secondary.searchType === 'standard' ? 'combined' : 'ai';
+      } else {
+        merged.searchType = primary.searchType || secondary.searchType || 'standard';
+      }
+    }
+
     if (!Array.isArray(merged.matchedPosts) || !merged.matchedPosts.length) {
       merged.matchedPosts = Array.isArray(primary.matchedPosts) && primary.matchedPosts.length
         ? primary.matchedPosts
@@ -1691,25 +2667,208 @@ function mergeUnifiedSearchItems(items = []) {
       Number(secondary.aiMatchedPostsCount || 0)
     );
 
-    merged.searchType =
-      primary.searchType === 'ai' || secondary.searchType === 'ai'
-        ? (primary.searchType === 'standard' || secondary.searchType === 'standard' ? 'combined' : 'ai')
-        : 'standard';
-
-    merged.source = merged.searchType;
+    merged.source = merged.searchType || 'standard';
     map.set(key, merged);
   }
 
   return Array.from(map.values());
 }
 
+async function runLookupPlatformSearch(platform, query, limit) {
+  const normalizedQuery = normalizeFreeTextSearch(query).replace(/^[@#]/, '');
+  if (!normalizedQuery) {
+    return { platform, kind: 'lookup', data: null, total: 0, results: [] };
+  }
+
+  const data = await modashGET(`/${platform}/users`, {
+    query: normalizedQuery,
+    limit,
+  });
+
+  const results = collectLookupSearchItems(platform, data);
+
+  return {
+    platform,
+    kind: 'lookup',
+    data,
+    total: results.length,
+    results,
+  };
+}
+
+async function runStandardPlatformSearch(platform, body, query, pageIndex, fetchLimit) {
+  const requestBody = buildStandardBodyForQuery(platform, body, query, pageIndex);
+  requestBody.page = pageIndex;
+  applySearchFetchLimit(requestBody, fetchLimit);
+
+  let data = await modashPOST(`/${platform}/search`, requestBody);
+
+  const enableFallback = (process.env.MODASH_YT_FALLBACK || '1') !== '0';
+  if (platform === 'youtube' && enableFallback && Number((data && data.total) || 0) === 0) {
+    const retryBody = buildPlatformBody(platform, requestBody, { relax: true });
+    retryBody.page = pageIndex;
+    applySearchFetchLimit(retryBody, fetchLimit);
+    try {
+      const retryData = await modashPOST(`/${platform}/search`, retryBody);
+      if (retryData && Number((retryData && retryData.total) || 0) > 0) {
+        data = retryData;
+      }
+    } catch {
+      // ignore youtube fallback retry errors
+    }
+  }
+
+  let results = collectStandardSearchItems(platform, data);
+  if (fetchLimit) {
+    results = results.slice(0, fetchLimit);
+  }
+
+  return {
+    platform,
+    kind: 'standard',
+    data,
+    total: Number((data && data.total) || 0),
+    results,
+    requestedLimit: fetchLimit || null,
+  };
+}
+
+async function runAiPlatformSearch(platform, payload, pageIndex, fetchLimit) {
+  const body = buildAiSearchBody(platform, payload);
+  body.page = pageIndex;
+  applySearchFetchLimit(body, fetchLimit);
+
+  const data = await modashPOST(`/ai/${platform}/text-search`, body);
+  const profiles = Array.isArray(data && data.profiles) ? data.profiles : [];
+
+  let results = profiles.map((item) => normalizeAiSearchItem(item, platform));
+  if (fetchLimit) {
+    results = results.slice(0, fetchLimit);
+  }
+
+  return {
+    platform,
+    kind: 'ai',
+    data,
+    total: Number((data && data.total) || 0),
+    results,
+    requestedLimit: fetchLimit || null,
+  };
+}
+
+function buildRequestedPlatforms(input) {
+  const requestedPlatforms = Array.isArray(input) && input.length
+    ? input
+    : ['instagram', 'youtube', 'tiktok'];
+
+  const platforms = [];
+  for (const rawPlatform of requestedPlatforms) {
+    const platform = normalizePlatform(rawPlatform);
+    if (!platform) {
+      throw Object.assign(new Error(`Unsupported platform: ${rawPlatform}`), { status: 400 });
+    }
+    if (!platforms.includes(platform)) platforms.push(platform);
+  }
+
+  return platforms;
+}
+
+async function frontendUnifiedSuggestions(req, res) {
+  try {
+    const input = { ...(req.query || {}), ...(req.body || {}) };
+    const query = normalizeFreeTextSearch(input.query || input.q);
+    const limit = clampSuggestionLimit(input.limit);
+    const platforms = buildRequestedPlatforms(input.platforms);
+    const queryInfo = classifyQuery(query);
+
+    if (query.length < MIN_FRONTEND_QUERY_LENGTH) {
+      return res.json({
+        query,
+        suggestions: [],
+        meta: { platforms, limit, intent: queryInfo.intent },
+      });
+    }
+
+    const suggestions = [];
+    const seen = new Set();
+
+    function pushSuggestion(item) {
+      if (!item) return;
+      const key = `${item.type}:${cleanStr(item.value || item.username || item.userId || item.label).toLowerCase()}`;
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      suggestions.push(item);
+    }
+
+    if (queryInfo.intent !== 'creator') {
+      pushSuggestion(toSearchQuerySuggestion(query, queryInfo));
+    }
+
+    if (queryInfo.allowLookupInSuggestions && suggestions.length < limit) {
+      const lookupResponses = [];
+      for (const platform of platforms) {
+        lookupResponses.push(await runLookupPlatformSearch(platform, query, limit));
+      }
+
+      const merged = mergeUnifiedSearchItems(
+        lookupResponses.flatMap((entry) => (Array.isArray(entry.results) ? entry.results : []))
+      );
+
+      const enriched = await enrichResultsFromCache(merged);
+      const ranked = sortUnifiedResults(enriched, query, 'suggestion')
+        .slice(0, limit)
+        .map((item) => toSuggestionItem(item, query));
+
+      for (const item of ranked) {
+        pushSuggestion(item);
+        if (suggestions.length >= limit) break;
+      }
+    }
+
+    if ((queryInfo.intent === 'topic' || queryInfo.intent === 'hashtag') && suggestions.length < limit) {
+      const taxonomySuggestions = await fetchTopicSuggestions(query, platforms, limit - suggestions.length);
+      for (const item of taxonomySuggestions) {
+        pushSuggestion(item);
+        if (suggestions.length >= limit) break;
+      }
+    }
+
+    return res.json({
+      query,
+      suggestions: suggestions.slice(0, limit),
+      total: Math.min(suggestions.length, limit),
+      meta: {
+        platforms,
+        limit,
+        intent: queryInfo.intent,
+      },
+    });
+  } catch (err) {
+    const safe = buildSafeErrorMessage(err, 'Suggestion search failed');
+    const status = (err && err.status) || 400;
+    return res.status(status).json({ error: safe });
+  }
+}
+
 async function frontendUnifiedSearch(req, res) {
   try {
     const payload = req.body || {};
     const brandId = cleanStr(payload.brandId || payload.brand_id || '');
+    const query = extractUnifiedQuery(payload);
+    const queryInfo = classifyQuery(query);
 
     if (!brandId) {
       return res.status(400).json({ error: 'brandId is required for search' });
+    }
+
+    if (!query) {
+      return res.status(400).json({
+        error: 'query is required. Pass query in payload.query, payload.ai.query, or payload.body.filter.influencer.*',
+      });
+    }
+
+    if (query.length < MIN_FRONTEND_QUERY_LENGTH) {
+      return res.status(400).json({ error: `query must be at least ${MIN_FRONTEND_QUERY_LENGTH} characters.` });
     }
 
     try {
@@ -1724,18 +2883,8 @@ async function frontendUnifiedSearch(req, res) {
       throw e;
     }
 
-    const requestedPlatforms = Array.isArray(payload.platforms) && payload.platforms.length
-      ? payload.platforms
-      : ['instagram', 'youtube', 'tiktok'];
-
-    const platforms = [];
-    for (const rawPlatform of requestedPlatforms) {
-      const platform = normalizePlatform(rawPlatform);
-      if (!platform) {
-        return res.status(400).json({ error: `Unsupported platform: ${rawPlatform}` });
-      }
-      if (!platforms.includes(platform)) platforms.push(platform);
-    }
+    const platforms = buildRequestedPlatforms(payload.platforms);
+    const pagination = buildUnifiedPagination(payload.page, payload.limit);
 
     const searchMode = cleanStr(payload.searchMode || payload.mode || '').toLowerCase();
     const hasStandardBody = !!payload.body;
@@ -1745,38 +2894,47 @@ async function frontendUnifiedSearch(req, res) {
       searchMode === 'combined' ||
       searchMode === 'all' ||
       searchMode === 'standard' ||
-      (!searchMode && hasStandardBody);
+      (!searchMode && (hasStandardBody || true));
 
     const doAi =
-      searchMode === 'combined' ||
-      searchMode === 'all' ||
-      searchMode === 'ai' ||
-      (!searchMode && hasAiConfig);
-
-    if (!doStandard && !doAi) {
-      return res.status(400).json({
-        error: 'Provide searchMode=standard|ai|combined and body and/or ai payload.',
-      });
-    }
-
-    if (doStandard && !payload.body) {
-      return res.status(400).json({ error: 'body is required for standard search.' });
-    }
-
-    if (doAi && !cleanStr(payload?.ai?.query || payload?.query || '')) {
-      return res.status(400).json({ error: 'ai.query is required for AI search.' });
-    }
+      query.length >= 3 &&
+      (
+        searchMode === 'combined' ||
+        searchMode === 'all' ||
+        searchMode === 'ai' ||
+        (!searchMode && (hasAiConfig || queryInfo.preferTopicDiscovery))
+      );
 
     const aiDelayMs = Math.max(
       0,
       parseInt(String(payload.aiDelayMs ?? process.env.MODASH_AI_DELAY_MS ?? 1100), 10) || 0
     );
 
+    const desiredPoolSize = pagination.limit;
+    const fetchPlan = buildBalancedPlatformFetchPlan(platforms, pagination.limit);
+    const fetchLimitByPlatform = new Map(fetchPlan.map((entry) => [entry.platform, entry.limit]));
+    const requestedPageIndex = Math.max(0, pagination.page - 1);
+    const pagesPerPlatform = 1;
+
     const responses = [];
+
+    if (queryInfo.allowLookupInSearch) {
+      for (const platform of platforms) {
+        const lookupLimit = Math.min(25, fetchLimitByPlatform.get(platform) || desiredPoolSize);
+        responses.push(await runLookupPlatformSearch(platform, query, lookupLimit));
+      }
+    }
 
     if (doStandard) {
       for (const platform of platforms) {
-        const result = await runStandardPlatformSearch(platform, payload.body);
+        const fetchLimit = fetchLimitByPlatform.get(platform) || pagination.limit;
+        const result = await runStandardPlatformSearch(
+          platform,
+          payload.body || {},
+          query,
+          requestedPageIndex,
+          fetchLimit
+        );
         responses.push(result);
       }
     }
@@ -1784,55 +2942,97 @@ async function frontendUnifiedSearch(req, res) {
     if (doAi) {
       let aiCallIndex = 0;
       for (const platform of platforms) {
+        const fetchLimit = fetchLimitByPlatform.get(platform) || pagination.limit;
         if (aiCallIndex > 0 && aiDelayMs > 0) {
           await sleep(aiDelayMs);
         }
-        const result = await runAiPlatformSearch(platform, payload);
+        const result = await runAiPlatformSearch(
+          platform,
+          payload,
+          requestedPageIndex,
+          fetchLimit
+        );
         responses.push(result);
         aiCallIndex += 1;
       }
     }
 
     const merged = mergeUnifiedSearchItems(
-      responses.flatMap((entry) => Array.isArray(entry.results) ? entry.results : [])
+      responses.flatMap((entry) => (Array.isArray(entry.results) ? entry.results : []))
     );
 
     const cachedEnriched = await enrichResultsFromCache(merged);
-    const sortedResults = sortUnifiedResults(cachedEnriched);
+    const effectiveAutoFilters = deriveAiFiltersFromPayload(payload);
+    const filteredEnriched = cachedEnriched.filter((item) =>
+      itemMatchesUnifiedAutoFilters(item, effectiveAutoFilters)
+    );
 
-    const standardTotal = responses
-      .filter((entry) => entry.kind === 'standard')
-      .reduce((sum, entry) => sum + Number(entry.total || 0), 0);
+    const rankedResults = sortUnifiedResults(filteredEnriched, query, 'search');
 
-    const aiTotal = responses
-      .filter((entry) => entry.kind === 'ai')
-      .reduce((sum, entry) => sum + Number(entry.total || 0), 0);
+    const balancedResults =
+      platforms.length > 1
+        ? balanceRankedResultsAcrossPlatforms(
+            rankedResults,
+            platforms,
+            pagination.limit,
+            query
+          )
+        : rankedResults;
+
+    const pagedResults = balancedResults.slice(
+      pagination.offset,
+      pagination.offset + pagination.limit
+    );
+
+    const totalsByKind = responses.reduce(
+      (acc, entry) => {
+        acc[entry.kind] = (acc[entry.kind] || 0) + Number(entry.total || 0);
+        return acc;
+      },
+      { lookup: 0, standard: 0, ai: 0 }
+    );
 
     return res.json({
       searchMode: doStandard && doAi ? 'combined' : doAi ? 'ai' : 'standard',
-      results: sortedResults,
-      total: standardTotal + aiTotal,
-      unique: sortedResults.length,
+      query,
+      results: pagedResults,
+      total: balancedResults.length,
+      unique: balancedResults.length,
+      pagination: {
+        page: pagination.page,
+        limit: pagination.limit,
+        total: balancedResults.length,
+        totalPages: Math.max(1, Math.ceil(balancedResults.length / pagination.limit)),
+        hasNextPage: pagination.offset + pagination.limit < balancedResults.length,
+        hasPrevPage: pagination.page > 1,
+      },
       meta: {
-        standardTotal,
-        aiTotal,
+        queryIntent: queryInfo.intent,
+        lookupTotal: totalsByKind.lookup,
+        standardTotal: totalsByKind.standard,
+        aiTotal: totalsByKind.ai,
         platforms,
         aiDelayMs: doAi ? aiDelayMs : 0,
+        pagesPerPlatform,
+        requestedPageIndex,
+        fetchPlan,
         perPlatform: responses.map((entry) => ({
           platform: entry.platform,
           kind: entry.kind,
           total: entry.total,
           resultCount: Array.isArray(entry.results) ? entry.results.length : 0,
+          requestedLimit: entry.requestedLimit || null,
         })),
       },
     });
   } catch (err) {
+    console.error('Unified search error:', err.message);
     const safe = buildSafeErrorMessage(err, 'Unified search failed');
     const status = (err && err.status) || 400;
     return res.status(status).json({ error: safe });
   }
 }
-
+;
 /* -------------------------------------------------------------------------- */
 /*                              Saved filters                                 */
 /* -------------------------------------------------------------------------- */
@@ -2224,6 +3424,14 @@ async function frontendReport(req, res) {
     const adminId = cleanStr(req.query.adminId || req.query.admin_id || '');
     const isAdmin = !!adminId;
     const canShowSensitive = !!cleanStr(adminId);
+
+
+
+
+
+
+
+
 
     const isProfile =
       req.query.isProfile === '1' ||
@@ -3202,6 +4410,113 @@ async function getMediaKitLink(req, res) {
     return res.status(500).json({ error: err?.message || 'Failed to generate media kit link' });
   }
 }
+async function upsertCreator(req, res) {
+  try {
+    const {
+      userId,
+      username,
+      handle,
+      fullname,
+      followers,
+      engagementRate,
+      engagements,
+      averageViews,
+      picture,
+      url,
+      isVerified,
+      isPrivate,
+      platform,
+      bio,
+      country,
+      location,
+      categories,
+      searchType,
+      source,
+    } = req.body || {};
+
+    if (!userId || !String(userId).trim()) {
+      return res.status(400).json({
+        message: "userId is required",
+      });
+    }
+
+    const payload = {
+      userId: String(userId).trim(),
+      username: username || "",
+      handle: handle || "",
+      fullname: fullname || "",
+      followers: followers || 0,
+      engagementRate: engagementRate || 0,
+      engagements: engagements || 0,
+      averageViews: averageViews || 0,
+      picture: picture || "",
+      url: url || "",
+      isVerified: isVerified || false,
+      isPrivate: isPrivate || false,
+      platform: platform || "",
+      bio: bio || "",
+      country: country || "",
+      location: location || "",
+      categories: Array.isArray(categories) ? categories : [],
+      searchType: searchType || "standard",
+      source: source || "standard",
+    };
+
+    const creator = await Creator.findOneAndUpdate(
+      { userId: payload.userId },
+      { $set: payload },
+      {
+        new: true,
+        upsert: true,
+        setDefaultsOnInsert: true,
+      }
+    );
+
+    return res.status(200).json({
+      message: "Creator saved successfully",
+      data: creator,
+    });
+  } catch (error) {
+    console.error("upsertCreator error:", error);
+    return res.status(500).json({
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+}
+
+async function getCreatorByUserId(req, res) {
+  try {
+    const { userId } = req.params;
+
+    if (!userId || !String(userId).trim()) {
+      return res.status(400).json({
+        message: "userId is required",
+      });
+    }
+
+    const creator = await Creator.findOne({
+      userId: String(userId).trim(),
+    });
+
+    if (!creator) {
+      return res.status(404).json({
+        message: "Creator not found",
+      });
+    }
+
+    return res.status(200).json({
+      message: "Creator details fetched successfully",
+      data: creator,
+    });
+  } catch (error) {
+    console.error("getCreatorByUserId error:", error);
+    return res.status(500).json({
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+}
 
 /* -------------------------------------------------------------------------- */
 /*                                   Exports                                  */
@@ -3212,10 +4527,10 @@ module.exports = {
   frontendSearch,
   frontendUnifiedSearch,
   frontendReport,
-
   resolveProfile,
   search: legacySearch,
-
+upsertCreator,
+getCreatorByUserId,
   normalizeReportData,
   upsertModashProfileFromReport,
   findCachedReport,
