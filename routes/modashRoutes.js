@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const ModashController = require('../controllers/modashController');
 const { verifyBrandOrAdmin } = require("../middlewares/verifyBrandOrAdmin");
-const { modashApiLimiter} = require("../middlewares/rateLimit");
+// const { modashApiLimiter} = require("../middlewares/rateLimit");
 router.get('/users', ModashController.frontendUsers);
 
 router.post('/search', ModashController.frontendSearch);
