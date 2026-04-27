@@ -22,6 +22,9 @@ router.get("/get-executive-list", adminAuth, adminController.listExecutiveAdmin)
 router.get("/get-rm-list", adminAuth, adminController.rmlist);
 router.get("/get-brand-list", adminAuth, adminController.allocateBrand);
 router.get('/campaign/list', adminAuth, adminController.listCampaignsForAdmin);
+router.post('/brand-info', adminAuth, adminController.BrandInformation);
+router.post('/brand-coupon', adminAuth, adminController.CreateBrandCoupon);
+router.get('/subscription-list', adminController.subscriptionList);
 
 router.post(
   "/send-bulk-csv",

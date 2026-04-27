@@ -1,8 +1,10 @@
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
-
+const  OpenAI = require("openai");
+const BrandInfo = require("../models/brandInfo")
 const BrandModelImport = require("../models/brand");
+const BrandCoupon = require("../models/brandCoupon");
 const VerifyOtpModelImport = require("../models/verifyOtp");
 const OtpTemplateImport = require("../template/otpTemplate");
 const ResetOtpTemplateImport = require("../template/resetOtp");
@@ -11,7 +13,7 @@ const ApiResponseImport = require("../core/http/ApiResponse");
 const HttpStatusImport = require("../core/http/HttpStatus");
 const ApiErrorImport = require("../core/http/ApiError");
 const SubscriptionPlan = require("../models/subscription");
-
+const { uploadBrandProfilePicToS3 } = require("../utils/uploadBase64ImagesToS3");
 const BrandModel =
   BrandModelImport.BrandModel || BrandModelImport.default || BrandModelImport;
 
@@ -911,6 +913,43 @@ async function saveBrandOnboarding(req, res, next) {
     return handleControllerError(next, err, "saveBrandOnboarding");
   }
 }
+function hasCompletedOnboardingStep(step) {
+  if (Array.isArray(step)) {
+    return step.some((item) => {
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        return Object.keys(item).length > 0;
+      }
+      return Boolean(item);
+    });
+  }
+
+  if (step && typeof step === "object") {
+    return Object.keys(step).length > 0;
+  }
+
+  return Boolean(step);
+}
+function computeBrandNextRoute(brand) {
+  const page1Done =
+    hasCompletedOnboardingStep(brand?.page1) ||
+    brand?.ispage1Skip === true;
+
+  const page2Done =
+    hasCompletedOnboardingStep(brand?.page2) ||
+    brand?.ispage2Skip === true;
+
+  const page3Done =
+    hasCompletedOnboardingStep(brand?.page3) ||
+    brand?.ispage3Skip === true;
+
+  let route = "campaign";
+
+  if (!page1Done) route = "page1";
+  else if (!page2Done) route = "page2";
+  else if (!page3Done) route = "page3";
+
+  return { route, page1Done, page2Done, page3Done };
+}
 
 async function signInBrand(req, res, next) {
   const requestId = req.requestId || "";
@@ -954,6 +993,8 @@ async function signInBrand(req, res, next) {
       email: brand.email,
     });
 
+    const routeInfo = computeBrandNextRoute(brand);
+
     return ApiResponse.sendOk(
       res,
       HttpStatus.OK,
@@ -961,6 +1002,19 @@ async function signInBrand(req, res, next) {
         message: "Brand sign in successful",
         brandId: String(brand._id),
         token,
+        route: routeInfo.route,
+        onboarding: {
+          page1Done: routeInfo.page1Done,
+          page2Done: routeInfo.page2Done,
+          page3Done: routeInfo.page3Done,
+        },
+        page1: brand.page1 || [],
+        page2: brand.page2 || [],
+        page3: brand.page3 || [],
+        ispage1Skip: brand.ispage1Skip || false,
+        ispage2Skip: brand.ispage2Skip || false,
+        ispage3Skip: brand.ispage3Skip || false,
+        isProfilePicSkip: brand.isProfilePicSkip || false,
       },
       requestId
     );
@@ -1367,12 +1421,159 @@ async function updateBrandProfile(req, res, next) {
     return handleControllerError(next, err, "updateBrandProfile");
   }
 }
+const uploadBrandProfilePic = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Brand profile image is required",
+      });
+    }
+
+    const uploadedImage = await uploadBrandProfilePicToS3(
+      req.file,
+      "brand-profile-pic"
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Brand profile image uploaded successfully",
+      data: uploadedImage,
+    });
+  } catch (error) {
+    console.error("Brand profile image upload error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to upload brand profile image",
+    });
+  }
+};
+
+
+
+
+
+
+async function verifyBrandCoupon(req, res) {
+  try {
+    const { brandId, subscriptionId, mode, promocode } = req.body;
+
+    if (!brandId) {
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        message: "Brand ID is required",
+      });
+    }
+
+    if (!subscriptionId) {
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        message: "Subscription ID is required",
+      });
+    }
+
+    if (!mode) {
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        message: "Mode is required",
+      });
+    }
+
+    if (!promocode) {
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        message: "Promocode is required",
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(brandId)) {
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        message: "Invalid Brand ID",
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(subscriptionId)) {
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        message: "Invalid Subscription ID",
+      });
+    }
+
+    const coupon = await BrandCoupon.findOne({
+      brandId,
+      subscriptionId,
+      mode: mode.trim(),
+      promocode: { $regex: `^${promocode.trim()}$`, $options: "i" },
+    })
+      .populate("subscriptionId", "name monthlyCost annualCost currency")
+      .lean();
+
+    if (!coupon) {
+      return res.status(404).json({
+        success: false,
+        verified: false,
+        message: "Invalid promocode or this promocode is not valid for this subscription",
+      });
+    }
+
+    if (coupon.hasUsed) {
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        message: "Promocode has already been used",
+      });
+    }
+
+    if (new Date(coupon.expiredAt) < new Date()) {
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        message: "Promocode has expired",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      verified: true,
+      message: "Promocode verified successfully",
+      data: {
+        couponId: coupon._id,
+        brandId: coupon.brandId,
+        subscriptionId: coupon.subscriptionId,
+        mode: coupon.mode,
+        promocode: coupon.promocode,
+        newPrice: coupon.newPrice,
+        expiredAt: coupon.expiredAt,
+        hasUsed: coupon.hasUsed,
+      },
+    });
+  } catch (error) {
+    console.error("verifyBrandCoupon error:", error);
+
+    return res.status(500).json({
+      success: false,
+      verified: false,
+      message: "Failed to verify promocode",
+      error: error.message,
+    });
+  }
+}
+
 
 module.exports = {
   sendSignupOtp,
   verifyOtpSignUp,
   saveBrandOnboarding,
   signInBrand,
+  uploadBrandProfilePic,
   sendOtpForgotBrand,
   verifyOtpForgotBrand,
   updatePasswordBrand,
@@ -1380,5 +1581,5 @@ module.exports = {
   getBrandLiteById,
   getBrandProfile,
   updateBrandProfile,
+  verifyBrandCoupon
 };
-
